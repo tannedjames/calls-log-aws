@@ -1,0 +1,124 @@
+# ---------------------------------------------------------------------------
+# callocr / calls-log
+#
+# Rule of thumb: commit the CODE and the TEMPLATE. Never commit employee data,
+# generated output, virtual environments, or credentials.
+# ---------------------------------------------------------------------------
+
+# --- Virtual environments (~50k files, hundreds of MB) ---------------------
+.venv/
+.venv-1/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Python bytecode / build artefacts -------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Test / tooling caches -------------------------------------------------
+.pytest_cache/
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- EMPLOYEE DATA — do not publish ----------------------------------------
+# input_images holds call-log screenshots containing customer phone numbers
+# and employee call history. output holds their working hours. Both are
+# personal data about real people; neither belongs on GitHub.
+# NOTE the "/*" form, not "input_images/". Git does not descend into an
+# excluded DIRECTORY, so a later "!input_images/.gitkeep" would never be
+# reconsidered. Excluding the CONTENTS instead lets the negation work, which
+# keeps the empty folders present in a fresh clone.
+input_images/*
+output/*
+!input_images/.gitkeep
+!output/.gitkeep
+
+# Synthetic Set (tools/gen_synth.py): fictional, but generated output that
+# the seed rebuilds, so it is never committed.
+synthetic/
+
+# Per-run reports (contain parsed call rows)
+review_report*.csv
+processing_log*.json
+*.log
+
+# Safety net: screenshots or workbooks saved ANYWHERE else in the repo (a copy
+# on the root, a test folder, ...) are employee data too. No image or workbook
+# is tracked except the blank day-sheet template.
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+*.heic
+*.xlsx
+*.xls
+!/sprs.xlsx
+/*.csv
+
+# Employee names -> Google Sheets IDs. Committed WebAppSync.gs reads them from
+# this file; Employees.example.gs is the committed, fake-valued template.
+apps_script/Employees.gs
+# One-off backups / live patches of the Apps Script file carry the same IDs.
+apps_script/*.bak*
+apps_script/live_patch_*
+
+# --- CREDENTIALS -----------------------------------------------------------
+# The Apps Script shared secret and the deployed /exec URL. Anyone holding
+# both can write to every employee's spreadsheet. Template:
+# secrets_local.example.py.
+secrets_local.py
+.env
+.env.*
+*credentials*.json
+*client_secret*.json
+token.json
+
+# --- Model caches ----------------------------------------------------------
+# PaddleOCR downloads ~200 MB of models on first run. They live in
+# ~/.paddlex by default, but ignore any local copy too.
+.paddlex/
+.paddleocr/
+models/
+
+# --- Office / OS cruft -----------------------------------------------------
+# Excel lock files (created while a workbook is open). Note: sprs.xlsx IS
+# tracked — it is the day-sheet template, not output.
+~$*.xlsx
+~$*.xls
+*.tmp
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# --- Editors / IDEs --------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.history/
+
+# --- Claude Code personal settings -----------------------------------------
+.claude/settings.local.json
+
+# --- graphify knowledge graph (local build output) --------------------------
+# Rebuilt by `graphify update .`; holds extraction caches and machine paths.
+# Remove this line if the team decides to share graph.json.
+graphify-out/

@@ -1,0 +1,37 @@
+# Version ranges only. Install from requirements.lock instead, which pins the
+# exact, hashed versions the PC and the Linux image share:
+#     python -m pip install --require-hashes -r requirements.lock
+# This file is the input for regenerating the lock (docs/TECHNICAL.md §2).
+
+# Core (always required)
+numpy>=1.24,<3
+Pillow>=10.0
+openpyxl>=3.1
+
+# OCR — install exactly ONE engine's framework. PaddleOCR is the default in
+# config.py and gives by far the best results on Japanese call-log screens.
+#
+# IMPORTANT: do not install easyocr (torch) alongside paddlepaddle unless you
+# genuinely need both. Each ships its own Intel OpenMP runtime, and loading two
+# of them into one Python process on Windows crashes or raises a phantom
+# KeyboardInterrupt. ocr.py refuses to do it, but the safest fix is to not have
+# both in the venv:
+#     pip uninstall easyocr torch torchvision
+paddleocr>=3.0
+paddlepaddle>=3.0  # CPU build; for GPU install paddlepaddle-gpu instead
+
+# Photo preprocessing: perspective-rectifies photos of phone screens.
+# Not optional in practice — without it, photos are OCR'd with the desk still
+# in frame and accuracy collapses.
+# Pinned, not a range: paddlex pins opencv-contrib-python==4.10.0.84, and both
+# packages install the same `cv2` module. A newer opencv-python (5.x) would
+# overwrite paddlex's copy, so the two versions must stay equal.
+opencv-python==4.10.0.84
+
+# --- Alternative OCR backends (only if you are NOT using paddle) ---
+# easyocr>=1.7
+# pytesseract>=0.3.10  # also requires the `tesseract` binary on your PATH
+#
+# pytesseract additionally enables 90/180/270 rotation detection (OSD) for
+# sideways photos. It is safe to install alongside paddle: it shells out to a
+# separate tesseract.exe process, so there is no OpenMP conflict.
