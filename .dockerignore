@@ -1,0 +1,16 @@
+# Deny everything, then allow only what the runner image needs. Employee data
+# (input_images/, output/), workbooks, apps_script/ and the venv never reach
+# the build context.
+*
+!requirements.lock
+!models.sha256
+!*.py
+!sprs.xlsx
+!tools/
+!cloud/
+
+# Never, even when present: the office PC has these next to the Dockerfile.
+secrets_local.py
+**/secrets_local.py
+**/__pycache__
+**/*.pyc

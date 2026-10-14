@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
+from runtime_env import available_cpus
+
 # ---------------------------------------------------------------------------
 # Credentials live in secrets_local.py, which is gitignored. They used to be
 # hardcoded here, which would have published the Web App secret the moment this
@@ -93,8 +95,10 @@ class Config:
     # Disabling it routes inference through the plain CPU kernels: slower per
     # image, but it actually works. Try True again after a paddle upgrade.
     paddle_enable_mkldnn: bool = False
-    # Worker threads for the CPU kernels.
-    paddle_cpu_threads: int = 10   # paddle's own default; 4 was a self-inflicted 2x
+    # Worker threads for the CPU kernels: paddle's own default of 10 (4 was a
+    # self-inflicted 2x), but never more than the CPUs this process may use,
+    # so a 2-vCPU container or Lambda gets 2 rather than oversubscribing.
+    paddle_cpu_threads: int = field(default_factory=lambda: min(10, available_cpus()))
 
     # ----- Row grouping -----
     # Fraction of the median line height used to grow a row's y-band.

@@ -121,6 +121,44 @@ writing or moving anything. Every call must match; any difference exits with
 code 1. Run it after any change to OCR, preprocessing, parsing or
 `requirements.lock`.
 
+### Runner image (Linux, for AWS)
+
+The same pipeline packaged for AWS Lambda: the `Dockerfile` builds on Lambda's
+Python 3.13 base (Amazon Linux 2023, x86_64 only), pinned by digest.
+
+- **Packages:** installed from `requirements.lock` with `--require-hashes`,
+  plus `mesa-libGL` and `glib2`, which OpenCV needs. If those two ever
+  disappear from Amazon Linux, the fallback is to switch both OpenCV packages
+  to their `-headless` builds in `requirements.txt` and regenerate the lock.
+- **Models:** baked in at build time by `tools/bake_models.py`. It lets the
+  pipeline download its models through `config.py`, then refuses to continue
+  unless every file matches `models.sha256`, which was recorded from the PC. So
+  the image reads pictures with exactly the PC's models and never downloads at
+  run time. `cloud/entrypoint.sh` links them into PaddleX's cache home,
+  `/tmp/paddlex`, because Lambda can write only to `/tmp`.
+- **Threads:** sized to the CPUs the container is given (cgroup quota or CPU
+  affinity), at most 10. On the PC nothing changes: 10 PaddleOCR threads and
+  one OpenMP thread per core.
+- **Privacy:** `.dockerignore` allows only runtime files and always excludes
+  `secrets_local.py`, so building on the office PC is safe.
+
+GitHub Actions (`.github/workflows/runner-image.yml`) builds and checks the
+image on every change to it. It plants decoy private files and proves they
+stay out, checks that `--cpus 1` gives 1 thread, runs `diagnose.py` and
+`check_synth.py` with `--network none --read-only`, and writes the image size
+to the run summary. To build locally with Docker Desktop:
+
+```powershell
+docker build --platform linux/amd64 -t calls-log-runner .
+docker run --rm --network none --read-only --tmpfs /tmp -v "${PWD}\synthetic:/synth:ro" calls-log-runner python3 tools/check_synth.py --dir /synth
+```
+
+To check that this PC's models still match the image's, run
+`.\.venv\Scripts\python.exe tools\bake_models.py --check`. **Changing a model**
+(a new `requirements.lock` or `config.py` model setting): run the pipeline once
+so the new model downloads, run `--write-manifest`, then repeat the Reference
+Set parity check before using the image.
+
 ---
 
 ## 3. Command-line reference
@@ -270,7 +308,7 @@ ocr_confidence_threshold = 0.85             # below this -> flagged for review
 paddle_rec_model_name = "PP-OCRv5_mobile_rec"  # None = heavy server model
 paddle_det_limit_side_len = 960             # 1920 cost ~4x for no gain
 paddle_enable_mkldnn = False                # MUST stay False on Windows (see §8)
-paddle_cpu_threads = 10
+paddle_cpu_threads = 10                     # never more than the CPUs available (containers)
 paddle_use_doc_orientation = True           # landscape images only; turns sideways photos upright
 paddle_use_textline_orientation = False     # ran a model per line for nothing
 
