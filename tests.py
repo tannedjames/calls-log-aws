@@ -817,3 +817,106 @@ def test_synth_truth_never_holds_identical_calls():
         calls = gen_synth.plan(seed, 12, 0, 0)["truth"]["screenshots"]["calls"]
         keys = [(c["start"], c["kind"], c["secs"]) for c in calls]
         assert len(keys) == len(set(keys)), seed
+
+
+# ---------------------------------------------------------------------------
+# Runner image: threads follow the CPUs a container is given; baked models
+# must match models.sha256 exactly (tools/bake_models.py).
+# ---------------------------------------------------------------------------
+
+import config
+import runtime_env
+from tools import bake_models
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("max 100000", None),        # cgroup v2: no quota
+    ("-1 100000", None),         # cgroup v1: no quota
+    ("200000 100000", 2),        # docker --cpus 2
+    ("150000 100000", 2),        # 1.5 CPUs rounds up
+    ("100000 100000", 1),
+    ("50000 100000", 1),         # half a CPU still gets one thread
+    ("0 100000", None),
+    ("", None),
+    ("garbage", None),
+])
+def test_cgroup_cpu_limit_parsing(text, expected):
+    assert runtime_env._cgroup_cpu_limit(text) == expected
+
+
+def _cpus(count, affinity=None, cgroup=None):
+    with ExitStack() as st:
+        st.enter_context(mock.patch.object(runtime_env.os, "cpu_count", return_value=count))
+        st.enter_context(mock.patch.object(runtime_env, "_read_cgroup_cpu_limit", return_value=cgroup))
+        if affinity is None:
+            # Windows has no sched_getaffinity; make Linux runs behave the same.
+            if hasattr(runtime_env.os, "sched_getaffinity"):
+                st.enter_context(mock.patch.object(runtime_env.os, "sched_getaffinity",
+                                                   side_effect=OSError))
+        else:
+            st.enter_context(mock.patch.object(runtime_env.os, "sched_getaffinity",
+                                               create=True, return_value=set(range(affinity))))
+        return runtime_env.available_cpus()
+
+
+def test_cgroup_files_read_and_missing():
+    with mock.patch.object(runtime_env, "open", mock.mock_open(read_data="200000 100000\n"),
+                           create=True):
+        assert runtime_env._read_cgroup_cpu_limit() == 2     # cgroup v2 cpu.max
+    with mock.patch.object(runtime_env, "open", side_effect=OSError, create=True):
+        assert runtime_env._read_cgroup_cpu_limit() is None  # no cgroup: no limit
+
+
+def test_available_cpus_takes_the_tightest_limit():
+    assert _cpus(16) == 16                          # the PC: no limits
+    assert _cpus(16, affinity=4) == 4               # pinned to 4 cores
+    assert _cpus(16, affinity=8, cgroup=2) == 2     # container quota
+    assert _cpus(2, cgroup=4) == 2                  # quota above the machine
+
+
+@pytest.mark.parametrize("cpus, threads", [(16, 10), (10, 10), (2, 2), (1, 1)])
+def test_paddle_threads_are_ten_at_most_and_never_above_the_cpus(cpus, threads):
+    with mock.patch.object(config, "available_cpus", return_value=cpus):
+        assert Config().paddle_cpu_threads == threads
+
+
+def _model_dir(tmp, files):
+    root = Path(tmp) / "official_models"
+    for rel, data in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+    return root
+
+
+def _manifest_for(root, rels):
+    return {rel: bake_models.sha256(root / rel) for rel in rels}
+
+
+def test_model_verify_accepts_exact_files_and_ignores_hoster_metadata():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _model_dir(tmp, {"M/inference.pdiparams": b"weights", "M/inference.yml": b"cfg",
+                                "M/README.md": b"docs", "M/.cache/huggingface/x": b"etag"})
+        manifest = _manifest_for(root, ["M/inference.pdiparams", "M/inference.yml"])
+        assert bake_models.verify(root, manifest) == []
+
+
+def test_model_verify_reports_changed_missing_and_unlisted_files():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _model_dir(tmp, {"M/inference.pdiparams": b"weights", "M/inference.yml": b"cfg"})
+        manifest = _manifest_for(root, ["M/inference.pdiparams", "M/inference.yml"])
+        (root / "M/inference.pdiparams").write_bytes(b"new weights")     # drift
+        (root / "M/inference.yml").unlink()                               # missing
+        (root / "N/inference.json").parent.mkdir(parents=True)
+        (root / "N/inference.json").write_bytes(b"{}")                    # extra model
+        assert bake_models.verify(root, manifest) == [
+            "checksum differs: M/inference.pdiparams",
+            "missing: M/inference.yml",
+            "not in models.sha256: N/inference.json",
+        ]
+
+
+def test_models_manifest_lists_the_three_models_in_use():
+    entries = bake_models.read_manifest(bake_models.MANIFEST.read_text(encoding="utf-8"))
+    assert {rel.split("/")[0] for rel in entries} == {
+        "PP-OCRv6_medium_det", "PP-OCRv5_mobile_rec", "PP-LCNet_x1_0_doc_ori"}
+    assert all(len(d) == 64 for d in entries.values())

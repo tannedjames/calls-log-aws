@@ -1,0 +1,14 @@
+# SHA-256 of every OCR model file the pipeline uses (PaddleX official_models/).
+# Recorded from a working install: python tools/bake_models.py --write-manifest
+# The runner image build fails unless the models it downloads match exactly.
+e49f6be2fe4034232b05fb80d983a7b9bde4592d4a52812129c9a348057d3147  PP-LCNet_x1_0_doc_ori/config.json
+3580978602f309c3554508dd85d4fe09b73a7e0d80d7f9e63258f5b72c390c69  PP-LCNet_x1_0_doc_ori/inference.json
+e8d6e7c5d264507e40e58a655779059d616b20d7441ea22047d829eb3931989c  PP-LCNet_x1_0_doc_ori/inference.pdiparams
+9e195eb729a8173588cd0e8a852c8b373aa606e79e77b4ac7d8346f5426caf26  PP-LCNet_x1_0_doc_ori/inference.yml
+6df1587ae056f0b987125fc894b17f62ae3a12644fa2488d108f19377da9c1a8  PP-OCRv5_mobile_rec/config.json
+24587345250c7332d0fc6f9a44e794d078cdaeb64c302fef906f325619de2569  PP-OCRv5_mobile_rec/inference.json
+2460da90875937c94db97eba74ae3d9e5d4c4c57c42f1f41531c09a26bcc771a  PP-OCRv5_mobile_rec/inference.pdiparams
+5dfeb2777f6d0db8177d8128a8acfcf6e6276dc4ac73ea3bf0dc06d6a5e85d8e  PP-OCRv5_mobile_rec/inference.yml
+0f1a7ec35da36173529c7a60238b7f7919e3831929c3f700ad90ad4896adecd5  PP-OCRv6_medium_det/inference.json
+85218d2e3d98f5a21c58b4220627be923a97aee5db3cc71f39536ab31ac53960  PP-OCRv6_medium_det/inference.pdiparams
+7298d5ead546584af2504d03355f881ac7a7bc0eb1e282d3e159277c1d0af871  PP-OCRv6_medium_det/inference.yml

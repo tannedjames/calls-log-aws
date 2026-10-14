@@ -1,0 +1,109 @@
+# Builds the runner image and proves it, with no AWS access (Story 1.5):
+# no private files inside, threads follow the CPU limit, and OCR reads the
+# Synthetic Set offline on a read-only filesystem, as on Lambda.
+name: Runner image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - requirements.lock
+      - models.sha256
+      - "*.py"
+      - "cloud/**"
+      - "tools/**"
+      - .github/workflows/runner-image.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - requirements.lock
+      - models.sha256
+      - "*.py"
+      - "cloud/**"
+      - "tools/**"
+      - .github/workflows/runner-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      IMAGE: calls-log-runner:ci
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Plant decoy private files in the build folder
+        # The office PC has these next to the Dockerfile; the image must not.
+        run: |
+          printf 'SHEETS_SYNC_SECRET = "decoy"\nSHEETS_WEBAPP_URL = "decoy"\n' > secrets_local.py
+          mkdir -p apps_script input_images/decoy output
+          echo "// decoy" > apps_script/Employees.gs
+          touch input_images/decoy/shot.jpg output/decoy.xlsx
+
+      - name: Build the image
+        run: docker build --platform linux/amd64 -t "$IMAGE" .
+
+      - name: No private files in the image
+        run: |
+          # "; true" inside: find/ls exit non-zero when nothing matches, but a
+          # failure to run the container itself must still fail this step.
+          found=$(docker run --rm --entrypoint sh "$IMAGE" -c '
+            find / -xdev \( -name secrets_local.py -o -name Employees.gs -o -name decoy.xlsx \) 2>/dev/null
+            ls -d /var/task/input_images /var/task/output /var/task/apps_script 2>/dev/null
+            true
+          ')
+          if [ -n "$found" ]; then
+            echo "::error::private files reached the image:"; echo "$found"; exit 1
+          fi
+          echo "None of secrets_local.py, Employees.gs, input_images/, output/ is in the image."
+
+      - name: Threads follow the container's CPU limit
+        run: |
+          out=$(docker run --rm --cpus 1 "$IMAGE" python3 -c \
+            "import runtime_env, os; from config import CONFIG; print(os.environ['OMP_NUM_THREADS'], CONFIG.paddle_cpu_threads)")
+          echo "Runner has $(nproc) CPUs; in a --cpus 1 container OMP and paddle threads are: $out"
+          [ "$out" = "1 1" ]
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Make a small Synthetic Set (the runner has the font, the image doesn't need one)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q fonts-noto-cjk
+          python -m pip install -q pillow==12.3.0
+          python tools/gen_synth.py --images 2 --photos 1 --sideways 1 --out "$RUNNER_TEMP/synth"
+
+      - name: OCR offline on a read-only filesystem, as a non-root user (like Lambda)
+        run: |
+          run=(docker run --rm --network none --read-only --tmpfs /tmp --cpus 2
+               --user 1000:1000 -v "$RUNNER_TEMP/synth:/synth:ro" "$IMAGE")
+          "${run[@]}" python3 diagnose.py "/synth/Nguyen Van A & 2026-06-01/shot_01.png" | tee diagnose.txt
+          grep -E "usable call rows *: *[1-9]" diagnose.txt
+          "${run[@]}" python3 tools/check_synth.py --dir /synth --threads 2
+
+      - name: Record the image size
+        run: |
+          bytes=$(docker image inspect "$IMAGE" --format '{{.Size}}')
+          gz=$(docker save "$IMAGE" | gzip -1 | wc -c)
+          {
+            echo "### Runner image"
+            echo "| Measure | MB |"
+            echo "|---|---|"
+            echo "| Uncompressed | $((bytes / 1048576)) |"
+            echo "| Compressed (docker save, gzip -1) | $((gz / 1048576)) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          # Lambda refuses container images over 10 GB uncompressed.
+          [ "$bytes" -lt 10737418240 ] || { echo "::error::image exceeds Lambda's 10 GB limit"; exit 1; }
