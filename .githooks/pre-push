@@ -1,0 +1,4 @@
+#!/bin/sh
+# Blocks a push while any tracked file holds employee data or credentials.
+# Enable once per clone:  git config core.hooksPath .githooks
+exec sh "$(dirname "$0")/_run_check.sh"
