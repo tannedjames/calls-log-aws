@@ -43,7 +43,7 @@ ENV PADDLE_PDX_CACHE_HOME=/tmp/paddlex \
     PYTHONUNBUFFERED=1
 
 # The pipeline. .dockerignore lets only runtime files through and always
-# excludes secrets_local.py, so a build on the office PC can't bake it in.
+# excludes secrets_local.py, so a build on the Owner's PC can't bake it in.
 COPY *.py sprs.xlsx ./
 COPY tools/ tools/
 COPY --chmod=0755 cloud/ cloud/
