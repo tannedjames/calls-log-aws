@@ -15,6 +15,10 @@ provider "aws" {
   skip_metadata_api_check     = true
 }
 
+variables {
+  runner_image_tag = "0123456789abcdef0123456789abcdef01234567"
+}
+
 run "data_bucket_is_locked_down" {
   command = plan
 

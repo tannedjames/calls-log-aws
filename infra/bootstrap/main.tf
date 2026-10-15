@@ -27,6 +27,16 @@ locals {
   topics          = "arn:aws:sns:${var.region}:${local.account_id}:calls-log-*"
   budgets         = "arn:aws:budgets::${local.account_id}:budget/calls-log-*"
   tables          = "arn:aws:dynamodb:${var.region}:${local.account_id}:table/calls-log-*"
+  # The Lambda platform (Stories 3.1, 3.7, 4.1). Roles the deploy role creates
+  # live under the path /calls-log/, apart from calls-log-deploy and
+  # calls-log-plan (path /), so it can never edit its own role or the plan
+  # role. Every one of them carries the boundary below.
+  workload_roles = "arn:aws:iam::${local.account_id}:role/calls-log/*"
+  boundary_arn   = "arn:aws:iam::${local.account_id}:policy/calls-log-workload-boundary"
+  functions      = "arn:aws:lambda:${var.region}:${local.account_id}:function:calls-log-*"
+  queues         = "arn:aws:sqs:${var.region}:${local.account_id}:calls-log-*"
+  log_groups     = "arn:aws:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/calls-log-*"
+  alarms         = "arn:aws:cloudwatch:${var.region}:${local.account_id}:alarm:calls-log-*"
 }
 
 # ---------------------------------------------------------------------------
@@ -434,4 +444,235 @@ resource "aws_iam_role_policy" "deploy_tables" {
   name   = "tables"
   role   = aws_iam_role.deploy.id
   policy = data.aws_iam_policy_document.deploy_tables.json
+}
+
+# ---------------------------------------------------------------------------
+# The Lambda platform (Stories 3.1, 3.7, 4.1): functions, the queue, their
+# logs and alarms, and the roles the functions run as.
+#
+# The boundary is the most any of those roles can ever do: this project's
+# data, status table, parameters, queue, alert topic, image and logs, and
+# switching the runner's queue trigger off (the kill switch). The deploy role
+# can create and change roles only under /calls-log/ and only with this
+# boundary attached, and can pass them only to Lambda, so a merged commit
+# cannot mint a role that reaches anything else. The boundary itself lives
+# here, out of the deploy role's reach.
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "workload_boundary" {
+  statement {
+    sid       = "OwnLogs"
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${local.log_groups}:*"]
+  }
+
+  statement {
+    sid       = "Data"
+    actions   = ["s3:ListBucket", "s3:GetObject", "s3:PutObject"]
+    resources = [local.data_bucket_arn, "${local.data_bucket_arn}/*"]
+  }
+
+  statement {
+    sid       = "FolderStatus"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan"]
+    resources = [local.tables]
+  }
+
+  statement {
+    sid       = "Settings"
+    actions   = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = [local.parameters]
+  }
+
+  statement {
+    sid       = "Queue"
+    actions   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]
+    resources = [local.queues]
+  }
+
+  statement {
+    sid       = "Alerts"
+    actions   = ["sns:Publish"]
+    resources = [local.topics]
+  }
+
+  statement {
+    sid       = "Image"
+    actions   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+    resources = [local.ecr_repositories]
+  }
+
+  statement {
+    sid       = "KillSwitch"
+    actions   = ["lambda:UpdateEventSourceMapping", "lambda:GetEventSourceMapping"]
+    resources = ["*"] # mappings are named by UUID; the condition pins the function
+
+    condition {
+      test     = "ArnLike"
+      variable = "lambda:FunctionArn"
+      values   = [local.functions]
+    }
+  }
+
+  statement {
+    sid       = "FindTheTrigger"
+    actions   = ["lambda:ListEventSourceMappings"]
+    resources = ["*"] # this action has no resource-level form
+  }
+}
+
+resource "aws_iam_policy" "workload_boundary" {
+  name        = "calls-log-workload-boundary"
+  description = "The most any calls-log function role may do (permissions boundary)."
+  policy      = data.aws_iam_policy_document.workload_boundary.json
+}
+
+data "aws_iam_policy_document" "deploy_lambda_platform" {
+  statement {
+    sid = "WorkloadRolesWithTheBoundary"
+    actions = [
+      "iam:CreateRole",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:PutRolePermissionsBoundary",
+    ]
+    resources = [local.workload_roles]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PermissionsBoundary"
+      values   = [local.boundary_arn]
+    }
+  }
+
+  statement {
+    sid = "ReadAndRetireWorkloadRoles"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListInstanceProfilesForRole",
+      "iam:ListRoleTags",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:UpdateRoleDescription",
+      "iam:DeleteRole",
+    ]
+    resources = [local.workload_roles]
+  }
+
+  statement {
+    sid       = "PassWorkloadRolesToLambdaOnly"
+    actions   = ["iam:PassRole"]
+    resources = [local.workload_roles]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["lambda.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid = "Functions"
+    actions = [
+      "lambda:CreateFunction",
+      "lambda:DeleteFunction",
+      "lambda:UpdateFunctionCode",
+      "lambda:UpdateFunctionConfiguration",
+      "lambda:PublishVersion",
+      "lambda:Get*",
+      "lambda:List*",
+      "lambda:PutFunctionConcurrency",
+      "lambda:DeleteFunctionConcurrency",
+      "lambda:AddPermission",
+      "lambda:RemovePermission",
+      "lambda:CreateFunctionUrlConfig",
+      "lambda:UpdateFunctionUrlConfig",
+      "lambda:DeleteFunctionUrlConfig",
+      "lambda:TagResource",
+      "lambda:UntagResource",
+    ]
+    resources = [local.functions]
+  }
+
+  statement {
+    sid       = "QueueTriggers"
+    actions   = ["lambda:CreateEventSourceMapping", "lambda:UpdateEventSourceMapping", "lambda:DeleteEventSourceMapping"]
+    resources = ["*"] # mappings are named by UUID; the condition pins the function
+
+    condition {
+      test     = "ArnLike"
+      variable = "lambda:FunctionArn"
+      values   = [local.functions]
+    }
+  }
+
+  statement {
+    sid       = "ReadQueueTriggers"
+    actions   = ["lambda:GetEventSourceMapping", "lambda:ListEventSourceMappings"]
+    resources = ["*"] # read-only
+  }
+
+  statement {
+    sid       = "PullTheImageForAFunction"
+    actions   = ["ecr:GetDownloadUrlForLayer"] # ecr:BatchGetImage is in the ecr policy
+    resources = [local.ecr_repositories]
+  }
+
+  statement {
+    sid = "Queues"
+    actions = [
+      "sqs:CreateQueue",
+      "sqs:DeleteQueue",
+      "sqs:GetQueueAttributes",
+      "sqs:SetQueueAttributes",
+      "sqs:TagQueue",
+      "sqs:UntagQueue",
+      "sqs:ListQueueTags",
+    ]
+    resources = [local.queues]
+  }
+
+  statement {
+    sid = "LogGroups"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:DeleteLogGroup",
+      "logs:PutRetentionPolicy",
+      "logs:DeleteRetentionPolicy",
+      "logs:TagResource",
+      "logs:UntagResource",
+      "logs:ListTagsForResource",
+      "logs:TagLogGroup",
+      "logs:ListTagsLogGroup",
+    ]
+    resources = [local.log_groups, "${local.log_groups}:*"]
+  }
+
+  statement {
+    sid       = "FindLogGroups"
+    actions   = ["logs:DescribeLogGroups"]
+    resources = ["arn:aws:logs:${var.region}:${local.account_id}:log-group:*"]
+  }
+
+  statement {
+    sid = "Alarms"
+    actions = [
+      "cloudwatch:PutMetricAlarm",
+      "cloudwatch:DeleteAlarms",
+      "cloudwatch:DescribeAlarms",
+      "cloudwatch:TagResource",
+      "cloudwatch:UntagResource",
+      "cloudwatch:ListTagsForResource",
+    ]
+    resources = [local.alarms]
+  }
+}
+
+resource "aws_iam_role_policy" "deploy_lambda_platform" {
+  name   = "lambda-platform"
+  role   = aws_iam_role.deploy.id
+  policy = data.aws_iam_policy_document.deploy_lambda_platform.json
 }

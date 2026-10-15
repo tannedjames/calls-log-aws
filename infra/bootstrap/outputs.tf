@@ -16,3 +16,8 @@ output "plan_role_arn" {
 output "github_oidc_provider_arn" {
   value = aws_iam_openid_connect_provider.github.arn
 }
+
+output "workload_boundary_arn" {
+  description = "Permissions boundary every calls-log function role carries (infra/ refers to it by its fixed ARN)."
+  value       = aws_iam_policy.workload_boundary.arn
+}
