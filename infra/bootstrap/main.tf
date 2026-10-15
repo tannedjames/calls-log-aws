@@ -26,6 +26,7 @@ locals {
   parameters      = "arn:aws:ssm:${var.region}:${local.account_id}:parameter/calls-log/*"
   topics          = "arn:aws:sns:${var.region}:${local.account_id}:calls-log-*"
   budgets         = "arn:aws:budgets::${local.account_id}:budget/calls-log-*"
+  tables          = "arn:aws:dynamodb:${var.region}:${local.account_id}:table/calls-log-*"
 }
 
 # ---------------------------------------------------------------------------
@@ -407,4 +408,30 @@ resource "aws_iam_role_policy" "plan_read" {
   name   = "read-only-plan"
   role   = aws_iam_role.plan.id
   policy = data.aws_iam_policy_document.plan_read.json
+}
+
+# The Folder Status table (Story 3.4): create it, read its settings, tag it.
+# No dynamodb:DeleteTable and no item access: only the runner and the intake
+# read and write Folder Status.
+data "aws_iam_policy_document" "deploy_tables" {
+  statement {
+    sid = "ManageTables"
+    actions = [
+      "dynamodb:CreateTable",
+      "dynamodb:UpdateTable",
+      "dynamodb:DescribeTable",
+      "dynamodb:DescribeContinuousBackups",
+      "dynamodb:DescribeTimeToLive",
+      "dynamodb:TagResource",
+      "dynamodb:UntagResource",
+      "dynamodb:ListTagsOfResource",
+    ]
+    resources = [local.tables]
+  }
+}
+
+resource "aws_iam_role_policy" "deploy_tables" {
+  name   = "tables"
+  role   = aws_iam_role.deploy.id
+  policy = data.aws_iam_policy_document.deploy_tables.json
 }
