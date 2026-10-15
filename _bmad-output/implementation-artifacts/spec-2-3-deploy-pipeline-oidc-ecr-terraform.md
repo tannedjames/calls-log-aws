@@ -2,7 +2,7 @@
 title: 'Story 2.3: Deploy pipeline: GitHub OIDC → ECR → Terraform apply'
 type: 'feature'
 created: '2026-10-15'
-status: 'in-review'
+status: 'done'
 route: 'dispatch'
 review_loop_iteration: 0
 baseline_commit: 'cb7ef79eea0cf0fe7b423c611c6477352fded53d'
@@ -106,8 +106,8 @@ context: ['{project-root}/_bmad-output/implementation-artifacts/epic-2-context.m
 - [x] `infra/{versions,main,ecr,outputs}.tf`, `.terraform.lock.hcl`, `tests/ecr.tftest.hcl` -- the root module with ECR.
 - [x] `.github/workflows/deploy.yml` -- plan and deploy jobs as decided.
 - [x] `docs/AWS_SETUP.md`, `docs/TECHNICAL.md`, `_bmad-output/project-context.md` (D-26), AD-13 in the spine -- record the changes.
-- [ ] Bootstrap plan → the Owner approves → apply (`aws login` asked first); set both variables with `gh variable set`.
-- [ ] PR → plan comment and deploy-role refusal → merge → first deploy; dispatch from a branch → refused.
+- [x] Bootstrap plan → the Owner approves → apply (`aws login` asked first); set both variables with `gh variable set`.
+- [x] PR → plan comment and deploy-role refusal → merge → first deploy; dispatch from a branch → refused.
 
 **Acceptance Criteria:**
 - Given `infra/`, when `terraform fmt -check`, `validate` and `test` run, then all pass with no AWS access.
@@ -137,6 +137,39 @@ context: ['{project-root}/_bmad-output/implementation-artifacts/epic-2-context.m
   - Both workflows parse as YAML. The JWT subject decoder works on a made-up token.
   - `run_tests.py`: 128 passed. `check_private_data.py`: OK, 318 files.
 - **Matrix rows:** only live runs can show these (PR, merge, branch dispatch, re-run). They are done after the bootstrap apply, and the results are recorded here.
+- **Live, 2026-10-15:**
+  - **Bootstrap:** the Owner approved the plan (3 add, 1 change: only the deploy trust's `sub`, 0 destroy) and it was applied from this PC; the session was already active, so no `aws login` was needed.
+    - `iam get-role` shows both trusts exactly as designed, and `calls-log-plan`'s only policy is `read-only-plan` with 3 statements.
+    - A fresh plan says "No changes".
+    - The variables `AWS_DEPLOY_ROLE_ARN` and `AWS_PLAN_ROLE_ARN` are set; `PRIVATE_DENYLIST` is still the only secret.
+  - **PR [#5](https://github.com/tannedjames/calls-log-aws/pull/5), run 38701791721 (Terraform plan, green):**
+    - token subject `repo:tannedjames@185595532/calls-log-aws@1419265674:pull_request`, so the inferred PR form is confirmed;
+    - the deploy role was refused: `AccessDenied … Not authorized to perform sts:AssumeRoleWithWebIdentity`;
+    - the plan role signed in (`plan-pr-5`);
+    - offline tests 2 + 4 passed;
+    - the plan comment shows 2 to add (repository and lifecycle policy).
+    - CI's two required checks were green; merged as `c008824`.
+  - **First deploy, run 38702684063 (`workflow_run` after CI green on `main`, 3 min 17 s):**
+    - subject `…:ref:refs/heads/main`;
+    - "Apply complete! Resources: 2 added"; "infra/ matches AWS." (drift check);
+    - 128 unit tests passed inside the image;
+    - pushed `calls-log-runner:c008824ec4d82b442360ee0abd8494cdd2a7f917`, digest `sha256:327acc2d…f9df69`.
+  - **ECR, checked with the CLI:**
+    - IMMUTABLE, scan on push, AES256, tags project/env/managed-by;
+    - the lifecycle rule is exactly "keep newest 2, any status";
+    - one image, manifest `application/vnd.docker.distribution.manifest.v2+json` (a single image manifest that Lambda accepts), **767 MB** compressed, so 2 images cost about $0.14 a month.
+  - **Branch proof, run 38702322804** (`gh workflow run deploy.yml --ref proof-sts-refuses-branch`):
+    - subject `…:ref:refs/heads/proof-sts-refuses-branch`;
+    - *Sign in with the deploy role* failed with `Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity`, after the action's retries;
+    - nothing after it ran. The branch was deleted afterwards.
+  - **Basic scan of the first image:** 0 critical, 15 high, 20 medium, 5 low. All the high ones are Amazon Linux OS packages from the pinned base image: curl/libcurl-minimal, libX11 (pulled in by mesa-libGL), the openssl FIPS and snapsafe libs, pcre2, and rpm. Recorded in deferred work.
+  - **Matrix coverage:**
+    - merge with CI green: run 38702684063;
+    - PR: run 38701791721;
+    - dispatch from a branch: run 38702322804;
+    - CI red or cancelled, and two merges in a row: the job guard and the concurrency settings, not exercised live;
+    - re-run for the same SHA: the `describe-images` branch, not exercised live.
+  - **Cost note:** from now on every merge to `main`, even docs only, pushes a new SHA-tagged image, and ECR keeps the newest 2.
 
 ## Spec Change Log
 
