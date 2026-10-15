@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # Fails closed: secrets_local.py and Employees.gs never exist here, so
       # without the hashed denylist (exported on the office PC) it refuses to
@@ -39,7 +39,7 @@ jobs:
     env:
       IMAGE: calls-log-runner:ci
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Plant decoy private files in the build folder
         # The office PC has these next to the Dockerfile; the image must not.
