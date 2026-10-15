@@ -1,0 +1,266 @@
+# Deploy (Story 2.3). Every pull request gets a `terraform plan` for infra/,
+# posted on the PR, and nothing is applied. Once CI is green on a push to
+# main, the deploy job applies infra/ and pushes the runner image to ECR,
+# tagged with the full git SHA.
+#
+# AWS access is keyless (GitHub OIDC). Each role trusts exactly one token
+# subject: calls-log-deploy only main of this repo, calls-log-plan (read-only)
+# only its pull requests. So a run from any other branch, or from a fork, is
+# refused by STS, whatever this file says. The role ARNs are repository
+# variables, not secrets. No job uses a GitHub environment: that would change
+# the token's subject. Setup and roles: docs/AWS_SETUP.md.
+name: Deploy
+
+on:
+  pull_request:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Redeploy main by hand. From any other branch STS refuses the deploy role,
+  # which is how the refusal is shown (docs/AWS_SETUP.md, section 5).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-2
+  TF_VERSION: 1.16.5
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+
+jobs:
+  plan:
+    name: Terraform plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write       # OIDC token for the read-only plan role
+      pull-requests: write  # the plan comment
+    concurrency:
+      group: plan-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      # Dependabot's runs get read-only tokens (no OIDC, no comment), so they
+      # stop after the offline checks.
+      AWS_STEPS: ${{ github.actor != 'dependabot[bot]' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Format, validate and test (no AWS access)
+        # infra/bootstrap's tests check the CI roles' trust and permissions.
+        run: |
+          terraform fmt -check -recursive infra
+          for dir in infra infra/bootstrap; do
+            terraform -chdir="$dir" init -backend=false
+            terraform -chdir="$dir" validate
+            terraform -chdir="$dir" test
+          done
+
+      - name: The deploy role refuses a pull request
+        if: env.AWS_STEPS == 'true'
+        env:
+          DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: bash .github/scripts/oidc-check.sh --expect-refused "$DEPLOY_ROLE"
+
+      - name: Sign in with the read-only plan role (OIDC)
+        if: env.AWS_STEPS == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          role-session-name: plan-pr-${{ github.event.pull_request.number }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Plan
+        id: plan
+        if: env.AWS_STEPS == 'true'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Read-only role: no lock file, so the plan can't block a deploy.
+          # An init error is captured too, so every failure reaches the PR.
+          set +e
+          {
+            terraform -chdir=infra init -no-color &&
+            terraform -chdir=infra plan -lock=false -no-color -detailed-exitcode
+          } > plan.txt 2>&1
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          case $code in
+            0) result="no changes" ;;
+            2) result="changes to apply on merge" ;;
+            *) result="FAILED" ;;
+          esac
+          {
+            echo "### Terraform plan for \`infra/\`: $result"
+            echo
+            echo "Commit $HEAD_SHA. Nothing is applied until this is merged and CI is green on main."
+            echo
+            echo "<details><summary>Plan output</summary>"
+            echo
+            echo '```'
+            # A comment holds at most 65,536 characters; the end of a plan
+            # carries the summary line and any error.
+            tail -c 60000 plan.txt
+            echo '```'
+            echo "</details>"
+          } > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post the plan on the pull request
+        if: env.AWS_STEPS == 'true' && steps.plan.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        # One comment per PR, edited on every push.
+        run: gh pr comment "$PR" --edit-last --create-if-none --body-file comment.md
+
+      - name: Fail when the plan failed
+        if: env.AWS_STEPS == 'true' && steps.plan.outputs.code == '1'
+        run: |
+          echo "::error::terraform plan failed; the output is on the PR and in the job summary"
+          exit 1
+
+  deploy:
+    name: Apply and push the runner image
+    # workflow_run fires for every CI run on a branch named main, including a
+    # fork's pull request from its own main, so it is narrowed to a green CI
+    # run for a push to this repo's main.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write  # OIDC token for the deploy role
+      actions: read    # a manual run checks CI's result for its commit
+    # One deploy of main at a time, in order, and a running apply is never
+    # cancelled. (CI cancels older runs on main, so an older SHA can't deploy
+    # after a newer one.) A manual run from another branch gets its own group,
+    # so it can't push a waiting deploy of main out of the queue.
+    concurrency:
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      # The commit CI tested; a manual run deploys the branch it was started on.
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.SHA }}
+
+      - name: Token subject (main is the only one the deploy role trusts)
+        run: bash .github/scripts/oidc-check.sh
+
+      - name: Sign in with the deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # After the sign-in, so a run from another branch still shows STS refusing.
+      - name: CI is green for this commit (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" \
+            --event push --limit 1 --json conclusion \
+            --jq 'if length == 0 then "no CI run" elif .[0].conclusion == "" then "still running" else .[0].conclusion end')
+          if [ "$conclusion" != success ]; then
+            echo "::error::CI on main is not green for $SHA ($conclusion), so it is not deployed"
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform apply
+        run: |
+          terraform -chdir=infra init
+          terraform -chdir=infra plan -no-color -out=tfplan | tee plan.txt
+          {
+            echo "### Terraform apply for $SHA"
+            echo '```'
+            grep -E "^(Plan:|No changes)" plan.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          terraform -chdir=infra apply -no-color tfplan
+
+      - name: No drift after the apply
+        run: |
+          if ! terraform -chdir=infra plan -no-color -detailed-exitcode > drift.txt 2>&1; then
+            cat drift.txt
+            echo "::error::infra/ still differs from AWS after the apply (or the plan failed)"
+            exit 1
+          fi
+          echo "infra/ matches AWS."
+
+      - name: Is this commit's image already in ECR?
+        id: image
+        run: |
+          repo=$(terraform -chdir=infra output -raw runner_repository_name)
+          url=$(terraform -chdir=infra output -raw runner_repository_url)
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "ref=$url:$SHA" >> "$GITHUB_OUTPUT"
+          if out=$(aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$SHA" 2>&1); then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$url:$SHA is already in ECR (a re-run); tags are immutable, so it is not rebuilt."
+          elif grep -q ImageNotFoundException <<<"$out"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::$out"; exit 1
+          fi
+
+      - name: Build the runner image
+        if: steps.image.outputs.exists == 'false'
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        # A plain image manifest (no attestations), the kind Lambda runs.
+        run: docker build --platform linux/amd64 --provenance=false --sbom=false -t "$REF" .
+
+      - name: Unit tests inside the image about to be pushed
+        if: steps.image.outputs.exists == 'false'
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: docker run --rm --network none "$REF" python3 -X utf8 run_tests.py
+
+      - name: Push to ECR
+        if: steps.image.outputs.exists == 'false'
+        env:
+          REF: ${{ steps.image.outputs.ref }}
+        run: |
+          registry=${REF%%/*}
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+          docker push "$REF"
+          docker logout "$registry"
+
+      - name: Record the image
+        env:
+          REPO: ${{ steps.image.outputs.repo }}
+        run: |
+          {
+            echo "### Runner image in ECR: $REPO:$SHA"
+            echo '```'
+            aws ecr describe-images --repository-name "$REPO" --image-ids imageTag="$SHA" \
+              --query 'imageDetails[0].{digest: imageDigest, mediaType: imageManifestMediaType, bytes: imageSizeInBytes}' \
+              --output table
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

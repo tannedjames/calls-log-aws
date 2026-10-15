@@ -209,9 +209,12 @@ Dependencies point **only from `cloud/` into the core**. The core never imports 
   - One root module, `infra/`, holds the single `prod` environment, with state in S3 using
     `use_lockfile = true`.
   - Terraform ≥ 1.10, `hashicorp/aws ~> 6.56`.
-  - `apply` runs only from GitHub Actions on `main`, through the OIDC role (trust: this repo,
-    `refs/heads/main`). Humans apply only the one-time bootstrap: the state bucket and the OIDC
-    provider.
+  - `apply` runs only from GitHub Actions on `main`, through the OIDC deploy role (trust: this
+    repo's immutable subject, `refs/heads/main`). Pull requests only plan, through a read-only
+    role that trusts `pull_request`.
+  - Humans apply only the bootstrap: the state bucket, the OIDC provider, and the two CI roles
+    with their permissions. It is re-applied after review whenever a story changes those
+    permissions, so the deploy role never widens itself (D-26).
 
 ### AD-14: Logs and metrics
 - **Binds:** runner, intake; NFR-5, FR-15

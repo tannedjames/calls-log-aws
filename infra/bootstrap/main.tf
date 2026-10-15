@@ -1,11 +1,24 @@
 data "aws_caller_identity" "current" {}
 
 locals {
-  state_bucket = "calls-log-tfstate-${data.aws_caller_identity.current.account_id}"
-  # The subject GitHub puts in the token of a workflow run for a push to main
-  # of this repo. Any other branch, a pull request or a fork gets a different
-  # subject, so STS refuses it.
-  github_subject = "repo:${var.github_repo}:ref:refs/heads/main"
+  account_id   = data.aws_caller_identity.current.account_id
+  state_bucket = "calls-log-tfstate-${local.account_id}"
+  state_key    = "prod/terraform.tfstate"
+  # Both ARNs have fixed formats. Writing them out, instead of reading them
+  # from the resources, lets the IAM policy documents be built at plan time,
+  # which the offline tests (tests/ci_roles.tftest.hcl) need.
+  state_bucket_arn = "arn:aws:s3:::${local.state_bucket}"
+  github_oidc_arn  = "arn:aws:iam::${local.account_id}:oidc-provider/token.actions.githubusercontent.com"
+  # The one token subject each CI role trusts. Deploy: a run on main of this
+  # repo (a push, or CI's workflow_run). Plan: a pull request. Any other
+  # branch, event or repo (forks have other IDs) gets another subject, so STS
+  # refuses it.
+  github_subjects = {
+    deploy = "${var.github_subject_prefix}:ref:refs/heads/main"
+    plan   = "${var.github_subject_prefix}:pull_request"
+  }
+  # Every repository infra/ manages is named calls-log-<component>.
+  ecr_repositories = "arn:aws:ecr:${var.region}:${local.account_id}:repository/calls-log-*"
 }
 
 # ---------------------------------------------------------------------------
@@ -115,13 +128,15 @@ resource "aws_iam_openid_connect_provider" "github" {
   # No thumbprint: AWS checks GitHub's certificate against its own trust store.
 }
 
-data "aws_iam_policy_document" "deploy_trust" {
+data "aws_iam_policy_document" "github_trust" {
+  for_each = local.github_subjects
+
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.github_oidc_arn]
     }
 
     condition {
@@ -133,7 +148,7 @@ data "aws_iam_policy_document" "deploy_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [local.github_subject]
+      values   = [each.value]
     }
   }
 }
@@ -141,23 +156,30 @@ data "aws_iam_policy_document" "deploy_trust" {
 resource "aws_iam_role" "deploy" {
   name                 = "calls-log-deploy"
   description          = "GitHub Actions on main of ${var.github_repo}, via OIDC. No keys."
-  assume_role_policy   = data.aws_iam_policy_document.deploy_trust.json
+  assume_role_policy   = data.aws_iam_policy_document.github_trust["deploy"].json
   max_session_duration = 3600
+
+  depends_on = [aws_iam_openid_connect_provider.github]
 }
 
-# For now the deploy role can reach only the prod state (and its lock file).
-# Story 2.3 grants what the infra/ stack needs.
+# ---------------------------------------------------------------------------
+# What the deploy role may do. These permissions live here, applied by hand
+# after review, so the role can never widen itself: a story that adds an AWS
+# service to infra/ adds its permissions here (docs/AWS_SETUP.md, section 3).
+# ---------------------------------------------------------------------------
+
+# The prod state and its lock file.
 data "aws_iam_policy_document" "deploy_state" {
   statement {
     sid       = "ListStateBucket"
     actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.state.arn]
+    resources = [local.state_bucket_arn]
   }
 
   statement {
     sid       = "ReadWriteProdState"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.state.arn}/prod/*"]
+    resources = ["${local.state_bucket_arn}/prod/*"]
   }
 }
 
@@ -165,4 +187,100 @@ resource "aws_iam_role_policy" "deploy_state" {
   name   = "terraform-state"
   role   = aws_iam_role.deploy.id
   policy = data.aws_iam_policy_document.deploy_state.json
+}
+
+# ECR (Story 2.3): manage the calls-log-* repositories and push images to them.
+data "aws_iam_policy_document" "deploy_ecr" {
+  statement {
+    sid       = "EcrSignIn"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"] # this action has no resource-level form
+  }
+
+  statement {
+    sid = "ManageRepositories"
+    actions = [
+      "ecr:CreateRepository",
+      "ecr:DeleteRepository",
+      "ecr:DescribeRepositories",
+      "ecr:PutImageTagMutability",
+      "ecr:PutImageScanningConfiguration",
+      "ecr:PutLifecyclePolicy",
+      "ecr:GetLifecyclePolicy",
+      "ecr:DeleteLifecyclePolicy",
+      "ecr:TagResource",
+      "ecr:UntagResource",
+      "ecr:ListTagsForResource",
+    ]
+    resources = [local.ecr_repositories]
+  }
+
+  statement {
+    sid = "PushImages"
+    # The push set from the ECR user guide, plus DescribeImages so a re-run
+    # can see its tag already exists.
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages",
+    ]
+    resources = [local.ecr_repositories]
+  }
+}
+
+resource "aws_iam_role_policy" "deploy_ecr" {
+  name   = "ecr"
+  role   = aws_iam_role.deploy.id
+  policy = data.aws_iam_policy_document.deploy_ecr.json
+}
+
+# ---------------------------------------------------------------------------
+# Plan role: what a pull request's `terraform plan` gets. A pull request can
+# change the workflow it runs, so this role must be harmless in any hands:
+# it reads the state and describes resources, and can't write anything, pull
+# images, or read data or parameters. Plans run with -lock=false, so it never
+# needs to write the lock file.
+# ---------------------------------------------------------------------------
+
+resource "aws_iam_role" "plan" {
+  name                 = "calls-log-plan"
+  description          = "GitHub Actions pull requests of ${var.github_repo}, via OIDC: read-only terraform plan."
+  assume_role_policy   = data.aws_iam_policy_document.github_trust["plan"].json
+  max_session_duration = 3600
+
+  depends_on = [aws_iam_openid_connect_provider.github]
+}
+
+data "aws_iam_policy_document" "plan_read" {
+  statement {
+    sid       = "ListStateBucket"
+    actions   = ["s3:ListBucket"]
+    resources = [local.state_bucket_arn]
+  }
+
+  statement {
+    sid       = "ReadProdState"
+    actions   = ["s3:GetObject"]
+    resources = ["${local.state_bucket_arn}/${local.state_key}"]
+  }
+
+  statement {
+    sid = "DescribeRepositories"
+    actions = [
+      "ecr:DescribeRepositories",
+      "ecr:GetLifecyclePolicy",
+      "ecr:ListTagsForResource",
+    ]
+    resources = [local.ecr_repositories]
+  }
+}
+
+resource "aws_iam_role_policy" "plan_read" {
+  name   = "read-only-plan"
+  role   = aws_iam_role.plan.id
+  policy = data.aws_iam_policy_document.plan_read.json
 }

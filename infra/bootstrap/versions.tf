@@ -1,7 +1,9 @@
-# Bootstrap: applied by hand once from the Owner's PC (docs/AWS_SETUP.md).
-# It creates what every later deploy needs before GitHub can deploy anything:
-# the Terraform state bucket and GitHub's keyless (OIDC) way into AWS. Its own
-# state stays local and gitignored, because it creates the state bucket.
+# Bootstrap: applied by hand from the Owner's PC (docs/AWS_SETUP.md), never by
+# CI. It creates what every deploy needs before GitHub can deploy anything:
+# the Terraform state bucket, GitHub's keyless (OIDC) way into AWS, and the two
+# CI roles with their permissions. It is re-applied, after review, only when a
+# story changes those permissions. Its own state stays local and gitignored,
+# because it creates the state bucket.
 
 terraform {
   required_version = ">= 1.10"
