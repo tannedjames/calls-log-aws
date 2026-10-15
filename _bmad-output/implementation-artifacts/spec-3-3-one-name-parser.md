@@ -49,6 +49,7 @@ context: ['{project-root}/_bmad-output/planning-artifacts/architecture/architect
 **Execution:**
 - [x] `cloud/__init__.py`, `cloud/naming.py` -- the module.
 - [x] `resync_output.py` -- shared parser, configured sheet.
+- [x] `tools/norm_cases.json`, `tools/check_norm_parity.js`, CI step -- the parity proof, rerunnable.
 - [x] `tests.py` -- 43 cases: Web App parity (17 strings), main's forms, impossible dates, NFC/NFD, prefix matching, the JSON allowlist, output names, keys, resync unchanged versus the old regex, unpadded dates, NFC/NFD merge, configured sheet, and AD-1.
 
 **Acceptance Criteria:**
@@ -60,8 +61,7 @@ context: ['{project-root}/_bmad-output/planning-artifacts/architecture/architect
 ## Implementation Notes
 
 - 2026-10-15, built inline while Story 2.4 (#9) waited for the Owner's bootstrap apply.
-- **Fixture:** `norm_fixture.js` extracts `function norm_` from `WebAppSync.gs` with a regex, evaluates it, and prints each input and output with non-ASCII escaped. The 17 strings and outputs are in `tests.py` (`_NORM_FROM_WEBAPP`). Re-run it if `norm_` ever changes:
-  `node norm_fixture.js apps_script/WebAppSync.gs`. The script lives in this session's scratchpad; its logic is the three lines described.
+- **Fixture:** the 17 cases live in `tools/norm_cases.json`. `tools/check_norm_parity.js` evaluates `function norm_` from `WebAppSync.gs` on them under Node: 17/17 locally (Node 24), and CI runs it in *Tests, image and OCR*. `tests.py` checks `naming.norm` against the same file. So if the reference copy of `norm_` ever changes, CI fails until the cases (and `naming.norm`) follow.
 - **Verified:** `run_tests.py` 171 passed (128 before). `check_private_data.py` OK.
 - **For Story 4.2:** `inbox_key` doesn't sanitise file names. Intake must accept only base names with an image extension before building a key.
 

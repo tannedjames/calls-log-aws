@@ -1064,29 +1064,13 @@ import main
 import resync_output
 from cloud import naming
 
-# Expected values from the real norm_() in apps_script/WebAppSync.gs, run under
-# Node 24 on 2026-10-15 (the script is in the Story 3.3 spec). They pin the
-# edges where Python's defaults differ from JavaScript's: U+0085 and U+001F are
-# not JS whitespace, U+FEFF is, and only U+0300-U+036F marks are dropped.
-_NORM_FROM_WEBAPP = [
-    ("Nguyen Van A", "nguyen van a"),
-    ("Nguyễn Văn A", "nguyen van a"),
-    ("Nguyễn Văn A", "nguyen van a"),
-    ("TRẦN THỊ B", "tran thi b"),
-    ("Đỗ Văn C", "do van c"),
-    ("  Lê   Thị\tD  ", "le thi d"),
-    ("Phạm Văn　E", "pham van e"),
-    ("﻿Hoàng F", "hoang f"),
-    ("Ngô Gia", "ngo gia"),
-    ("Bùi\u0085X", "bui\u0085x"),
-    ("Vũ\u001fY", "vu\u001fy"),
-    ("ガギグ", "ガギグ"),
-    ("a᷀b", "a᷀b"),
-    ("İstanbul", "istanbul"),
-    ("ΟΔΥΣΣΕΥΣ", "οδυσσευς"),
-    ("", ""),
-    ("Nguyen Van A & 2026-06-01", "nguyen van a & 2026-06-01"),
-]
+# Expected values from the real norm_() in apps_script/WebAppSync.gs:
+# tools/check_norm_parity.js runs it under Node on the same cases (CI does too).
+# They pin the edges where Python's defaults differ from JavaScript's: U+0085
+# and U+001F are not JS whitespace, U+FEFF is, and only U+0300-U+036F marks are
+# dropped.
+_NORM_FROM_WEBAPP = [tuple(c) for c in json.loads(
+    (Path(__file__).resolve().parent / "tools" / "norm_cases.json").read_text(encoding="utf-8"))]
 
 
 @pytest.mark.parametrize("text,expected", _NORM_FROM_WEBAPP)
