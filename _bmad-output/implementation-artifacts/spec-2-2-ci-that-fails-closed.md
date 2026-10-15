@@ -2,7 +2,7 @@
 title: 'Story 2.2: CI that tests, fails closed on private data, and checks OCR'
 type: 'feature'
 created: '2026-10-15'
-status: 'in-review'
+status: 'done'
 route: 'dispatch'
 review_loop_iteration: 0
 baseline_commit: '38486975945f07b886c117d8caddebf6cf6b407c'
@@ -44,7 +44,7 @@ context: ['{project-root}/_bmad-output/implementation-artifacts/epic-2-context.m
 - Review (inline): Dependabot PRs can only read *Dependabot* secrets, so the docs now set `PRIVATE_DENYLIST` in both stores (`gh secret set ... --app dependabot`).
 - CI run 38689546427 on `ddf461f`: **Tests, image and OCR: success** (128 tests, threads `1 1`, Synthetic Set all match). **Privacy gate: failure**, `FAILED CLOSED: ... no PRIVATE_DENYLIST was given`, exactly as intended without the secret.
 - Ruleset `25140628` "main: pull requests with green CI" is active (the plan allows it on this private repo): no deletion, no force-push, PRs required (0 approvals), required checks "Privacy gate" and "Tests, image and OCR", admin bypass only inside PRs. `rules/branches/main` confirms all four.
-- **Waiting on the Owner:** run `--export-denylist` on the office PC and set `PRIVATE_DENYLIST` (Actions and Dependabot secrets). The privacy job then turns green, and this spec moves to done.
+- **Closed 2026-10-15.** There is no separate office PC: the Owner's PC (this one) is the only machine. The private files were created here (`apps_script/Employees.gs` built from the live Apps Script project, where the map sits inline in the main file; `secrets_local.py` filled in by the Owner). The full local check then covered 34 values (16 names, 15 Sheet IDs, the secret, the URL and the deployment ID) and found nothing. 34 hashed entries were exported and set as the `PRIVATE_DENYLIST` Actions and Dependabot secrets; the export file was deleted. The failed privacy jobs were re-run and went green; PRs #3, #2 and #1 were merged. Dependabot's v7 pins were verified against the official tags. CI on `main` (`94099bf`) is green on both jobs.
 
 ## Review Triage Log
 

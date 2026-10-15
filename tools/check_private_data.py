@@ -11,7 +11,7 @@ not ignored) for:
     ANY tracked file is caught. Values are never printed.
 
 Where the private files don't exist (CI, other PCs), a hashed denylist stands
-in for them: keyed hashes of the same values, exported on the office PC, so
+in for them: keyed hashes of the same values, exported on the Owner's PC, so
 the values themselves never leave it. It comes from the environment variable
 PRIVATE_DENYLIST (a GitHub secret) or --denylist FILE.
 
@@ -19,7 +19,7 @@ Usage:
     python tools/check_private_data.py                       # everything publishable (before pushing)
     python tools/check_private_data.py --staged              # what the next commit would add
     python tools/check_private_data.py --fail-closed         # CI: no private files and no denylist = FAIL
-    python tools/check_private_data.py --export-denylist F   # office PC: write the hashed denylist to F
+    python tools/check_private_data.py --export-denylist F   # Owner's PC: write the hashed denylist to F
 
 Exit code 0 = clean, 1 = something private would be published (or, with
 --fail-closed, nothing to check against), 2 = bad usage.
@@ -186,7 +186,7 @@ def main(argv=None) -> int:
     values = private_values()
     if args.export_denylist:
         if not have_private_files():
-            print("Export needs secrets_local.py and apps_script/Employees.gs: run it on the office PC.")
+            print("Export needs secrets_local.py and apps_script/Employees.gs: run it on the Owner's PC, where they are.")
             return 2
         deny = export_denylist(values)
         args.export_denylist.write_text(json.dumps(deny), encoding="utf-8")
@@ -240,7 +240,7 @@ def main(argv=None) -> int:
         elif args.fail_closed:
             print("FAILED CLOSED: secrets_local.py / apps_script/Employees.gs are missing and no "
                   "PRIVATE_DENYLIST was given, so names, IDs and the secret can't be checked. "
-                  "Export it on the office PC (docs/TECHNICAL.md, section 10).")
+                  "Export it on the Owner's PC (docs/TECHNICAL.md, section 10).")
             return 1
         else:
             print("note: secrets_local.py or apps_script/Employees.gs is missing, "

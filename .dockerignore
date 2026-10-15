@@ -9,7 +9,7 @@
 !tools/
 !cloud/
 
-# Never, even when present: the office PC has these next to the Dockerfile.
+# Never, even when present: the Owner's PC has these next to the Dockerfile.
 secrets_local.py
 **/secrets_local.py
 **/__pycache__
