@@ -1045,3 +1045,194 @@ def test_gate_with_denylist_blocks_a_planted_name_in_a_tracked_file():
 def test_gate_refuses_a_malformed_denylist():
     code, said = _gate(["--fail-closed"], {"notes.md": "x"}, '{"format": "something else"}')
     assert code == 1 and "can't be used" in said
+
+
+# ---------------------------------------------------------------------------
+# Folder names (cloud/naming.py, AD-8): one parser for upload, processing,
+# resync and import. All names are fictional.
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+import re as _re
+import tempfile
+import unicodedata
+from pathlib import Path
+
+import openpyxl
+
+import main
+import resync_output
+from cloud import naming
+
+# Expected values from the real norm_() in apps_script/WebAppSync.gs, run under
+# Node 24 on 2026-10-15 (the script is in the Story 3.3 spec). They pin the
+# edges where Python's defaults differ from JavaScript's: U+0085 and U+001F are
+# not JS whitespace, U+FEFF is, and only U+0300-U+036F marks are dropped.
+_NORM_FROM_WEBAPP = [
+    ("Nguyen Van A", "nguyen van a"),
+    ("Nguyễn Văn A", "nguyen van a"),
+    ("Nguyễn Văn A", "nguyen van a"),
+    ("TRẦN THỊ B", "tran thi b"),
+    ("Đỗ Văn C", "do van c"),
+    ("  Lê   Thị\tD  ", "le thi d"),
+    ("Phạm Văn　E", "pham van e"),
+    ("﻿Hoàng F", "hoang f"),
+    ("Ngô Gia", "ngo gia"),
+    ("Bùi\u0085X", "bui\u0085x"),
+    ("Vũ\u001fY", "vu\u001fy"),
+    ("ガギグ", "ガギグ"),
+    ("a᷀b", "a᷀b"),
+    ("İstanbul", "istanbul"),
+    ("ΟΔΥΣΣΕΥΣ", "οδυσσευς"),
+    ("", ""),
+    ("Nguyen Van A & 2026-06-01", "nguyen van a & 2026-06-01"),
+]
+
+
+@pytest.mark.parametrize("text,expected", _NORM_FROM_WEBAPP)
+def test_naming_norm_matches_the_web_app(text, expected):
+    assert naming.norm(text) == expected
+
+
+@pytest.mark.parametrize("folder,name,date", [
+    ("Nguyen Van A & 2026-06-01", "Nguyen Van A", "2026-06-01"),
+    ("Nguyen Van A & 2026-6-1", "Nguyen Van A", "2026-06-01"),       # unpadded, as main accepts
+    ("Nguyen Van A 2026-06-01", "Nguyen Van A", "2026-06-01"),       # no "&"
+    ("Nguyễn Văn A - 2026-06-01", "Nguyễn Văn A", "2026-06-01"),
+    ("Tran Thi B & 2028-02-29", "Tran Thi B", "2028-02-29"),         # leap day
+])
+def test_naming_parses_the_folder_names_main_accepts(folder, name, date):
+    day = naming.parse(folder)
+    assert (day.name, day.date, day.key) == (name, date, f"{name} & {date}")
+    assert (day.name, day.date) == main.parse_name_date(folder)
+
+
+@pytest.mark.parametrize("folder", [
+    "Nguyen Van A & 2026-02-30", "Nguyen Van A & 2026-13-01", "Tran Thi B & 2027-02-29",
+    "Nguyen Van A", "& 2026-06-01", "",
+])
+def test_naming_rejects_impossible_or_missing_parts(folder):
+    assert naming.parse(folder) is None
+
+
+def test_naming_nfc_and_nfd_give_one_person_day():
+    nfc = "Nguyễn Văn A & 2026-06-01"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfd != nfc
+    assert naming.parse(nfd) == naming.parse(nfc)
+    assert naming.parse(nfd).key == nfc   # keys are NFC
+
+
+def test_naming_prefix_match_is_the_web_apps():
+    keys = ["nguyen van a", "nguyen van", "tran thi b"]   # stored order matters
+    assert naming.matching_prefix("Nguyễn Văn A", keys) == "nguyen van a"
+    assert naming.matching_prefix("NGUYEN VAN AN", keys) == "nguyen van a"   # prefix, first key wins
+    assert naming.matching_prefix("Nguyen Van Binh", keys) == "nguyen van"
+    assert naming.matching_prefix("Trần Thị B (2)", keys) == "tran thi b"
+    assert naming.matching_prefix("Le Van C", keys) is None
+    assert naming.matching_prefix("Nguyen Van A", ["Nguyen Van A"]) is None   # keys aren't folded, as in matchId_
+
+
+def test_naming_prefixes_json_must_be_a_list_of_names():
+    assert naming.prefixes_from_json('["nguyen van a", "tran thi b"]') == ["nguyen van a", "tran thi b"]
+    for bad in ('{"a": 1}', '["ok", 3]', '["ok", ""]', '"unset"'):
+        try:
+            naming.prefixes_from_json(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+
+
+@pytest.mark.parametrize("stem,expected", [
+    ("Nguyen Van A & 2026-06-01", ("Nguyen Van A", "2026-06-01", 0)),
+    ("Nguyen Van A & 2026-06-01(3)", ("Nguyen Van A", "2026-06-01", 3)),
+    ("Nguyen Van A & 2026-6-1", ("Nguyen Van A", "2026-06-01", 0)),
+    ("Nguyen Van A & 2026-06-01 redo", None),
+    ("Nguyen Van A & 2026-02-30", None),
+    ("Report 2026-06-01", None),
+])
+def test_naming_reads_day_sheet_file_names(stem, expected):
+    got = naming.parse_output_stem(stem)
+    assert (got and (got[0].name, got[0].date, got[1])) == expected
+
+
+def test_naming_keys_and_upload_ids():
+    when = _dt.datetime(2026, 6, 1, 8, 30, 5, tzinfo=_dt.timezone.utc)
+    uid = naming.new_upload_id(when)
+    assert uid.startswith("20260601T083005Z-") and naming.is_upload_id(uid)
+    assert not naming.is_upload_id("../results") and not naming.is_upload_id(uid + "x")
+    day = naming.parse("Nguyen Van A & 2026-06-01")
+    assert naming.result_key(day) == "results/Nguyen Van A & 2026-06-01.xlsx"
+    assert naming.inbox_key(uid, "shot.jpg") == f"inbox/{uid}/shot.jpg"
+    assert naming.work_key(uid, "shot.jpg") == f"work/{uid}/shot.jpg.json"
+
+
+# resync_output.py reads file names through cloud/naming.py since Story 3.3.
+
+_OLD_RESYNC_RE = _re.compile(r"^(?P<name>.+) & (?P<date>\d{4}-\d{2}-\d{2})(?:\((?P<dup>\d+)\))?$")
+
+
+def _old_collect(stems):
+    """resync_output.collect_files before Story 3.3, for comparison."""
+    chosen = {}
+    for stem in sorted(stems):
+        m = _OLD_RESYNC_RE.match(stem)
+        if m:
+            key, rank = (m.group("name"), m.group("date")), int(m.group("dup") or 0)
+            if key not in chosen or rank < chosen[key][0]:
+                chosen[key] = (rank, stem)
+    return {k: v[1] for k, v in chosen.items()}
+
+
+def _resync_collect(stems):
+    with tempfile.TemporaryDirectory() as d:
+        for stem in stems:
+            (Path(d) / f"{stem}.xlsx").write_bytes(b"")
+        with mock.patch.object(resync_output, "log"):
+            return {k: p.stem for k, p in resync_output.collect_files(Path(d)).items()}
+
+
+def test_resync_choice_unchanged_for_correctly_named_files():
+    stems = ["Nguyen Van A & 2026-06-01", "Nguyen Van A & 2026-06-01(1)",
+             "Tran Thi B & 2026-06-02(2)", "Tran Thi B & 2026-06-02(1)",
+             "Le Van C & 2026-06-03(1)"]
+    assert _resync_collect(stems) == _old_collect(stems)
+
+
+def test_resync_reads_unpadded_dates_and_skips_bad_names():
+    got = _resync_collect(["Pham Van D & 2026-6-3", "Nguyen Van A & 2026-02-30",
+                           "Report 2026-06-01 backup", "~$Nguyen Van A & 2026-06-01"])
+    assert got == {("Pham Van D", "2026-06-03"): "Pham Van D & 2026-6-3"}
+
+
+def test_resync_merges_nfc_and_nfd_names_of_one_day():
+    nfc = "Nguyễn Văn E & 2026-06-04"
+    got = _resync_collect([unicodedata.normalize("NFD", nfc) + "(1)", nfc])
+    assert got == {("Nguyễn Văn E", "2026-06-04"): nfc}
+
+
+def test_resync_reads_the_configured_sheet_not_the_active_one():
+    wb = openpyxl.Workbook()
+    other = wb.active
+    other.title = "Notes"
+    other.cell(CONFIG.first_session_row, 2).value = "07:00"
+    other.cell(CONFIG.first_session_row, 3).value = "07:30"
+    ws = wb.create_sheet(CONFIG.sheet_name)
+    ws.cell(CONFIG.first_session_row, 2).value = "08:00"
+    ws.cell(CONFIG.first_session_row, 3).value = "10:01"
+    wb.active = 0   # the "Notes" sheet is the active one
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "Nguyen Van A & 2026-06-01.xlsx"
+        wb.save(path)
+        sessions = resync_output.read_sessions(path)
+    assert [(s.start_time, s.end_time) for s in sessions] == [("08:00", "10:01")]
+
+
+def test_core_modules_never_import_cloud():
+    """AD-1: dependencies point only from cloud/ into the core."""
+    core = ["main", "image_preprocess", "ocr", "parser", "session_builder", "excel_writer",
+            "sheets_sync", "config", "runtime_env", "review_report"]
+    root = Path(__file__).resolve().parent
+    for name in core:
+        text = (root / f"{name}.py").read_text(encoding="utf-8")
+        assert not _re.search(r"^\s*(from|import)\s+cloud\b", text, _re.M), f"{name}.py imports cloud"
