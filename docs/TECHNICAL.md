@@ -142,6 +142,9 @@ Python 3.13 base (Amazon Linux 2023, x86_64 only), pinned by digest.
 - **Privacy:** `.dockerignore` allows only runtime files and always excludes
   `secrets_local.py`, so building on the office PC is safe.
 
+Measured on 2026-10-15: 2.2 GB uncompressed and about 0.8 GB compressed, well
+under Lambda's 10 GB limit for container images.
+
 GitHub Actions (`.github/workflows/runner-image.yml`) builds and checks the
 image on every change to it. It plants decoy private files and proves they
 stay out, checks that `--cpus 1` gives 1 thread, runs `diagnose.py` and
