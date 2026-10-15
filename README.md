@@ -273,3 +273,5 @@ internet. After that it works offline, apart from the Google Sheets step.
   troubleshooting, known limitations, and how the Google side works.
 - [`apps_script/README_SETUP.md`](apps_script/README_SETUP.md): setting up or
   updating the Google Web App.
+- [`docs/AWS_SETUP.md`](docs/AWS_SETUP.md): the one-time manual steps for the
+  AWS account that runs the cloud version.

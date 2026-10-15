@@ -122,6 +122,18 @@ desktop.ini
 # --- Claude Code personal settings -----------------------------------------
 .claude/settings.local.json
 
+# --- Terraform ---------------------------------------------------------------
+# State lists every resource and can hold sensitive values; the bootstrap's
+# stays on the Owner's PC, the rest lives in the state bucket. Plans can hold
+# values too. Keep .terraform.lock.hcl (the provider pins) committed.
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+crash.log
+override.tf
+*_override.tf
+
 # --- graphify knowledge graph (local build output) --------------------------
 # Rebuilt by `graphify update .`; holds extraction caches and machine paths.
 # Remove this line if the team decides to share graph.json.

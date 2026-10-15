@@ -262,7 +262,7 @@ Dependencies point **only from `cloud/` into the core**. The core never imports 
     and Object Ownership enforced.
   - `results/` is versioned with no expiry. `inbox/` and `work/` expire 30 days after creation.
   - The DynamoDB table uses default encryption.
-  - All data stays in `ap-southeast-1`.
+  - All data stays in `ap-southeast-2` (Sydney; changed from ap-southeast-1 by D-22).
   - Only the runner, intake and kill-switch roles, and the Owner's admin role, have data access.
 
 ### Folder Status transitions (AD-4)
@@ -303,7 +303,7 @@ stateDiagram-v2
 | Terraform | ≥ 1.10 (S3 `use_lockfile`) |
 | Terraform AWS provider | `hashicorp/aws ~> 6.56` |
 | CI auth | `aws-actions/configure-aws-credentials@v6` (OIDC) |
-| AWS region | `ap-southeast-1` |
+| AWS region | `ap-southeast-2` (Sydney; D-22) |
 
 ## Structural Seed
 
@@ -324,7 +324,7 @@ flowchart LR
     GA -->|"OIDC AssumeRole"| ROLE["IAM deploy role"]
     GA -->|"docker push"| ECR[("ECR calls-log-runner")]
     GA -->|"terraform apply"| TF["Terraform state<br/>S3 + use_lockfile"]
-    TF --> PROD["prod: ap-southeast-1<br/>Lambdas, SQS, DynamoDB,<br/>S3, SSM, alarms, budget"]
+    TF --> PROD["prod: ap-southeast-2<br/>Lambdas, SQS, DynamoDB,<br/>S3, SSM, alarms, budget"]
     ECR --> PROD
     PC["Owner PC (Windows)"] -->|"parity_check.py + Docker or WSL2<br/>Reference Set never leaves"| ECR
     PC -->|"PC path, Sync Switch"| WA["Apps Script Web App"]

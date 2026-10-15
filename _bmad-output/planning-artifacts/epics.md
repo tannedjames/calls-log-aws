@@ -61,7 +61,7 @@ NFR3: Cost — the **total** AWS bill is at most **$2.00 per month** (hard cap; 
 NFR4: Security baseline — FR19–FR22; root account MFA with no root access keys; billing alerts on.
 NFR5: Observability — every Run logs Folder, Folder Status, duration and outcome, and never OCR row text; failure and duration metrics feed alerting; logs kept 30 days.
 NFR6: Reproducibility and maintainability — one-command deploy from `main`; the existing 81 tests keep passing; new tests cover the orchestration rules ported from `main.py`, the Day Sheet writer and the config invariants.
-NFR7: Data governance — all data stays in `ap-southeast-1`; screenshots and logs 30 days, Day Sheets indefinitely; classification: PII (customer phone numbers) and employee working hours.
+NFR7: Data governance — all data stays in `ap-southeast-2` (D-22); screenshots and logs 30 days, Day Sheets indefinitely; classification: PII (customer phone numbers) and employee working hours.
 NFR8: The PC stays a full alternative writer with no end date, on the same pinned versions as AWS.
 
 ### Additional Requirements
@@ -440,7 +440,7 @@ So that data is protected by default and I'm warned long before $2.
 
 **Given** the data bucket added to `infra/`
 **When** the pipeline applies it
-**Then** it has Block Public Access, SSE-S3, deny-non-TLS, Object Ownership enforced and versioning, in `ap-southeast-1`
+**Then** it has Block Public Access, SSE-S3, deny-non-TLS, Object Ownership enforced and versioning, in `ap-southeast-2`
 **And** `inbox/` and `work/` expire after 30 days while `results/` never expires
 
 **Given** the bucket
@@ -564,7 +564,7 @@ So that a Folder is never processed twice at once, never lost half-way, and neve
 
 **Given** the `calls-log-folders` DynamoDB table added to `infra/` in this story
 **When** the pipeline applies it
-**Then** it exists with on-demand capacity and default encryption, in `ap-southeast-1`
+**Then** it exists with on-demand capacity and default encryption, in `ap-southeast-2`
 
 **Given** `cloud/status.py`
 **When** transitions are applied
