@@ -66,6 +66,7 @@ in the order the work flows.
 | `diagnose.py` | A folder gave no sessions or strange results: shows exactly what was read from one picture and why each line was accepted or rejected. |
 | `create_template.py` | Rebuilds a blank `sprs.xlsx` template. |
 | `tools/check_private_data.py` | Checks that nothing private would be published if the code is uploaded to GitHub. |
+| `tools/parity_check.py` | Proves that the AWS version reads your real reference screenshots exactly like this computer. Runs locally in Docker; the pictures never leave the PC. |
 | `tools/bake_models.py` | Checks that this computer's OCR models are exactly the ones the AWS version uses (`--check`). |
 | `tools/gen_synth.py` / `tools/check_synth.py` | Make a set of made-up screenshots with known answers, then check that the program still reads every call correctly. Safe to share: no real names or numbers. |
 | `tests.py` / `run_tests.py` | Automatic checks that the counting rules still work after a change. |

@@ -162,6 +162,43 @@ To check that this PC's models still match the image's, run
 so the new model downloads, run `--write-manifest`, then repeat the Reference
 Set parity check before using the image.
 
+### Parity check (Reference Set, on the PC only)
+
+Proves that the runner image reads real screenshots exactly like the PC. The
+Reference Set is a few real Person-Day folders kept **outside the repo**, next
+to a private `parity-expected.json` that lists, for each folder, its name, the
+files to skip and the expected Sessions:
+
+```json
+{"folders": [{"name": "<folder name>", "ignore": ["correct output.png"],
+              "sessions": [["08:00", "10:01"], ["11:04", "12:01"]]}]}
+```
+
+The expected Sessions are the PC's Day Sheet for that day. Both files hold
+employee data, so they never go into the repo, and the tool refuses paths
+inside it.
+
+**Setup, once:** Docker Desktop on WSL 2. In an administrator terminal run
+`wsl --install --no-distribution`, restart, run
+`winget install -e --id Docker.DockerDesktop`, open Docker Desktop and accept
+its terms, then check that `docker run --rm hello-world` works. Then build the
+image:
+
+```powershell
+docker build --platform linux/amd64 -t calls-log-runner:local .
+.\.venv\Scripts\python.exe -X utf8 tools\parity_check.py --image calls-log-runner:local --ref C:\path\to\reference-folders
+```
+
+Each folder is mounted read-only as `/ref/F1`, `/ref/F2`, … with no network,
+on a read-only filesystem, as a non-root user, and processed exactly as
+`main.py` would, minus writing, syncing and archiving. The output shows only
+F-labels, counts and times, for example
+`F1: 15 images, 101 countable calls, 3 sessions -> IDENTICAL`. It also checks
+that no reference folder changed during the run. The exit code is 0 only when
+every folder is IDENTICAL. Re-run the check after any change to
+`requirements.lock`, a model or the `Dockerfile`, and before switching
+production to AWS.
+
 ---
 
 ## 3. Command-line reference
