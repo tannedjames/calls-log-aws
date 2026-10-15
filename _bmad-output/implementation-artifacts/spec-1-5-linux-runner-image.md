@@ -86,6 +86,10 @@ context: ['{project-root}/_bmad-output/implementation-artifacts/epic-1-context.m
 - `python tools/bake_models.py --write-manifest` vs `models.sha256` -- expected: identical.
 - GitHub Actions "Runner image" run -- expected: green.
 
+## Implementation Notes
+
+- CI run 1 (`2b76d7d`, run 38596121659) failed at the model step: `ImportError: libgomp.so.1`. paddlepaddle needs GNU OpenMP, which Amazon Linux's minimal image lacks. The system packages, the hash-checked `pip install` and the earlier layers all passed. The fix adds `libgomp` to the `dnf` line, plus a build check that runs `ldd` over the paddle and OpenCV native libraries and lists every missing library at once, before the slow model step. The frozen decision named only `mesa-libGL` and `glib2`; the purpose (the system libraries the wheels need) is unchanged.
+
 ## Review Triage Log
 
 Inline review at the Owner's choice; the three layers (blind hunter, edge cases, verification gaps) were applied in this session.
