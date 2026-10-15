@@ -35,7 +35,7 @@ Give the Owner one AWS account that is secured by default and changed only from 
 - **CI auth:** `aws-actions/configure-aws-credentials@v6`. Only the role ARN is stored in GitHub, as a variable, never a key.
 - **Secrets:** SSM SecureString parameters created with `ignore_changes` on value; real values are set out of band and never appear in Terraform state.
 - **Repo:** private `tannedjames/calls-log-aws`, branch `main`; privacy hooks on (`core.hooksPath .githooks`).
-- **Existing CI:** `.github/workflows/runner-image.yml` builds and checks the runner image (Story 1.5); Story 2.2 extends CI, and Story 2.3 pushes the image to ECR.
+- **Existing CI:** `.github/workflows/ci.yml` (since Story 2.2; it replaced `runner-image.yml`) builds and checks the runner image (Story 1.5); Story 2.2 extends CI, and Story 2.3 pushes the image to ECR.
 
 ## Cross-Story Dependencies
 

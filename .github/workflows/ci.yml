@@ -1,47 +1,45 @@
-# Builds the runner image and proves it, with no AWS access (Story 1.5):
-# no private files inside, threads follow the CPU limit, and OCR reads the
-# Synthetic Set offline on a read-only filesystem, as on Lambda.
-name: Runner image
+# CI for every push to main and every pull request (Story 2.2). Both jobs are
+# required checks on main: a red one blocks the merge, and with it the deploy.
+# No AWS access and no secrets other than the hashed privacy denylist.
+name: CI
 
 on:
   push:
     branches: [main]
-    paths:
-      - Dockerfile
-      - .dockerignore
-      - requirements.lock
-      - models.sha256
-      - "*.py"
-      - "cloud/**"
-      - "tools/**"
-      - .github/workflows/runner-image.yml
   pull_request:
-    paths:
-      - Dockerfile
-      - .dockerignore
-      - requirements.lock
-      - models.sha256
-      - "*.py"
-      - "cloud/**"
-      - "tools/**"
-      - .github/workflows/runner-image.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: runner-image-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  privacy:
+    name: Privacy gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      # Fails closed: secrets_local.py and Employees.gs never exist here, so
+      # without the hashed denylist (exported on the office PC) it refuses to
+      # pass instead of printing a note.
+      - name: No employee data or credentials in the repo
+        env:
+          PRIVATE_DENYLIST: ${{ secrets.PRIVATE_DENYLIST }}
+        run: python3 tools/check_private_data.py --fail-closed
+
   image:
+    name: Tests, image and OCR
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       IMAGE: calls-log-runner:ci
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
       - name: Plant decoy private files in the build folder
         # The office PC has these next to the Dockerfile; the image must not.
@@ -51,7 +49,7 @@ jobs:
           echo "// decoy" > apps_script/Employees.gs
           touch input_images/decoy/shot.jpg output/decoy.xlsx
 
-      - name: Build the image
+      - name: Build the runner image
         run: docker build --platform linux/amd64 -t "$IMAGE" .
 
       - name: No private files in the image
@@ -68,6 +66,9 @@ jobs:
           fi
           echo "None of secrets_local.py, Employees.gs, input_images/, output/ is in the image."
 
+      - name: Unit tests, inside the image (Linux, the AWS runtime)
+        run: docker run --rm --network none "$IMAGE" python3 -X utf8 run_tests.py
+
       - name: Threads follow the container's CPU limit
         run: |
           out=$(docker run --rm --cpus 1 "$IMAGE" python3 -c \
@@ -75,7 +76,7 @@ jobs:
           echo "Runner has $(nproc) CPUs; in a --cpus 1 container OMP and paddle threads are: $out"
           [ "$out" = "1 1" ]
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.13"
 
