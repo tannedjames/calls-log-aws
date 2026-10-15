@@ -626,5 +626,28 @@ image, runs `run_tests.py` inside it, and repeats the image checks from
 *Runner image* (§2). The actions are pinned to exact commits, and Dependabot
 opens a PR each week when they have updates.
 
+**Deploy (`.github/workflows/deploy.yml`)** is the only way changes reach AWS.
+It holds no AWS key: it signs in through GitHub OIDC with the role ARNs stored
+as repository variables.
+- **On every pull request**, *Terraform plan* runs:
+  - `fmt`, `validate`, and the offline `terraform test` for `infra/` and
+    `infra/bootstrap/`. The bootstrap tests check that each CI role trusts one
+    exact subject and that the plan role can only read;
+  - a check that the deploy role refuses the PR's token;
+  - `terraform plan` with the read-only plan role, posted as one PR comment.
+
+  Nothing is applied.
+- **Once CI is green on a push to `main`**, *Apply and push the runner image*:
+  - applies `infra/`, then plans again and fails if any drift is left;
+  - builds the image, runs the unit tests inside it, and pushes it to the ECR
+    repository `calls-log-runner`, tagged with the commit's full SHA.
+
+  Tags are immutable and ECR keeps only the newest 2 images. A re-run for the
+  same commit skips the build. A manual run (*Run workflow*) deploys only if
+  CI is green for that commit.
+
+The deploy role trusts only `main` of this repo, so a run from any other branch
+or from a fork is refused by AWS. Roles and setup: `docs/AWS_SETUP.md`.
+
 Licenses of dependencies: PaddleOCR, EasyOCR and Tesseract (Apache 2.0, as are
 PaddleOCR's downloaded models), openpyxl (MIT), Pillow (HPND), NumPy (BSD-3).

@@ -30,7 +30,7 @@ Give the Owner one AWS account that is secured by default and changed only from 
 
 ## Technical Decisions
 
-- **Terraform:** version ≥ 1.10; provider `hashicorp/aws ~> 6.56`; one root module `infra/` for `prod` with an S3 backend using `use_lockfile` (no DynamoDB lock table). `infra/bootstrap/` holds the state bucket, the GitHub OIDC provider and the deploy role, and is applied by hand once; everything else is applied only from GitHub Actions on `main`.
+- **Terraform:** version ≥ 1.10; provider `hashicorp/aws ~> 6.56`; one root module `infra/` for `prod` with an S3 backend using `use_lockfile` (no DynamoDB lock table). `infra/bootstrap/` holds the state bucket, the GitHub OIDC provider, and the deploy and plan roles with their permissions. It is applied by hand, and re-applied after review when a story adds an AWS service (D-26). Everything else is applied only from GitHub Actions on `main`.
 - **Naming:** resources `calls-log-<component>`; tags `project=calls-log`, `env=prod`, `managed-by=terraform`; SSM parameters `/calls-log/<snake_case>`.
 - **CI auth:** `aws-actions/configure-aws-credentials@v6`. Only the role ARN is stored in GitHub, as a variable, never a key.
 - **Secrets:** SSM SecureString parameters created with `ignore_changes` on value; real values are set out of band and never appear in Terraform state.

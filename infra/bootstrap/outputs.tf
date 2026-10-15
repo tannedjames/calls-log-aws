@@ -8,6 +8,11 @@ output "deploy_role_arn" {
   value       = aws_iam_role.deploy.arn
 }
 
+output "plan_role_arn" {
+  description = "Stored in GitHub as the AWS_PLAN_ROLE_ARN variable (not a secret)."
+  value       = aws_iam_role.plan.arn
+}
+
 output "github_oidc_provider_arn" {
   value = aws_iam_openid_connect_provider.github.arn
 }
