@@ -8,8 +8,9 @@ editing the rest of the code.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Mapping, Tuple
 
 from runtime_env import available_cpus
 
@@ -19,15 +20,25 @@ from runtime_env import available_cpus
 # repo was pushed -- anyone holding it can write to every employee's
 # spreadsheet.
 #
-# Missing file -> empty strings -> sheets_sync.py raises a clear error rather
-# than silently skipping the push. Copy secrets_local.example.py to get started.
+# The environment variables SHEETS_WEBAPP_URL and SHEETS_SYNC_SECRET win over
+# the file, so a container can be given them without the file (the runner
+# image never contains it). They are the only settings the environment can
+# change here; cloud/settings.py sets the AWS runner's values from SSM.
+#
+# Neither -> empty strings -> sheets_sync.py raises a clear error rather than
+# silently skipping the push. Copy secrets_local.example.py to get started.
 # ---------------------------------------------------------------------------
-try:
-    from secrets_local import SHEETS_WEBAPP_URL as _WEBAPP_URL
-    from secrets_local import SHEETS_SYNC_SECRET as _SYNC_SECRET
-except ImportError:  # pragma: no cover - depends on local setup
-    _WEBAPP_URL = ""
-    _SYNC_SECRET = ""
+def _credentials(environ: Mapping[str, str] = os.environ) -> Tuple[str, str]:
+    try:
+        import secrets_local as local
+    except ImportError:  # pragma: no cover - depends on local setup
+        local = None
+    url = environ.get("SHEETS_WEBAPP_URL") or getattr(local, "SHEETS_WEBAPP_URL", "")
+    secret = environ.get("SHEETS_SYNC_SECRET") or getattr(local, "SHEETS_SYNC_SECRET", "")
+    return url, secret
+
+
+_WEBAPP_URL, _SYNC_SECRET = _credentials()
 
 
 @dataclass
