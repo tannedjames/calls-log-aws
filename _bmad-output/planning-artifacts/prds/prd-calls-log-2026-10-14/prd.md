@@ -397,7 +397,7 @@ All of it is free of private data, so it can be published later without edits (E
 | Constraint | Value | Source |
 |---|---|---|
 | Cost | $2.00/month hard cap; AWS **Paid plan**, because the Free plan closes the account after 6 months | owner 1a; risk ADV-18 |
-| Region | `ap-southeast-1` (Singapore). Fall back to `us-east-1` if the cost model is within 20% of the cap | owner 1b |
+| Region | `ap-southeast-2` (Sydney), changed from `ap-southeast-1` on 2026-10-15 because the AWS project was created in Sydney and its fixed policies refuse other regions (D-22). Cost is unchanged | owner 1b, D-22 |
 | IaC | Terraform | owner E3 |
 | Code hosting and deploy | Private GitHub repo; GitHub Actions via OIDC → ECR | owner Q7, owner flow |
 | Google side | Web App code unchanged; only the secret value rotates | owner Q3 |
