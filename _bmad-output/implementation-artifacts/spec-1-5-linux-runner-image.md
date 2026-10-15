@@ -2,7 +2,7 @@
 title: 'Story 1.5: Linux runner image (containerise)'
 type: 'feature'
 created: '2026-10-14'
-status: 'in-review'
+status: 'done'
 route: 'dispatch'
 review_loop_iteration: 0
 baseline_commit: 'cde5e356ec43672dec82bf64a89fe65808117279'
@@ -89,6 +89,14 @@ context: ['{project-root}/_bmad-output/implementation-artifacts/epic-1-context.m
 ## Implementation Notes
 
 - CI run 1 (`2b76d7d`, run 38596121659) failed at the model step: `ImportError: libgomp.so.1`. paddlepaddle needs GNU OpenMP, which Amazon Linux's minimal image lacks. The system packages, the hash-checked `pip install` and the earlier layers all passed. The fix adds `libgomp` to the `dnf` line, plus a build check that runs `ldd` over the paddle and OpenCV native libraries and lists every missing library at once, before the slow model step. The frozen decision named only `mesa-libGL` and `glib2`; the purpose (the system libraries the wheels need) is unchanged.
+
+- CI run 2 (`f80e7dc`, run 38679207686, 2026-10-15, about 4 min) passed every step:
+  - native libraries resolve; 11 verified model files baked;
+  - the decoy `secrets_local.py`, `Employees.gs`, `input_images/` and `output/` are absent from the image;
+  - `--cpus 1` gives OMP and paddle threads `1 1` on a 2-CPU runner;
+  - offline, read-only, non-root: `diagnose.py` found 11 usable rows, and `check_synth.py` matched 21/21, 11/11 and 11/11.
+  - This also settles Story 1.4's open point: images rendered on Linux with Noto Sans CJK read correctly.
+  - **Image size: 2,205 MB uncompressed, 806 MB compressed** (`docker save | gzip -1`); Lambda's limit is 10 GB.
 
 ## Review Triage Log
 
