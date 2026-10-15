@@ -1,6 +1,8 @@
 # CI for every push to main and every pull request (Story 2.2). Both jobs are
 # required checks on main: a red one blocks the merge, and with it the deploy.
 # No AWS access and no secrets other than the hashed privacy denylist.
+# deploy.yml starts when this workflow, by its name "CI", is green on main:
+# renaming it stops every deploy.
 name: CI
 
 on:
