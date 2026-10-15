@@ -48,6 +48,10 @@ output/*
 # the seed rebuilds, so it is never committed.
 synthetic/
 
+# Parity expectations (tools/parity_check.py) name real employees and hold
+# their working hours. They live outside the repo; this catches a stray copy.
+parity-expected*.json
+
 # Per-run reports (contain parsed call rows)
 review_report*.csv
 processing_log*.json

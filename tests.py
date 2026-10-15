@@ -920,3 +920,51 @@ def test_models_manifest_lists_the_three_models_in_use():
     assert {rel.split("/")[0] for rel in entries} == {
         "PP-OCRv6_medium_det", "PP-OCRv5_mobile_rec", "PP-LCNet_x1_0_doc_ori"}
     assert all(len(d) == 64 for d in entries.values())
+
+
+# ---------------------------------------------------------------------------
+# Parity check (tools/parity_check.py): the comparison and the safety rules.
+# Docker is not needed; the container run itself is checked on the PC.
+# ---------------------------------------------------------------------------
+
+from tools import parity_check
+
+_EXPECTED = [["08:00", "10:01"], ["11:04", "12:01"], ["13:02", "15:02"]]
+
+
+def test_parity_identical_sessions():
+    assert parity_check.first_difference(_EXPECTED, [list(s) for s in _EXPECTED]) is None
+
+
+@pytest.mark.parametrize("got, message", [
+    ([["08:00", "10:01"], ["11:04", "12:05"], ["13:02", "15:02"]],
+     "session 2: expected 11:04-12:01, got 11:04-12:05"),
+    ([["08:00", "10:01"], ["11:04", "12:01"]], "session 3: expected 13:02-15:02, got none"),
+    (_EXPECTED + [["16:00", "16:10"]], "session 4: expected none, got 16:00-16:10"),
+])
+def test_parity_reports_the_first_differing_session(got, message):
+    assert parity_check.first_difference(_EXPECTED, got) == message
+
+
+def test_parity_detects_a_write_into_a_reference_folder():
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        (folder / "shot.jpg").write_bytes(b"x")
+        before = parity_check.fingerprint(folder)
+        assert parity_check.fingerprint(folder) == before
+        (folder / "new.xlsx").write_bytes(b"y")
+        assert parity_check.fingerprint(folder) != before
+
+
+def test_parity_refuses_a_reference_set_inside_the_repo():
+    with mock.patch("builtins.print") as out:
+        code = parity_check.main(["--image", "x", "--ref", str(parity_check.ROOT / "input_images")])
+    assert code == 2
+    assert "outside the repo" in out.call_args.args[0]
+
+
+def test_parity_needs_an_expectations_file():
+    with tempfile.TemporaryDirectory() as tmp, mock.patch("builtins.print") as out:
+        code = parity_check.main(["--image", "x", "--ref", tmp])
+    assert code == 2
+    assert "No expectations file" in out.call_args.args[0]
