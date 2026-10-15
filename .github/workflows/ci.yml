@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # Fails closed: secrets_local.py and Employees.gs never exist here, so
-      # without the hashed denylist (exported on the office PC) it refuses to
+      # without the hashed denylist (exported on the Owner's PC) it refuses to
       # pass instead of printing a note.
       - name: No employee data or credentials in the repo
         env:
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Plant decoy private files in the build folder
-        # The office PC has these next to the Dockerfile; the image must not.
+        # The Owner's PC has these next to the Dockerfile; the image must not.
         run: |
           printf 'SHEETS_SYNC_SECRET = "decoy"\nSHEETS_WEBAPP_URL = "decoy"\n' > secrets_local.py
           mkdir -p apps_script input_images/decoy output

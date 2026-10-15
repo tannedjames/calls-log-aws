@@ -140,7 +140,7 @@ Python 3.13 base (Amazon Linux 2023, x86_64 only), pinned by digest.
   affinity), at most 10. On the PC nothing changes: 10 PaddleOCR threads and
   one OpenMP thread per core.
 - **Privacy:** `.dockerignore` allows only runtime files and always excludes
-  `secrets_local.py`, so building on the office PC is safe.
+  `secrets_local.py`, so building on the Owner's PC is safe.
 
 Measured on 2026-10-15: 2.2 GB uncompressed and about 0.8 GB compressed, well
 under Lambda's 10 GB limit for container images.
@@ -602,7 +602,7 @@ so CI can't read the real values. Instead it runs
 holds keyed hashes of the secret, the URL, the spreadsheet IDs and the
 accent-folded employee names, with labels like `employee name #3`. GitHub
 therefore never receives a real value, yet a value pasted into any file is still
-caught. Create or refresh it on the **office PC**, where the private files are,
+caught. Create or refresh it on **the Owner's PC**, where the private files are,
 whenever an employee or the secret changes:
 
 ```powershell
