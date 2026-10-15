@@ -13,7 +13,7 @@
 # Dependabot bumps both images weekly. Why: docs/TECHNICAL.md, "Runner image".
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261013.0-minimal@sha256:fe18d1ee02440b6480eb4a045be052e9aeaf9bf5029368f09d3425ddab2bfa0a AS al2023-release
 
-FROM public.ecr.aws/lambda/python:3.13@sha256:a2ccc172776f574d48c1bd05235e99e027d98bdf9bdc2e12695b9df70c54ffdd
+FROM public.ecr.aws/lambda/python:3.13@sha256:d5d5c74e3639a01fac254c9334a60604aa50327aa122b3ec26151e055a06a6a0
 
 # OS packages. First the base's own, upgraded to that release. dnf here is
 # microdnf: it has no --security, and it skips a release it can't reach with
