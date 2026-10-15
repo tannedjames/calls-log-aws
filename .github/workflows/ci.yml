@@ -97,16 +97,25 @@ jobs:
           grep -E "usable call rows *: *[1-9]" diagnose.txt
           "${run[@]}" python3 tools/check_synth.py --dir /synth --threads 2
 
-      - name: Record the image size
+      - name: Record the image size and OS release
         run: |
           bytes=$(docker image inspect "$IMAGE" --format '{{.Size}}')
           gz=$(docker save "$IMAGE" | gzip -1 | wc -c)
+          # A change to these libraries calls for the Reference Set parity
+          # check before cutover (docs/TECHNICAL.md, "Runner image").
+          os=$(docker run --rm --network none --entrypoint sh "$IMAGE" -c \
+            'cat /etc/system-release; rpm -q mesa-libGL glib2 libgomp glibc')
           {
             echo "### Runner image"
             echo "| Measure | MB |"
             echo "|---|---|"
             echo "| Uncompressed | $((bytes / 1048576)) |"
             echo "| Compressed (docker save, gzip -1) | $((gz / 1048576)) |"
+            echo
+            echo "OS release and the system libraries the OCR loads:"
+            echo '```'
+            echo "$os"
+            echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           # Lambda refuses container images over 10 GB uncompressed.
           [ "$bytes" -lt 10737418240 ] || { echo "::error::image exceeds Lambda's 10 GB limit"; exit 1; }

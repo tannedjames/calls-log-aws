@@ -6,12 +6,33 @@
 #
 #   docker build --platform linux/amd64 -t calls-log-runner .
 
-FROM public.ecr.aws/lambda/python:3.13@sha256:27755d02113714211d0c49872554b3659831eccfc762a5d3fe602b27f1a2151c
+# The Amazon Linux 2023 release whose OS packages the image runs; only its
+# /etc/system-release is read. Lambda's base lags behind AL2023's releases, so
+# its packages are upgraded to this one. Each release is a fixed repository
+# snapshot, so the same commit always installs the same packages (FR-25).
+# Dependabot bumps both images weekly. Why: docs/TECHNICAL.md, "Runner image".
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261013.0-minimal@sha256:fe18d1ee02440b6480eb4a045be052e9aeaf9bf5029368f09d3425ddab2bfa0a AS al2023-release
 
-# System libraries the wheels expect but Amazon Linux's minimal image lacks:
-# opencv-python / opencv-contrib-python load libGL and glib when cv2 imports;
-# paddlepaddle loads GNU OpenMP (libgomp).
-RUN dnf install -y mesa-libGL glib2 libgomp && dnf clean all && rm -rf /var/cache/dnf
+FROM public.ecr.aws/lambda/python:3.13@sha256:a2ccc172776f574d48c1bd05235e99e027d98bdf9bdc2e12695b9df70c54ffdd
+
+# OS packages. First the base's own, upgraded to that release. dnf here is
+# microdnf: it has no --security, and it skips a release it can't reach with
+# "Nothing to do", hence the check at the end. Then the system libraries the
+# wheels expect but Amazon Linux's minimal image lacks: opencv-python /
+# opencv-contrib-python load libGL and glib when cv2 imports; paddlepaddle
+# loads GNU OpenMP (libgomp).
+RUN --mount=type=bind,from=al2023-release,source=/etc/system-release,target=/tmp/al2023-release \
+    set -e; \
+    release=$(sed -n 's/^Amazon Linux release \([0-9.]*\) .*/\1/p' /tmp/al2023-release); \
+    [ -n "$release" ] || { echo "No release number in amazonlinux's /etc/system-release"; exit 1; }; \
+    dnf upgrade -y --releasever="$release"; \
+    dnf install -y mesa-libGL glib2 libgomp; \
+    dnf clean all; rm -rf /var/cache/dnf; \
+    now=$(rpm -q --qf '%{VERSION}' system-release); \
+    if [ "$(printf '%s\n' "$release" "$now" | sort -V | head -n 1)" != "$release" ]; then \
+        echo "OS packages are at Amazon Linux $now, not $release: the upgrade didn't happen"; exit 1; \
+    fi; \
+    echo "OS packages are at Amazon Linux $now."
 
 WORKDIR ${LAMBDA_TASK_ROOT}
 
