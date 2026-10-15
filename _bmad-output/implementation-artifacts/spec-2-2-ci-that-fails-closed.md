@@ -2,7 +2,7 @@
 title: 'Story 2.2: CI that tests, fails closed on private data, and checks OCR'
 type: 'feature'
 created: '2026-10-15'
-status: 'in-progress'
+status: 'in-review'
 route: 'dispatch'
 review_loop_iteration: 0
 baseline_commit: '38486975945f07b886c117d8caddebf6cf6b407c'
@@ -37,6 +37,21 @@ context: ['{project-root}/_bmad-output/implementation-artifacts/epic-2-context.m
 
 </frozen-after-approval>
 
+## Implementation Notes
+
+- `tools/check_private_data.py` was restructured: `publishable_files`, `read_publishable` and `have_private_files` are patchable for tests. Names are now compared accent-folded on both sides (before, only the file side was folded); otherwise the local behaviour is unchanged. A denylist scan of the whole repo with 31 fictional entries takes about 6 s.
+- `ci.yml` replaces `runner-image.yml` (deleted). The unit tests run inside the runner image: 128 passed locally in the Linux image (Docker Desktop) and on GitHub.
+- Review (inline): Dependabot PRs can only read *Dependabot* secrets, so the docs now set `PRIVATE_DENYLIST` in both stores (`gh secret set ... --app dependabot`).
+- CI run 38689546427 on `ddf461f`: **Tests, image and OCR: success** (128 tests, threads `1 1`, Synthetic Set all match). **Privacy gate: failure**, `FAILED CLOSED: ... no PRIVATE_DENYLIST was given`, exactly as intended without the secret.
+- Ruleset `25140628` "main: pull requests with green CI" is active (the plan allows it on this private repo): no deletion, no force-push, PRs required (0 approvals), required checks "Privacy gate" and "Tests, image and OCR", admin bypass only inside PRs. `rules/branches/main` confirms all four.
+- **Waiting on the Owner:** run `--export-denylist` on the office PC and set `PRIVATE_DENYLIST` (Actions and Dependabot secrets). The privacy job then turns green, and this spec moves to done.
+
+## Review Triage Log
+
+- low (patched): Dependabot PRs can't read Actions secrets, so they would fail the gate. Documented setting the Dependabot secret too.
+- low (accepted): the denylist file carries its own hash key, so anyone holding the GitHub secret could brute-force short names offline. GitHub keeps the secret encrypted and masks it in logs; the threat model is "never send GitHub plaintext", which holds.
+- low (accepted): `strict_required_status_checks_policy` is off, so a PR needn't be rebased on the newest `main` before merging. With one person merging PRs in sequence that's rarely stale, and it saves a CI re-run each time.
+
 ## Code Map
 
 - `tools/check_private_data.py:44` `private_values()` -- the (label, value) source for export; `:72` `norm()` -- the name folding; `:79` `main()` -- split into a scan helper, export and the fail-closed decision.
@@ -47,12 +62,12 @@ context: ['{project-root}/_bmad-output/implementation-artifacts/epic-2-context.m
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tools/check_private_data.py` -- `--fail-closed`, `--denylist FILE` / env `PRIVATE_DENYLIST`, `--export-denylist FILE`; windowed keyed-hash matching.
-- [ ] `tests.py` -- export → plant a fake name, spreadsheet ID and secret in a temp file → caught with exit 1; clean text passes; fail-closed without a denylist → 1.
-- [ ] `.github/workflows/ci.yml` (+ delete `runner-image.yml`), `.github/dependabot.yml`.
-- [ ] `docs/TECHNICAL.md` §10 -- CI gate, exporting the denylist and setting the secret (`gh secret set PRIVATE_DENYLIST < file`, then delete the file).
-- [ ] Push; observe the privacy job red without the secret and the image job green.
-- [ ] Ruleset on `main` (after the Owner's OK) requiring "Privacy gate" and "Tests, image and OCR".
+- [x] `tools/check_private_data.py` -- `--fail-closed`, `--denylist FILE` / env `PRIVATE_DENYLIST`, `--export-denylist FILE`; windowed keyed-hash matching.
+- [x] `tests.py` -- export → plant a fake name, spreadsheet ID and secret in a temp file → caught with exit 1; clean text passes; fail-closed without a denylist → 1.
+- [x] `.github/workflows/ci.yml` (+ delete `runner-image.yml`), `.github/dependabot.yml`.
+- [x] `docs/TECHNICAL.md` §10 -- CI gate, exporting the denylist and setting the secret (`gh secret set PRIVATE_DENYLIST < file`, then delete the file).
+- [x] Push; observe the privacy job red without the secret and the image job green.
+- [x] Ruleset on `main` (after the Owner's OK) requiring "Privacy gate" and "Tests, image and OCR".
 
 **Acceptance Criteria:**
 - Given CI with no denylist secret, when the privacy job runs, then it exits 1 and says why.
