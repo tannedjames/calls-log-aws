@@ -36,16 +36,20 @@ project was created in, and AWS refuses others (decision D-22).
 `infra/bootstrap/` creates:
 - the Terraform state bucket `calls-log-tfstate-<account id>`: versioned,
   encrypted, no public access, TLS only;
+- account-wide S3 Block Public Access, so no bucket in the account can be
+  made public. It lives here so the deploy role can never turn it off;
 - GitHub's OIDC provider;
 - the two roles GitHub Actions uses. No access key is ever created.
 
 | Role | Trusts only | Can |
 |---|---|---|
-| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state, and manage and push to the `calls-log-*` ECR repositories |
+| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories; manage the data bucket's settings (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets |
 | `calls-log-plan` | pull requests of that repo | read the prod state and describe those repositories, nothing else |
 
 A pull request can change the workflow it runs, so the plan role must stay
-harmless in any hands.
+harmless in any hands. That is why pull-request plans run with
+`-refresh=false`: refreshing reads every `/calls-log/` parameter with
+decryption, so it would need the very secret the plan role must never see.
 
 **Token subjects.** Each role trusts one exact subject. This repo was created
 after 2026-07-15, so GitHub writes the subject with immutable IDs:
@@ -88,6 +92,10 @@ terraform -chdir=infra/bootstrap import aws_iam_openid_connect_provider.github a
 terraform -chdir=infra/bootstrap import aws_iam_role.deploy calls-log-deploy
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_state calls-log-deploy:terraform-state
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_ecr calls-log-deploy:ecr
+terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_data_bucket calls-log-deploy:data-bucket
+terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_parameters calls-log-deploy:parameters
+terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_alerts calls-log-deploy:alerts
+terraform -chdir=infra/bootstrap import aws_s3_account_public_access_block.account <account id>
 terraform -chdir=infra/bootstrap import aws_iam_role.plan calls-log-plan
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.plan_read calls-log-plan:read-only-plan
 ```
@@ -129,7 +137,27 @@ A higher limit costs nothing; Lambda bills per use.
 - **Forks.** The repo setting "Run workflows from fork pull requests" stays
   off. A fork's own runs carry the fork's IDs in their subject, so STS refuses
   them too.
-- **Budget email** (Story 2.4): AWS emails the alert address once; click
-  *Confirm subscription*, or the $2 budget alerts never arrive.
-- **Secret values** (Story 2.4): set the Web App URL and secret in SSM
-  Parameter Store by hand. They never go into Terraform or the repo.
+- **Parameter values** (Story 2.4): Terraform creates the six `/calls-log/`
+  parameters with placeholders only (`infra/parameters.tf`). Set the real
+  values from this PC, where the private files are. The tool reads them
+  itself and prints only parameter names, so no value lands in the shell
+  history, the repo or the Terraform state:
+  ```powershell
+  .\.venv\Scripts\python.exe tools\put_parameters.py --from-private-files   # Web App URL, secret, NAME_TO_ID keys
+  ```
+  Run it again whenever an employee is added or the secret is rotated
+  (Story 5.4). The upload page's passphrase hash is set in Story 4.1.
+- **Alert email** (Story 2.4): the $2 budget, and later Parked Folders and the
+  kill switch, email through the `calls-log-alerts` topic. Subscribe your
+  address once; it is stored only in `/calls-log/alert_email` and the
+  subscription, never in Terraform:
+  ```powershell
+  .\.venv\Scripts\python.exe tools\put_parameters.py --alert-email <your address>
+  ```
+  AWS then emails that address once: click *Confirm subscription*, or no
+  alert ever arrives. To change the address, run it again with the new one,
+  then remove the old one with the *unsubscribe* link in any alert email. Check with
+  `aws sns list-subscriptions-by-topic --topic-arn (terraform -chdir=infra output -raw alerts_topic_arn)`.
+- **AWS Sync Switch** (AD-10): off until the Owner turns it on.
+  `tools\put_parameters.py --sync-enabled true` (or `false`). The PC's own
+  switch stays in `config.py`.

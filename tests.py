@@ -1045,3 +1045,118 @@ def test_gate_with_denylist_blocks_a_planted_name_in_a_tracked_file():
 def test_gate_refuses_a_malformed_denylist():
     code, said = _gate(["--fail-closed"], {"notes.md": "x"}, '{"format": "something else"}')
     assert code == 1 and "can't be used" in said
+
+
+# ---------------------------------------------------------------------------
+# Parameter tool (tools/put_parameters.py): real values reach AWS only through
+# a temporary file, are never printed, and nothing is written when a private
+# file is missing. The AWS CLI is faked; all values are fictional.
+# ---------------------------------------------------------------------------
+
+import io
+import tempfile
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+
+from tools import put_parameters
+
+_PP_SECRET = "s3cr3t-Value-For-Tests"
+_PP_URL = "https://script.google.com/macros/s/FICTIONAL-DEPLOYMENT/exec"
+
+
+def _pp_private_files(folder):
+    secrets = Path(folder) / "secrets_local.py"
+    secrets.write_text(f'SHEETS_WEBAPP_URL = "{_PP_URL}"\nSHEETS_SYNC_SECRET = "{_PP_SECRET}"\n',
+                       encoding="utf-8")
+    employees = Path(folder) / "Employees.gs"
+    employees.write_text("var NAME_TO_ID = {\n  'Nguyen Van A': 'id-a',\n  'Tran Thi B': 'id-b',\n"
+                         "  'Nguyen Van A': 'id-a',\n};\n", encoding="utf-8")
+    return secrets, employees
+
+
+class _FakeAws:
+    """Stands in for subprocess.run: records each call and its JSON input file."""
+
+    def __init__(self, fail_with=""):
+        self.calls, self.inputs, self.files, self.fail_with = [], [], [], fail_with
+
+    def __call__(self, cmd, capture_output, text):
+        self.calls.append(cmd)
+        if "--cli-input-json" in cmd:
+            path = Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://"))
+            self.files.append(path)
+            self.inputs.append(json.loads(path.read_text(encoding="utf-8")))
+        if cmd[1:3] == ["sts", "get-caller-identity"]:
+            return SimpleNamespace(returncode=0, stdout="123456789012\n", stderr="")
+        if self.fail_with:
+            return SimpleNamespace(returncode=254, stdout="", stderr=self.fail_with)
+        return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+
+
+def _pp_main(argv, run):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = put_parameters.main(argv, run=run)
+    return code, out.getvalue() + err.getvalue()
+
+
+def test_put_parameters_reads_private_files_in_order():
+    with tempfile.TemporaryDirectory() as d:
+        values = put_parameters.read_private_files(*_pp_private_files(d))
+    assert values["webapp_url"] == _PP_URL and values["sync_secret"] == _PP_SECRET
+    # NAME_TO_ID order is kept (the first matching key wins), duplicates dropped.
+    assert json.loads(values["name_prefixes"]) == ["Nguyen Van A", "Tran Thi B"]
+
+
+def test_put_parameters_sends_values_by_file_and_never_prints_them():
+    fake = _FakeAws()
+    with tempfile.TemporaryDirectory() as d:
+        secrets, employees = _pp_private_files(d)
+        code, said = _pp_main(["--from-private-files", "--secrets", str(secrets),
+                               "--employees", str(employees), "--sync-enabled", "false"], fake)
+    assert code == 0
+    assert [i["Name"] for i in fake.inputs] == [
+        "/calls-log/webapp_url", "/calls-log/sync_secret", "/calls-log/name_prefixes",
+        "/calls-log/sync_enabled"]
+    assert all(i["Type"] == "SecureString" and i["Overwrite"] is True for i in fake.inputs)
+    for cmd in fake.calls:
+        assert _PP_SECRET not in " ".join(cmd) and _PP_URL not in " ".join(cmd)
+    assert _PP_SECRET not in said and _PP_URL not in said and "Tran Thi B" not in said
+    assert "2 names, in Employees.gs order" in said
+    assert not any(p.exists() for p in fake.files)   # the temporary files are gone
+
+
+def test_put_parameters_writes_nothing_when_a_private_file_is_missing():
+    fake = _FakeAws()
+    with tempfile.TemporaryDirectory() as d:
+        code, said = _pp_main(["--from-private-files", "--secrets", str(Path(d) / "none.py"),
+                               "--employees", str(Path(d) / "none.gs")], fake)
+    assert code == 2 and "nothing written" in said and fake.calls == []
+
+
+def test_put_parameters_hides_the_value_when_the_cli_fails():
+    fake = _FakeAws(fail_with=f"An error occurred (ValidationException): value {_PP_SECRET} rejected")
+    with tempfile.TemporaryDirectory() as d:
+        secrets, employees = _pp_private_files(d)
+        code, said = _pp_main(["--from-private-files", "--secrets", str(secrets),
+                               "--employees", str(employees)], fake)
+    assert code == 1 and "ValidationException" in said and _PP_SECRET not in said
+
+
+def test_put_parameters_alert_email_is_stored_and_subscribed():
+    fake = _FakeAws()
+    code, said = _pp_main(["--alert-email", "owner@example.com"], fake)
+    assert code == 0
+    assert fake.inputs[0] == {"Name": "/calls-log/alert_email", "Value": "owner@example.com",
+                              "Type": "SecureString", "Overwrite": True}
+    assert fake.inputs[1] == {"TopicArn": "arn:aws:sns:ap-southeast-2:123456789012:calls-log-alerts",
+                              "Protocol": "email", "Endpoint": "owner@example.com"}
+    assert "owner@example.com" not in said
+
+
+def test_put_parameters_refuses_bad_usage():
+    fake = _FakeAws()
+    assert _pp_main([], fake)[0] == 2
+    assert _pp_main(["--alert-email", "not an address"], fake)[0] == 2
+    assert fake.calls == []

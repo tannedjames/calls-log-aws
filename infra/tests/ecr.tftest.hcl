@@ -3,7 +3,15 @@
 #   terraform -chdir=infra init -backend=false
 #   terraform -chdir=infra test
 
-mock_provider "aws" {}
+mock_provider "aws" {
+  # Policy documents must be valid JSON for the resources that use them; their
+  # contents are checked in stores.tftest.hcl.
+  mock_data "aws_iam_policy_document" {
+    defaults = {
+      json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
+    }
+  }
+}
 
 run "runner_repository" {
   command = plan
