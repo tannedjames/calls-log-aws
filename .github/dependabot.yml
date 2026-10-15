@@ -1,10 +1,32 @@
-# Weekly pull requests to bump the GitHub Actions, which are pinned to full
-# commit SHAs in the workflows. Each PR runs CI like any other change.
+# Weekly pull requests that bump what the workflows and the runner image are
+# pinned to. Each PR runs CI like any other change, and merging one deploys.
 version: 2
 updates:
+  # The GitHub Actions, pinned to full commit SHAs in the workflows.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     commit-message:
       prefix: "ci"
+
+  # The Dockerfile's two images, pinned by tag and digest: Lambda's Python
+  # base, and the Amazon Linux release whose OS packages the image upgrades
+  # to (docs/TECHNICAL.md, "Runner image"). One PR for both, so a week's OS
+  # patches are built, tested and deployed once.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    groups:
+      runner-image:
+        patterns: ["*"]
+    ignore:
+      # Python 3.14 needs a new lock and paddlepaddle wheels: a story, not a bump.
+      - dependency-name: "*lambda/python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # A new Amazon Linux major version is a different distribution.
+      - dependency-name: "*amazonlinux/amazonlinux"
+        update-types: ["version-update:semver-major"]

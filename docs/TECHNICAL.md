@@ -127,9 +127,34 @@ The same pipeline packaged for AWS Lambda: the `Dockerfile` builds on Lambda's
 Python 3.13 base (Amazon Linux 2023, x86_64 only), pinned by digest.
 
 - **Packages:** installed from `requirements.lock` with `--require-hashes`,
-  plus `mesa-libGL` and `glib2`, which OpenCV needs. If those two ever
-  disappear from Amazon Linux, the fallback is to switch both OpenCV packages
-  to their `-headless` builds in `requirements.txt` and regenerate the lock.
+  plus `mesa-libGL` and `glib2`, which OpenCV needs, and `libgomp`, which
+  paddlepaddle needs. If the first two ever disappear from Amazon Linux, the
+  fallback is to switch both OpenCV packages to their `-headless` builds in
+  `requirements.txt` and regenerate the lock.
+- **OS patches:** the image's OS packages are upgraded to a pinned Amazon
+  Linux 2023 release, the one in the `amazonlinux` image on the Dockerfile's
+  first `FROM` line. Dependabot bumps that image and Lambda's base in one
+  weekly PR; CI builds and tests it, and merging deploys it. ECR scans every
+  pushed image (`aws ecr describe-image-scan-findings --repository-name
+  calls-log-runner --image-id imageTag=<sha>`). Why this design:
+  - Lambda's base lags behind Amazon Linux. On 2026-10-15 its newest digest
+    was still on release 2023.12.20260914, six releases behind 2023.12.20261013,
+    and the first ECR scan found 15 high findings, all in its OS packages.
+    Bumping the base digest alone would have fixed none of them.
+  - Each Amazon Linux 2023 release is a fixed repository snapshot, and older
+    ones stay available, so the same commit always installs the same packages
+    (FR-25). `--releasever=latest` would break that: the same commit would
+    build different packages each week. It would not patch any sooner either,
+    because the image is only rebuilt when a commit lands on `main`.
+  - `dnf` in this image is `microdnf`, which has no `--security`, and it skips
+    a release it can't reach with "Nothing to do". So the build fails unless
+    the packages really reached the pinned release.
+  - The libraries the OCR loads (`mesa-libGL`, `glib2`, `libgomp`, `glibc`)
+    were unchanged by the upgrade to 2023.12.20261013; the patched packages
+    were curl, OpenSSL, krb5, libxml2, pcre2, rpm and libX11. CI's Synthetic
+    Set check runs on every bump. CI's run summary lists the release and those
+    four libraries; when a bump changes one of them, run the Reference Set
+    parity check before cutover.
 - **Models:** baked in at build time by `tools/bake_models.py`. It lets the
   pipeline download its models through `config.py`, then refuses to continue
   unless every file matches `models.sha256`, which was recorded from the PC. So
@@ -148,8 +173,9 @@ under Lambda's 10 GB limit for container images.
 GitHub Actions (`.github/workflows/ci.yml`, job *Tests, image and OCR*) builds and checks the
 image on every change to it. It plants decoy private files and proves they
 stay out, checks that `--cpus 1` gives 1 thread, runs `diagnose.py` and
-`check_synth.py` with `--network none --read-only`, and writes the image size
-to the run summary. To build locally with Docker Desktop:
+`check_synth.py` with `--network none --read-only`, and writes the image size,
+the Amazon Linux release and the versions of the OCR's system libraries to the
+run summary. To build locally with Docker Desktop:
 
 ```powershell
 docker build --platform linux/amd64 -t calls-log-runner .
@@ -623,8 +649,9 @@ exists, CI's *Privacy gate* job is red by design, and `main` accepts no merge.
 request. It has two jobs, both required before a PR can merge into `main`:
 *Privacy gate* (above), and *Tests, image and OCR*. The second builds the runner
 image, runs `run_tests.py` inside it, and repeats the image checks from
-*Runner image* (§2). The actions are pinned to exact commits, and Dependabot
-opens a PR each week when they have updates.
+*Runner image* (§2). The actions are pinned to exact commits, and the runner
+image's two base images to exact digests; Dependabot opens a PR each week when
+either has updates.
 
 **Deploy (`.github/workflows/deploy.yml`)** is the only way changes reach AWS.
 It holds no AWS key: it signs in through GitHub OIDC with the role ARNs stored
