@@ -968,3 +968,80 @@ def test_parity_needs_an_expectations_file():
         code = parity_check.main(["--image", "x", "--ref", tmp])
     assert code == 2
     assert "No expectations file" in out.call_args.args[0]
+
+
+# ---------------------------------------------------------------------------
+# Privacy gate (tools/check_private_data.py): the hashed denylist and the
+# fail-closed mode CI uses. All values here are fictional.
+# ---------------------------------------------------------------------------
+
+import os
+
+from tools import check_private_data as privacy
+
+_FAKE_VALUES = [
+    ("employee name 'nguyen van fake'", "Nguyễn Văn Fake"),
+    ("a spreadsheet ID from Employees.gs", "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcd"),
+    ("SHEETS_SYNC_SECRET", "s3cr3t-Value-For-Tests"),
+]
+
+
+def test_denylist_export_holds_no_value_and_no_name():
+    blob = json.dumps(privacy.export_denylist(_FAKE_VALUES))
+    for _label, value in _FAKE_VALUES:
+        assert value not in blob and privacy.norm(value) not in blob
+    assert "fake" not in blob.lower()
+    assert [e["label"] for e in json.loads(blob)["entries"]] == [
+        "employee name #1", "spreadsheet ID #1", "SHEETS_SYNC_SECRET"]
+
+
+def test_denylist_catches_planted_values_however_written():
+    deny = privacy.export_denylist(_FAKE_VALUES)
+    text = ("Call notes for NGUYEN VAN FAKE (accents dropped, capitals)\n"
+            "sheet: https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcd/edit\n"
+            "SECRET = 's3cr3t-Value-For-Tests'\n")
+    assert privacy.denylist_hits(text, privacy.norm(text), deny) == [
+        "SHEETS_SYNC_SECRET", "employee name #1", "spreadsheet ID #1"]
+
+
+def test_denylist_passes_clean_text():
+    deny = privacy.export_denylist(_FAKE_VALUES)
+    text = "Nguyen Van A & 2026-06-01: fictional example, nothing private here."
+    assert privacy.denylist_hits(text, privacy.norm(text), deny) == []
+
+
+def _gate(argv, files, denylist=None):
+    """Run the gate on temp files, as on a PC or CI without the private files."""
+    with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
+        root = Path(tmp)
+        for name, text in files.items():
+            (root / name).write_text(text, encoding="utf-8")
+        st.enter_context(mock.patch.object(privacy, "ROOT", root))
+        st.enter_context(mock.patch.object(privacy, "publishable_files",
+                                           return_value=list(files)))
+        st.enter_context(mock.patch.dict(os.environ, {"PRIVATE_DENYLIST": denylist or ""}))
+        out = st.enter_context(mock.patch("builtins.print"))
+        code = privacy.main(argv)
+        return code, " ".join(str(c.args[0]) for c in out.call_args_list)
+
+
+def test_gate_fails_closed_without_private_files_or_denylist():
+    code, said = _gate(["--fail-closed"], {"notes.md": "harmless"})
+    assert code == 1 and "FAILED CLOSED" in said
+    # The local git hooks don't pass --fail-closed: a note, then OK.
+    code, said = _gate([], {"notes.md": "harmless"})
+    assert code == 0 and "note:" in said
+
+
+def test_gate_with_denylist_blocks_a_planted_name_in_a_tracked_file():
+    deny = json.dumps(privacy.export_denylist(_FAKE_VALUES))
+    code, said = _gate(["--fail-closed"], {"notes.md": "Met nguyen van fake today."}, deny)
+    assert code == 1 and "notes.md: contains employee name #1 (denylist)" in said
+    assert "fake" not in said.lower().replace("notes.md", "")   # the value itself isn't printed
+    code, _ = _gate(["--fail-closed"], {"notes.md": "Nothing private."}, deny)
+    assert code == 0
+
+
+def test_gate_refuses_a_malformed_denylist():
+    code, said = _gate(["--fail-closed"], {"notes.md": "x"}, '{"format": "something else"}')
+    assert code == 1 and "can't be used" in said

@@ -1,0 +1,10 @@
+# Weekly pull requests to bump the GitHub Actions, which are pinned to full
+# commit SHAs in the workflows. Each PR runs CI like any other change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"

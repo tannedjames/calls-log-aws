@@ -145,7 +145,7 @@ Python 3.13 base (Amazon Linux 2023, x86_64 only), pinned by digest.
 Measured on 2026-10-15: 2.2 GB uncompressed and about 0.8 GB compressed, well
 under Lambda's 10 GB limit for container images.
 
-GitHub Actions (`.github/workflows/runner-image.yml`) builds and checks the
+GitHub Actions (`.github/workflows/ci.yml`, job *Tests, image and OCR*) builds and checks the
 image on every change to it. It plants decoy private files and proves they
 stay out, checks that `--cpus 1` gives 1 thread, runs `diagnose.py` and
 `check_synth.py` with `--network none --read-only`, and writes the image size
@@ -594,6 +594,37 @@ bundled hooks once per clone:
 ```powershell
 git config core.hooksPath .githooks
 ```
+
+**On GitHub (CI) the check fails closed.** The private files never exist there,
+so CI can't read the real values. Instead it runs
+`check_private_data.py --fail-closed`, which **refuses to pass** unless it gets a
+*hashed denylist* from the repository secret `PRIVATE_DENYLIST`. The denylist
+holds keyed hashes of the secret, the URL, the spreadsheet IDs and the
+accent-folded employee names, with labels like `employee name #3`. GitHub
+therefore never receives a real value, yet a value pasted into any file is still
+caught. Create or refresh it on the **office PC**, where the private files are,
+whenever an employee or the secret changes:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 tools\check_private_data.py --export-denylist denylist.json
+gh secret set PRIVATE_DENYLIST --repo tannedjames/calls-log-aws < denylist.json
+gh secret set PRIVATE_DENYLIST --repo tannedjames/calls-log-aws --app dependabot < denylist.json
+del denylist.json
+```
+
+The second line matters: pull requests that Dependabot opens can only read
+*Dependabot* secrets, so without it every Dependabot PR fails the privacy gate.
+
+Without `gh`, paste the file's contents into the repository's *Settings →
+Secrets and variables → Actions → New repository secret*. Until the secret
+exists, CI's *Privacy gate* job is red by design, and `main` accepts no merge.
+
+**CI (`.github/workflows/ci.yml`)** runs on every push to `main` and every pull
+request. It has two jobs, both required before a PR can merge into `main`:
+*Privacy gate* (above), and *Tests, image and OCR*. The second builds the runner
+image, runs `run_tests.py` inside it, and repeats the image checks from
+*Runner image* (§2). The actions are pinned to exact commits, and Dependabot
+opens a PR each week when they have updates.
 
 Licenses of dependencies: PaddleOCR, EasyOCR and Tesseract (Apache 2.0, as are
 PaddleOCR's downloaded models), openpyxl (MIT), Pillow (HPND), NumPy (BSD-3).
