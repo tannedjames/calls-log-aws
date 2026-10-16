@@ -43,6 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Names fold exactly like the Web App (norm_ under Node)
+        # cloud/naming.py copies norm_() from apps_script/WebAppSync.gs; the
+        # unit tests check it against the same cases this runs through norm_.
+        run: node tools/check_norm_parity.js
+
       - name: Plant decoy private files in the build folder
         # The Owner's PC has these next to the Dockerfile; the image must not.
         run: |
@@ -96,6 +101,13 @@ jobs:
           "${run[@]}" python3 diagnose.py "/synth/Nguyen Van A & 2026-06-01/shot_01.png" | tee diagnose.txt
           grep -E "usable call rows *: *[1-9]" diagnose.txt
           "${run[@]}" python3 tools/check_synth.py --dir /synth --threads 2
+
+      - name: The AWS runner reads the Synthetic Set exactly like main.py
+        run: |
+          run=(docker run --rm --network none --read-only --tmpfs /tmp --cpus 2
+               --user 1000:1000 -v "$RUNNER_TEMP/synth:/synth:ro" "$IMAGE")
+          "${run[@]}" python3 tools/check_runner_parity.py --dir /synth
+          "${run[@]}" python3 -m cloud.runner --local "/synth/Nguyen Van A & 2026-06-01" | grep '^PARITY_RESULT '
 
       - name: Record the image size and OS release
         run: |

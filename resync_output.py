@@ -20,6 +20,9 @@ Usage:
 
 Duplicate files like "Name & 2026-06-04(1).xlsx" are skipped when the base
 file for the same person/day exists; otherwise the lowest "(n)" copy is used.
+File names are read by cloud/naming.py, the parser AWS uses too: an unpadded
+date ("2026-6-4") counts; text after the date or an impossible date doesn't.
+The sessions are read from the sheet excel_writer writes (CONFIG.sheet_name).
 
 Requires: openpyxl. Network: CONFIG.sheets_webapp_url must be reachable and
 CONFIG.sheets_sync_enabled is ignored here (this tool exists to sync).
@@ -40,12 +43,10 @@ import openpyxl
 from config import CONFIG
 import sheets_sync
 from sheets_sync import SheetsSyncError
+from cloud import naming   # the one folder-name parser (AD-8), shared with AWS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("resync")
-
-FILENAME_RE = re.compile(r"^(?P<name>.+) & (?P<date>\d{4}-\d{2}-\d{2})(?:\((?P<dup>\d+)\))?$")
-
 
 @dataclass
 class _Sess:
@@ -72,7 +73,9 @@ def _fmt_time(value) -> Optional[str]:
 
 def read_sessions(xlsx_path: Path) -> List[_Sess]:
     """Read start/end pairs from the session rows of an output workbook."""
-    ws = openpyxl.load_workbook(xlsx_path, data_only=False).active
+    wb = openpyxl.load_workbook(xlsx_path, data_only=False)
+    # The sheet excel_writer.write_sessions writes to, not whichever is active.
+    ws = wb[CONFIG.sheet_name] if CONFIG.sheet_name in wb.sheetnames else wb[wb.sheetnames[0]]
     sessions: List[_Sess] = []
     row = CONFIG.first_session_row
     hard_stop = CONFIG.first_session_row + 200  # safety bound for expanded sheets
@@ -100,12 +103,12 @@ def collect_files(output_dir: Path) -> Dict[Tuple[str, str], Path]:
     for path in sorted(output_dir.glob("*.xlsx")):
         if path.name.startswith("~$"):
             continue
-        m = FILENAME_RE.match(path.stem)
-        if not m:
+        parsed = naming.parse_output_stem(path.stem)
+        if parsed is None:
             log.warning("Skipping unrecognized filename: %s", path.name)
             continue
-        key = (m.group("name"), m.group("date"))
-        rank = int(m.group("dup") or 0)
+        day, rank = parsed
+        key = (day.name, day.date)
         if key not in chosen or rank < chosen[key][0]:
             chosen[key] = (rank, path)
     return {k: v[1] for k, v in chosen.items()}
