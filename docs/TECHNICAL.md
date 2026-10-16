@@ -307,7 +307,7 @@ file exists.
 folder is ignored. HEIC (the iPhone default) is **not** supported. Chat-app
 recompression (e.g. Zalo-forwarded JPEGs) does not noticeably hurt accuracy.
 
-**How many:** up to `max_images` (40) per folder, with a warning above
+**How many:** up to `max_images` (50) per folder, with a warning above
 `safe_warn_images` (35). The template holds 16 sessions; beyond that, rows are
 inserted (`allow_extra_rows = True`).
 
@@ -408,7 +408,7 @@ post_9am_exception_limit = 4                # per DAY (see §9)
 round_up_seconds_threshold = 20
 drop_standalone_zero_sessions = False
 allow_extra_rows = True
-max_images = 40;  safe_warn_images = 35
+max_images = 50;  safe_warn_images = 35
 
 archive_input_folders = True                # move to _processed instead of delete
 input_archive_retention_days = 30

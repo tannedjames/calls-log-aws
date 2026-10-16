@@ -10,7 +10,7 @@ the functions from the PC and combines both into the report.
     result  timings and counts only: no file name, OCR text or call
 
 Nothing is written to the bucket. A Run that gets close to the 900 s limit
-stops early and says so ("cutOff"), which is the answer to "does a 40-image
+stops early and says so ("cutOff"), which is the answer to "does a 50-image
 Folder fit in one Run?".
 """
 
