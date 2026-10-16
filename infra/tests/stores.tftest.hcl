@@ -178,3 +178,22 @@ run "two_dollar_budget_alerts_the_topic" {
     error_message = "The topic policy must let Budgets publish."
   }
 }
+
+run "folder_status_table" {
+  command = plan
+
+  assert {
+    condition = (
+      aws_dynamodb_table.folders.name == "calls-log-folders" &&
+      aws_dynamodb_table.folders.billing_mode == "PAY_PER_REQUEST" &&
+      aws_dynamodb_table.folders.hash_key == "pk" &&
+      aws_dynamodb_table.folders.range_key == "sk"
+    )
+    error_message = "calls-log-folders must be on demand, keyed pk/sk as cloud/status.py writes it."
+  }
+
+  assert {
+    condition     = aws_dynamodb_table.folders.deletion_protection_enabled
+    error_message = "Deletion protection must stay on."
+  }
+}
