@@ -88,6 +88,10 @@ terraform -chdir=infra/bootstrap apply bootstrap.tfplan
 terraform -chdir=infra/bootstrap output
 ```
 
+The bootstrap only works in calls-log's account: `account_id` defaults to
+`333596351215`, and Terraform refuses credentials for any other account before
+it reads or changes anything. A new account passes `-var account_id=<its id>`.
+
 The bootstrap's own state (`infra/bootstrap/terraform.tfstate`) stays on this
 PC and is gitignored; back it up with the repo folder. If it is ever lost, the
 resources are untouched; re-import them (replace `<account id>`):
@@ -115,6 +119,30 @@ terraform -chdir=infra/bootstrap import aws_iam_role_policy.plan_read calls-log-
 terraform -chdir=infra/bootstrap import aws_iam_policy.workload_boundary arn:aws:iam::<account id>:policy/calls-log-workload-boundary
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_lambda_platform calls-log-deploy:lambda-platform
 ```
+
+**From CloudShell, without the PC.** Any browser will do: CloudShell is a
+terminal in the AWS console, already signed in, with nothing to install.
+`infra/bootstrap/cloudshell.sh` checks the account, rebuilds the state by
+importing what exists (read-only), and plans; a second run applies.
+
+1. In the console, open calls-log's account (or project), region **Asia
+   Pacific (Sydney)**, then CloudShell (top bar).
+2. On GitHub, download the branch to apply as a ZIP (*Code → Download ZIP*).
+   In CloudShell, remove any older ZIP (`rm -f ~/calls-log-aws-*.zip`), then
+   *Actions → Upload file*.
+3. Run it with `bash`, never pasted line by line, so an error stops the script
+   and not the shell:
+   ```bash
+   rm -rf /tmp/cl && mkdir /tmp/cl && cd /tmp/cl && unzip -q ~/calls-log-aws-*.zip
+   bash /tmp/cl/calls-log-aws-*/infra/bootstrap/cloudshell.sh
+   ```
+4. Read the plan. Only if it shows additions alone (0 to change, 0 to destroy):
+   `bash /tmp/cl/calls-log-aws-*/infra/bootstrap/cloudshell.sh apply`.
+5. *Actions → Download file* `bootstrap/terraform.tfstate`, and put it in the
+   PC's `infra/bootstrap/` (keep the old one as a backup), or the PC's copy
+   won't know what was just created.
+
+It works in `/tmp`: the AWS provider is larger than CloudShell's 1 GB home.
 
 Never put a deploy job in a GitHub *environment*. That changes the token's
 subject to `repo:…:environment:<name>`, which no role trusts.
