@@ -164,3 +164,23 @@ run "the_bench_goes_away_when_disabled" {
     error_message = "enable_bench = false must remove every benchmark resource."
   }
 }
+
+# CreateFunction needs the repository policy to let the Lambda service pull
+# the image; the execution role's rights alone were refused (#16's first apply).
+run "lambda_may_pull_the_image_and_nothing_more" {
+  command = plan
+
+  assert {
+    condition     = aws_ecr_repository_policy.runner.repository == "calls-log-runner"
+    error_message = "The runner repository carries the policy that lets Lambda create functions from it."
+  }
+
+  assert {
+    condition = (
+      length(jsondecode(data.aws_iam_policy_document.runner_repository.json).Statement) == 1 &&
+      one(jsondecode(data.aws_iam_policy_document.runner_repository.json).Statement).Principal == { Service = "lambda.amazonaws.com" } &&
+      toset(flatten([one(jsondecode(data.aws_iam_policy_document.runner_repository.json).Statement).Action])) == toset(["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"])
+    )
+    error_message = "Only the Lambda service, and only pulling: no push, no delete, no other principal."
+  }
+}
