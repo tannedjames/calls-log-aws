@@ -192,7 +192,7 @@ resource "aws_lambda_function" "runner" {
     variables = local.calls_log_env
   }
 
-  depends_on = [aws_cloudwatch_log_group.runner, aws_iam_role_policy.runner]
+  depends_on = [aws_cloudwatch_log_group.runner, aws_iam_role_policy.runner, aws_ecr_repository_policy.runner]
 }
 
 resource "aws_lambda_event_source_mapping" "runs" {

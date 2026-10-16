@@ -65,7 +65,7 @@ run "plan_role_can_only_read" {
     condition = length(setsubtract(
       flatten([for s in jsondecode(data.aws_iam_policy_document.plan_read.json).Statement : s.Action]),
       ["s3:ListBucket", "s3:GetObject", "ecr:DescribeRepositories", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
-      "dynamodb:DescribeTable"],
+      "ecr:GetRepositoryPolicy", "dynamodb:DescribeTable"],
     )) == 0
     error_message = "The plan role runs code from any pull request: it may only list and read the state and describe repositories and tables."
   }

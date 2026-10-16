@@ -124,7 +124,7 @@ resource "aws_lambda_function" "intake" {
     ignore_changes = [reserved_concurrent_executions]
   }
 
-  depends_on = [aws_cloudwatch_log_group.intake, aws_iam_role_policy.intake]
+  depends_on = [aws_cloudwatch_log_group.intake, aws_iam_role_policy.intake, aws_ecr_repository_policy.runner]
 }
 
 resource "aws_lambda_function_url" "intake" {

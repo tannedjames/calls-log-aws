@@ -240,6 +240,9 @@ data "aws_iam_policy_document" "deploy_ecr" {
       "ecr:PutLifecyclePolicy",
       "ecr:GetLifecyclePolicy",
       "ecr:DeleteLifecyclePolicy",
+      "ecr:GetRepositoryPolicy", # the policy that lets Lambda pull (infra/ecr.tf)
+      "ecr:SetRepositoryPolicy",
+      "ecr:DeleteRepositoryPolicy",
       "ecr:TagResource",
       "ecr:UntagResource",
       "ecr:ListTagsForResource",
@@ -409,6 +412,7 @@ data "aws_iam_policy_document" "plan_read" {
     actions = [
       "ecr:DescribeRepositories",
       "ecr:GetLifecyclePolicy",
+      "ecr:GetRepositoryPolicy",
       "ecr:ListTagsForResource",
     ]
     resources = [local.ecr_repositories]
