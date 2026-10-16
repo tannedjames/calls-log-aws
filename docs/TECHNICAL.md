@@ -1019,3 +1019,65 @@ Once a day, and into the comparison log:
 It gives the Ready-to-Done median and p95 against the 2-hour target, and the
 day's counts by status. Also note any alert email (Parked, kill switch, budget),
 and the month's cost so far (Billing → Bills, or the budget's email).
+
+### A week with no PC (browser and CloudShell only)
+
+When the PC is unavailable, AWS can process the days on its own and write the
+Sheets. You need a desktop browser (the page's folder picker doesn't work on a
+phone), the AWS console and CloudShell in ap-southeast-2. This skips the
+Comparison Period for those days, so the first folder runs with the AWS Sync
+Switch off and is checked by hand before AWS writes anything.
+
+1. **The private values, from the live Apps Script project**: the Web App URL
+   (Deploy → Manage deployments), `SECRET`, and the whole of `Employees.gs`.
+2. **CloudShell**: `aws sts get-caller-identity` must show the project's
+   account. Upload `main` as a ZIP from GitHub (Code → Download ZIP;
+   CloudShell: Actions → Upload file), `unzip` it and `cd` into it. Write the
+   two private files with `nano`, never `echo`, so no value reaches the shell
+   history:
+   - `$HOME/private/secrets_local.py`: the lines `SHEETS_WEBAPP_URL = "…"`
+     and `SHEETS_SYNC_SECRET = "…"`;
+   - `$HOME/private/Employees.gs`: the pasted file.
+
+   ```bash
+   chmod 600 $HOME/private/*
+   python3 tools/put_parameters.py --from-private-files --secrets $HOME/private/secrets_local.py --employees $HOME/private/Employees.gs
+   python3 tools/put_parameters.py --alert-email ADDRESS     # then confirm from the email AWS sends
+   python3 tools/put_parameters.py --passphrase
+   python3 tools/put_parameters.py --sync-enabled false
+   rm -rf $HOME/private
+   aws lambda get-function-url-config --function-name calls-log-intake --query FunctionUrl --output text --region ap-southeast-2
+   ```
+
+   `put_parameters.py` needs only the standard library, so CloudShell's own
+   `python3` runs it. The first line prints three "set" lines and the employee
+   count.
+3. **First folder, Sync Switch off**: on the page, upload one day folder and
+   mark it Ready. The first Run is slower while the OCR models load. Once it is
+   Done, download its Day Sheet from the search and check the Sessions. If it
+   Fails or Parks, read the error:
+   `aws logs tail /aws/lambda/calls-log-runner --since 1h --region ap-southeast-2`.
+4. **AWS on**: `python3 tools/put_parameters.py --sync-enabled true`, then
+   upload that folder again. A new upload processes the day again and, with the
+   switch on, writes its tab; check it in the Sheet.
+5. **The rest of the week**: upload each day's folders through the page.
+   `python3 tools/turnaround.py --days 1` also runs in CloudShell.
+
+`tools/resync.py` and `tools/enqueue.py --requeue` don't run in CloudShell:
+they read folder names with `main.py`'s parser, which loads the OCR libraries.
+To redo a day without the PC, upload its folder again.
+
+To stop or restart AWS from CloudShell, the commands above in bash form:
+
+```bash
+uuid=$(aws lambda list-event-source-mappings --function-name calls-log-runner --query "EventSourceMappings[0].UUID" --output text --region ap-southeast-2)
+aws lambda update-event-source-mapping --uuid "$uuid" --no-enabled --region ap-southeast-2   # stop the runner
+aws lambda update-event-source-mapping --uuid "$uuid" --enabled --region ap-southeast-2      # start it again
+aws lambda put-function-concurrency --function-name calls-log-intake --reserved-concurrent-executions 0 --region ap-southeast-2   # close the page (2 opens it)
+```
+
+**When the PC is back**, don't re-run those days on it while its
+`sheets_sync_enabled` is on: that would overwrite their tabs. To make
+the week Comparison Period data after the fact, process the same folders on
+the PC with its switch off and run `tools\compare_outputs.py` on those dates.
+`tools\import_outputs.py` leaves the days AWS made alone.
