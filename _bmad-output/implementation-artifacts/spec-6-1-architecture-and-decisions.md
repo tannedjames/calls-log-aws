@@ -20,8 +20,8 @@ account numbers or token subjects.
 - ADRs 1-6 as the AC lists (route, no VPC, guardrails, lease, checkpoints,
   orientation fix), plus 7 (hand-applied bootstrap and role fence) and 8 (secrets
   out of state).
-- `lessons-from-the-first-deploys.md`; the ECR row is marked until its fix has
-  been through a live apply.
+- `lessons-from-the-first-deploys.md`; the ECR row records the verified fix
+  (#18's deploy: 13 added, no drift).
 - The runbook stays in `docs/TECHNICAL.md` §11 and the Operator guide in
   `docs/OPERATOR_GUIDE.md`; the index links both rather than copying them.
 
