@@ -38,3 +38,28 @@ resource "aws_ecr_lifecycle_policy" "runner" {
     }]
   })
 }
+
+# Lambda creates a function from this image only if the repository policy lets
+# the Lambda service pull it (or if the caller may write that policy itself):
+# the execution role's pull rights are not enough for CreateFunction. Found
+# when #16's first apply failed with "Lambda does not have permission to
+# access the ECR image". This is AWS's documented minimum statement. Another
+# account's function still can't use the image: creating one cross-account
+# also needs that account's principal granted here, and none is. Every
+# function depends on this policy, so none is created before it exists.
+data "aws_iam_policy_document" "runner_repository" {
+  statement {
+    sid     = "LambdaECRImageRetrievalPolicy"
+    actions = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_ecr_repository_policy" "runner" {
+  repository = aws_ecr_repository.runner.name
+  policy     = data.aws_iam_policy_document.runner_repository.json
+}

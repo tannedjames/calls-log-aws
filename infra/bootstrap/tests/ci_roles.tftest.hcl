@@ -64,9 +64,19 @@ run "plan_role_can_only_read" {
   assert {
     condition = length(setsubtract(
       flatten([for s in jsondecode(data.aws_iam_policy_document.plan_read.json).Statement : s.Action]),
-      ["s3:ListBucket", "s3:GetObject", "ecr:DescribeRepositories", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource"],
+      ["s3:ListBucket", "s3:GetObject", "ecr:DescribeRepositories", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
+      "ecr:GetRepositoryPolicy", "dynamodb:DescribeTable"],
     )) == 0
-    error_message = "The plan role runs code from any pull request: it may only list and read the state and describe repositories."
+    error_message = "The plan role runs code from any pull request: it may only list and read the state and describe repositories and tables."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.plan_read.json).Statement :
+      s.Resource == "arn:aws:dynamodb:ap-southeast-2:123456789012:table/calls-log-*"
+      if contains(flatten([s.Action]), "dynamodb:DescribeTable")
+    ])
+    error_message = "The plan role describes calls-log tables only (metadata, never items)."
   }
 
   assert {

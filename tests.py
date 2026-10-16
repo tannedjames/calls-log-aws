@@ -2245,6 +2245,19 @@ def test_function_environments_name_only_what_settings_reads():
     assert named == set(settings.ENVIRONMENT.values()), named ^ set(settings.ENVIRONMENT.values())
 
 
+def test_every_function_waits_for_the_repository_policy():
+    # CreateFunction is refused until the repository policy lets Lambda pull
+    # the image (infra/ecr.tf); Terraform would otherwise create both at once.
+    text = _infra_text()
+    if text is None:
+        return
+    blocks = _re.findall(r'resource "aws_lambda_function" "(\w+)" \{(.*?)\n\}', text, _re.S)
+    assert blocks, "no functions found"
+    for name, body in blocks:
+        m = _re.search(r"depends_on\s*=\s*\[([^\]]*)\]", body)
+        assert m and "aws_ecr_repository_policy.runner" in m.group(1), name
+
+
 def test_every_function_command_names_a_real_handler():
     text = _infra_text()
     if text is None:

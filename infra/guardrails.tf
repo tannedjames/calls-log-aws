@@ -106,7 +106,7 @@ resource "aws_lambda_function" "killswitch" {
     })
   }
 
-  depends_on = [aws_cloudwatch_log_group.killswitch, aws_iam_role_policy.killswitch]
+  depends_on = [aws_cloudwatch_log_group.killswitch, aws_iam_role_policy.killswitch, aws_ecr_repository_policy.runner]
 }
 
 # ----- the alarms ----------------------------------------------------------------
