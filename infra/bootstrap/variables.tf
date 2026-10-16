@@ -4,6 +4,17 @@ variable "region" {
   default     = "ap-southeast-2"
 }
 
+variable "account_id" {
+  description = "The only AWS account the bootstrap may touch (calls-log's). A new account passes -var account_id=<its id>."
+  type        = string
+  default     = "333596351215"
+
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.account_id))
+    error_message = "Must be a 12-digit AWS account ID."
+  }
+}
+
 variable "github_repo" {
   description = "owner/name of the GitHub repo allowed to deploy, from its main branch only."
   type        = string
