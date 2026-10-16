@@ -88,6 +88,18 @@ run "function_roles_are_fenced" {
     ])) == toset(["arn:aws:s3:::calls-log-data-333596351215/work/*", "arn:aws:s3:::calls-log-data-333596351215/results/*"])
     error_message = "The runner writes checkpoints and Day Sheets only, never uploads."
   }
+
+  # A missing checkpoint must read as 404 (NoSuchKey), not 403: S3 gives 404
+  # only to a caller allowed to list the bucket, and a GetObject request has
+  # no s3:prefix for a condition to match.
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.runner.json).Statement :
+      !can(s.Condition) && s.Resource == "arn:aws:s3:::calls-log-data-333596351215"
+      if contains(flatten([s.Action]), "s3:ListBucket")
+    ])
+    error_message = "The runner's s3:ListBucket must cover the bucket without a prefix condition, or every new image's checkpoint read is AccessDenied."
+  }
 }
 
 run "a_runaway_is_stopped_under_fifty_cents" {

@@ -615,6 +615,15 @@ data "aws_iam_policy_document" "deploy_lambda_platform" {
     resources = ["*"] # read-only
   }
 
+  # The provider's default tags reach queue triggers too: it tags one when it
+  # creates it and lists its tags on every refresh. Tags can't change what a
+  # trigger does.
+  statement {
+    sid       = "TagQueueTriggers"
+    actions   = ["lambda:TagResource", "lambda:UntagResource", "lambda:ListTags"]
+    resources = ["arn:aws:lambda:${var.region}:${local.account_id}:event-source-mapping:*"]
+  }
+
   statement {
     sid       = "PullTheImageForAFunction"
     actions   = ["ecr:GetDownloadUrlForLayer"] # ecr:BatchGetImage is in the ecr policy

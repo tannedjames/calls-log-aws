@@ -9,3 +9,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-5-linux-runner-image.md`
   summary: Pin the GitHub Actions in the workflows (`actions/checkout@v5`, `actions/setup-python@v6`) to full commit SHAs, and keep them current with Dependabot
   evidence: A moved or compromised tag would run new code in CI. This doesn't matter yet because the workflow holds no secrets or AWS access, but it will once Story 2.3 adds the OIDC deploy role; harden the actions as part of Story 2.2
+- source_spec: `_bmad-output/implementation-artifacts/spec-3-1-and-3-7-lambda-platform.md`
+  summary: If the first apply of the functions fails at CreateFunction with an ECR permission error, add an `aws_ecr_repository_policy` granting `lambda.amazonaws.com` `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer` (condition `aws:SourceArn` = `function:calls-log-*`), plus `ecr:SetRepositoryPolicy`, `GetRepositoryPolicy` and `DeleteRepositoryPolicy` for the deploy role in the bootstrap
+  evidence: unverified, would be high (no function can be created). The Lambda guide says the execution role or the repository policy is enough, and the roles have the pull rights; only the first live apply settles it

@@ -95,16 +95,15 @@ data "aws_iam_policy_document" "runner" {
     resources = ["${local.arns.runner_logs}:*"]
   }
 
+  # No s3:prefix condition, on purpose: a Run reads work/<uploadId>/<file>.json
+  # for every image, and most don't exist yet. S3 answers a missing key with
+  # 404 only to a caller allowed to list the bucket, otherwise 403, and a
+  # GetObject request carries no s3:prefix to match. Listing shows key names
+  # only; the objects stay limited below.
   statement {
     sid       = "ListUploadsAndCheckpoints"
     actions   = ["s3:ListBucket"]
     resources = [local.data_bucket_arn]
-
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = ["inbox/*", "work/*"]
-    }
   }
 
   statement {
