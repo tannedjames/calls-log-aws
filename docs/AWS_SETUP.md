@@ -46,7 +46,7 @@ project was created in, and AWS refuses others (decision D-22).
 | Role | Trusts only | Can |
 |---|---|---|
 | `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories; manage the data bucket's settings, including CORS for the upload page (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets; create and describe the `calls-log-*` tables (not delete them, nor read or write items); create roles only under the path `/calls-log/` and only with the workload boundary, and pass them only to Lambda; manage the `calls-log-*` functions, their queue triggers, queues, log groups and alarms |
-| `calls-log-plan` | pull requests of that repo | read the prod state and describe those repositories, nothing else |
+| `calls-log-plan` | pull requests of that repo | read the prod state and describe those repositories and the `calls-log-*` tables (metadata, no items), nothing else |
 
 **Function roles are fenced twice.** The roles the functions run as
 (`calls-log-runner`, `calls-log-killswitch`, `calls-log-intake`, `calls-log-bench`) are created by
@@ -143,7 +143,7 @@ importing what exists (read-only), and plans; a second run applies.
    eval "$(aws configure export-credentials --profile calls-log --format env)"
    ```
 4. Read the plan. Only if it shows **0 to destroy** and the changes the
-   story's PR lists (Epic 4: 0 to add, 2 to change):
+   story's PR lists (Epic 4: 0 to add, 3 to change):
    `bash /tmp/cl/calls-log-aws-*/infra/bootstrap/cloudshell.sh apply`.
 5. *Actions → Download file* `bootstrap/terraform.tfstate`, and put it in the
    PC's `infra/bootstrap/` (keep the old one as a backup), or the PC's copy
@@ -199,10 +199,11 @@ A higher limit costs nothing; Lambda bills per use.
   Run it again whenever an employee is added or the secret is rotated
   (Story 5.4).
 - **The upload page** (Epic 4). Its bootstrap change, applied by hand before
-  its PR merges, gives the deploy role `s3:PutBucketCORS` on the data bucket
-  and lets the kill switch set `calls-log-intake`'s reserved concurrency (the
-  boundary's `ThrottleTheUploadPage`); the plan shows 2 to change, 0 to add,
-  0 to destroy. After the deploy, set the passphrase (at least 12
+  its PR merges, gives the deploy role `s3:PutBucketCORS` on the data bucket,
+  lets the kill switch set `calls-log-intake`'s reserved concurrency (the
+  boundary's `ThrottleTheUploadPage`), and lets the plan role describe the
+  `calls-log-*` tables (pull-request plans failed without it once the table
+  existed); the plan shows 0 to add, 3 to change, 0 to destroy. After the deploy, set the passphrase (at least 12
   characters; it asks twice, shows nothing and stores only a PBKDF2 hash)
   and read the address to give the Operator:
   ```powershell

@@ -413,6 +413,15 @@ data "aws_iam_policy_document" "plan_read" {
     ]
     resources = [local.ecr_repositories]
   }
+
+  # Even an unrefreshed plan describes a DynamoDB table already in the state
+  # (the provider checks it while diffing): without this, every pull-request
+  # plan failed once calls-log-folders existed. Table metadata only, no items.
+  statement {
+    sid       = "DescribeTables"
+    actions   = ["dynamodb:DescribeTable"]
+    resources = [local.tables]
+  }
 }
 
 resource "aws_iam_role_policy" "plan_read" {
