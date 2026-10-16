@@ -16,3 +16,8 @@ output "alerts_topic_arn" {
   description = "Subscribe the Owner's email here with tools/put_parameters.py --alert-email."
   value       = aws_sns_topic.alerts.arn
 }
+
+output "folders_table" {
+  description = "Folder Status (cloud/status.py)."
+  value       = aws_dynamodb_table.folders.name
+}

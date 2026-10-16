@@ -170,3 +170,23 @@ run "no_bucket_in_the_account_can_be_public" {
     error_message = "All four account-wide Block Public Access settings must be on."
   }
 }
+
+run "deploy_table_rights_stay_on_calls_log_tables" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_tables.json).Statement :
+      s.Resource == "arn:aws:dynamodb:ap-southeast-2:123456789012:table/calls-log-*"
+    ])
+    error_message = "The deploy role's DynamoDB rights must stay on calls-log-* tables."
+  }
+
+  assert {
+    condition = length([
+      for a in flatten([for s in jsondecode(data.aws_iam_policy_document.deploy_tables.json).Statement : s.Action]) :
+      a if contains(["dynamodb:DeleteTable", "dynamodb:*"], a) || strcontains(a, "Item") || strcontains(a, "Query") || strcontains(a, "Scan")
+    ]) == 0
+    error_message = "The deploy role may not delete tables or read or write items."
+  }
+}

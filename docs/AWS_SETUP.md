@@ -43,7 +43,7 @@ project was created in, and AWS refuses others (decision D-22).
 
 | Role | Trusts only | Can |
 |---|---|---|
-| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories; manage the data bucket's settings (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets |
+| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories; manage the data bucket's settings (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets; create and describe the `calls-log-*` tables (not delete them, nor read or write items) |
 | `calls-log-plan` | pull requests of that repo | read the prod state and describe those repositories, nothing else |
 
 A pull request can change the workflow it runs, so the plan role must stay
@@ -95,6 +95,7 @@ terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_ecr calls-log
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_data_bucket calls-log-deploy:data-bucket
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_parameters calls-log-deploy:parameters
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_alerts calls-log-deploy:alerts
+terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_tables calls-log-deploy:tables
 terraform -chdir=infra/bootstrap import aws_s3_account_public_access_block.account <account id>
 terraform -chdir=infra/bootstrap import aws_iam_role.plan calls-log-plan
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.plan_read calls-log-plan:read-only-plan
