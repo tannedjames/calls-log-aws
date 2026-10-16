@@ -1397,6 +1397,21 @@ def test_settings_are_read_once_per_container():
     assert first.intake_passphrase_hash == ""   # Terraform's placeholder counts as empty
 
 
+def test_settings_are_read_again_after_fifteen_minutes():
+    ssm, now = _FakeSsm(_ST_VALUES), [1000.0]
+    settings.reset_cache()
+    try:
+        first = settings.load(ssm, _ST_ENV, clock=lambda: now[0])
+        now[0] += settings.CACHE_SECONDS
+        assert settings.load(ssm, _ST_ENV, clock=lambda: now[0]) is first and ssm.batch_calls == 1
+        ssm.values = dict(_ST_VALUES, sync_secret="a-rotated-secret")
+        now[0] += 1
+        assert settings.load(ssm, _ST_ENV, clock=lambda: now[0]).sync_secret == "a-rotated-secret"
+    finally:
+        settings.reset_cache()
+    assert ssm.batch_calls == 2
+
+
 def test_settings_missing_parameters_are_empty():
     s = settings.read(_FakeSsm({"webapp_url": "unset"}), {})
     assert (s.webapp_url, s.sync_secret, s.name_prefixes) == ("", "", ())
@@ -3052,3 +3067,322 @@ def test_kill_switch_emails_when_it_cannot_turn_the_page_off():
     else:
         raise AssertionError("the failure must reach Lambda, which retries the invocation")
     assert "could NOT stop the upload page" in sns.sent[0]["Subject"]
+
+
+# ---------------------------------------------------------------------------
+# Epic 5: importing the PC's history, comparing PC and AWS, the writer
+# switches and the turnaround report (tools/import_outputs.py,
+# compare_outputs.py, switches.py, turnaround.py). Day Sheets are made up.
+# ---------------------------------------------------------------------------
+
+from session_builder import Session as _Session
+
+from tools import compare_outputs, import_outputs, switches, turnaround
+
+
+class _ScanDynamo(_FakeDynamo):
+    def scan(self, TableName, FilterExpression, ExpressionAttributeValues, ProjectionExpression):
+        assert FilterExpression == "imported = :t" and ProjectionExpression == "personDay"
+        want = ExpressionAttributeValues[":t"]["S"]
+        return {"Items": [{"personDay": {"S": i["personDay"]}} for i in self.items.values()
+                          if i.get("imported") == want]}
+
+
+class _HistoryCli(_FakeCli):
+    """Adds results/ versions with metadata and SHA-256, downloads, a scan and the SSM switch."""
+
+    def __init__(self, fail_after=None, switch="false"):
+        super().__init__()
+        self.dynamo = _ScanDynamo()
+        self.versions, self.switch, self.fail_after = {}, switch, fail_after
+
+    def put_version(self, key, data, meta=None):
+        self.versions.setdefault(key, []).append((data, dict(meta or {})))
+        self.keys = sorted(set(self.keys) | {key})
+
+    def __call__(self, cmd, capture_output, text, encoding, errors):
+        assert cmd[cmd.index("--region") + 1] == "ap-southeast-2"
+        op = f"{cmd[1]} {cmd[2]}"
+
+        def arg(flag):
+            return cmd[cmd.index(flag) + 1]
+
+        if op == "s3api put-object":
+            self.log.append(op)
+            if self.fail_after is not None:
+                if self.fail_after == 0:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="connection reset")
+                self.fail_after -= 1
+            assert arg("--checksum-algorithm") == "SHA256"
+            name, _, value = arg("--metadata").partition("=")
+            self.put_version(arg("--key"), Path(arg("--body")).read_bytes(), {name: value})
+            return _ok('{"ETag": "\\"x\\""}')
+        if op == "s3api head-object":
+            self.log.append(op)
+            assert arg("--checksum-mode") == "ENABLED"
+            data, meta = self.versions[arg("--key")][-1]
+            return _ok(json.dumps({"Metadata": meta, "ChecksumSHA256": _b64.b64encode(
+                hashlib.sha256(data).digest()).decode()}))
+        if op == "s3 cp" and cmd[3].startswith("s3://"):
+            self.log.append("s3 cp down")
+            Path(cmd[4]).write_bytes(self.versions[cmd[3].split("/", 3)[3]][-1][0])
+            return _ok()
+        if op == "ssm get-parameter":
+            self.log.append(op)
+            return _ok(json.dumps({"Parameter": {"Name": "/calls-log/sync_enabled", "Value": self.switch}}))
+        return super().__call__(cmd, capture_output, text, encoding, errors)
+
+
+def _day_sheet(path, pairs):
+    sessions = [_Session(n, a, b, 30, 1) for n, (a, b) in enumerate(pairs, 1)]
+    with mock.patch.object(excel_writer, "log"):
+        excel_writer.write_sessions(_TEMPLATE, path, sessions)
+    return path
+
+
+def _run_tool(module, argv, cli, **kw):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = module.main(argv, run=cli, **kw)
+    return code, out.getvalue() + err.getvalue()
+
+
+def _history(folder):
+    out = Path(folder)
+    _day_sheet(out / "Nguyen Van A & 2026-06-01.xlsx", [("08:00", "09:00")])
+    _day_sheet(out / "Nguyen Van A & 2026-06-01(1).xlsx", [("08:00", "09:30")])
+    _day_sheet(out / "Nguyen Van A & 2026-06-01(2).xlsx", [("08:00", "10:00")])
+    _day_sheet(out / "Tran Thi B & 2026-06-02(3).xlsx", [("13:00", "14:00")])
+    _day_sheet(out / "Tran Thi B & 2026-06-02(1).xlsx", [("13:00", "15:00")])
+    (out / "notes.xlsx").write_bytes(b"not a day sheet")
+    (out / "~$Tran Thi B & 2026-06-02(1).xlsx").write_bytes(b"lock file")
+    return out
+
+
+def test_import_orders_versions_so_resync_outputs_choice_is_current():
+    import resync_output
+
+    with tempfile.TemporaryDirectory() as d:
+        out = _history(d)
+        plans = import_outputs.plan(out)
+        chosen = resync_output.collect_files(out)
+        assert [(p.day.key, [f.name for f in p.files]) for p in plans] == [
+            ("Nguyen Van A & 2026-06-01", ["Nguyen Van A & 2026-06-01(1).xlsx",
+                                           "Nguyen Van A & 2026-06-01(2).xlsx", "Nguyen Van A & 2026-06-01.xlsx"]),
+            ("Tran Thi B & 2026-06-02", ["Tran Thi B & 2026-06-02(3).xlsx", "Tran Thi B & 2026-06-02(1).xlsx"])]
+        for p in plans:
+            assert p.current == chosen[(p.day.name, p.day.date)]
+
+
+def test_import_uploads_every_version_marks_done_and_a_second_run_changes_nothing():
+    cli = _HistoryCli()
+    with tempfile.TemporaryDirectory() as d:
+        out = _history(d)
+        code, said = _run_tool(import_outputs, ["--output", str(out)], cli)
+        assert code == 0, said
+        key = "results/Nguyen Van A & 2026-06-01.xlsx"
+        assert [v[0] for v in cli.versions[key]] == [(out / n).read_bytes() for n in (
+            "Nguyen Van A & 2026-06-01(1).xlsx", "Nguyen Van A & 2026-06-01(2).xlsx", "Nguyen Van A & 2026-06-01.xlsx")]
+        items = list(cli.dynamo.items.values())
+        assert sorted(i["personDay"] for i in items) == ["Nguyen Van A & 2026-06-01", "Tran Thi B & 2026-06-02"]
+        assert all(i["status"] == "Done" and i["imported"] == "true" and "upDay" not in i for i in items)
+        assert "PC Person-Days: 2 = imported 2 + imported before 0 + processed in AWS 0" in said
+        puts, writes = cli.log.count("s3api put-object"), cli.dynamo.writes
+        code, said = _run_tool(import_outputs, ["--output", str(out)], cli)
+        assert code == 0 and cli.log.count("s3api put-object") == puts and cli.dynamo.writes == writes
+        assert "= imported 0 + imported before 2 + processed in AWS 0" in said
+
+
+def test_import_leaves_a_day_aws_processed_itself_alone():
+    cli = _HistoryCli()
+    cli.put_version("results/Tran Thi B & 2026-06-02.xlsx", b"the runner's own Day Sheet")
+    with tempfile.TemporaryDirectory() as d:
+        code, said = _run_tool(import_outputs, ["--output", str(_history(d))], cli)
+    assert code == 0 and cli.versions["results/Tran Thi B & 2026-06-02.xlsx"] == [(b"the runner's own Day Sheet", {})]
+    assert "left alone, AWS processed it itself: Tran Thi B & 2026-06-02" in said
+    assert "= imported 1 + imported before 0 + processed in AWS 1" in said
+
+
+def test_import_cut_short_is_finished_by_the_next_run():
+    cli = _HistoryCli(fail_after=1)
+    with tempfile.TemporaryDirectory() as d:
+        out = _history(d)
+        code, said = _run_tool(import_outputs, ["--output", str(out)], cli)
+        assert code == 1 and "Run it again" in said and cli.dynamo.writes == 0
+        cli.fail_after = None
+        code, said = _run_tool(import_outputs, ["--output", str(out)], cli)
+        assert code == 0, said
+        key = "results/Nguyen Van A & 2026-06-01.xlsx"
+        assert cli.versions[key][-1][0] == (out / "Nguyen Van A & 2026-06-01.xlsx").read_bytes()
+        assert len([i for i in cli.dynamo.items.values() if i["personDay"] == _RUN_PD]) == 1
+
+
+def test_import_dry_run_changes_nothing():
+    cli = _HistoryCli()
+    with tempfile.TemporaryDirectory() as d:
+        code, said = _run_tool(import_outputs, ["--output", str(_history(d)), "--dry-run"], cli)
+    assert code == 0 and "s3api put-object" not in cli.log and cli.dynamo.writes == 0
+    assert "would import Nguyen Van A & 2026-06-01: 3 version(s), current Nguyen Van A & 2026-06-01.xlsx" in said
+
+
+def test_import_verify_checks_the_count_and_the_checksums():
+    cli = _HistoryCli()
+    with tempfile.TemporaryDirectory() as d:
+        out = _history(d)
+        _run_tool(import_outputs, ["--output", str(out)], cli)
+        code, said = _run_tool(import_outputs, ["--output", str(out), "--verify"], cli)
+        assert code == 0 and "with a Day Sheet in AWS: 2" in said and "2 of 2 sampled imports match" in said
+        cli.put_version("results/Tran Thi B & 2026-06-02.xlsx", b"changed since", {"import-sha256": "x"})
+        code, said = _run_tool(import_outputs, ["--output", str(out), "--verify"], cli)
+        assert code == 1 and "DIFFERENT Tran Thi B & 2026-06-02" in said
+        _day_sheet(out / "Le Van C & 2026-06-03.xlsx", [("09:00", "10:00")])
+        code, said = _run_tool(import_outputs, ["--output", str(out), "--verify"], cli)
+        assert code == 1 and "missing in AWS: Le Van C & 2026-06-03" in said
+
+
+def test_compare_shows_labels_dates_and_times_only():
+    cli = _HistoryCli()
+    with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as private:
+        out = Path(d)
+        same = _day_sheet(out / "Nguyen Van A & 2026-06-01.xlsx", [("08:00", "09:00"), ("10:00", "11:00")])
+        _day_sheet(out / "Tran Thi B & 2026-06-01.xlsx", [("08:00", "09:00"), ("10:00", "11:00")])
+        _day_sheet(out / "Le Van C & 2026-06-02.xlsx", [("08:00", "09:00")])
+        _day_sheet(out / "Nguyen Van A & 2026-05-31.xlsx", [("08:00", "09:00")])   # before --since
+        other = _day_sheet(Path(private) / "aws.xlsx", [("08:00", "09:00"), ("10:00", "11:05")])
+        cli.put_version("results/Nguyen Van A & 2026-06-01.xlsx", same.read_bytes())
+        cli.put_version("results/Tran Thi B & 2026-06-01.xlsx", other.read_bytes())
+        cli.put_version("results/Pham Van D & 2026-06-02.xlsx", same.read_bytes())
+        key = Path(private) / "key.txt"
+        code, said = _run_tool(compare_outputs, ["--output", str(out), "--since", "2026-06-01",
+                                                 "--key", str(key)], cli)
+        assert code == 1
+        lines = said.strip().splitlines()
+        assert lines == ["F1 2026-06-01: 2 sessions -> IDENTICAL",
+                         "F2 2026-06-01: session 2: PC 10:00-11:00, AWS 10:00-11:05 -> DIFFERENT",
+                         "F3 2026-06-02: MISSING IN AWS",
+                         "F4 2026-06-02: MISSING ON THE PC",
+                         "1 of 4 day(s) IDENTICAL"]
+        for name in ("Nguyen", "Tran", "Le Van", "Pham"):
+            assert name not in said
+        assert key.read_text(encoding="utf-8").splitlines()[1] == "F2\tTran Thi B & 2026-06-01"
+        code, said = _run_tool(compare_outputs, ["--output", str(out), "--date", "2026-6-1"], cli)
+        assert code == 1 and said.count("-> ") == 2
+        inside = Path(__file__).resolve().parent / "compare-key.txt"
+        try:
+            assert _run_tool(compare_outputs, ["--output", str(out), "--date", "2026-06-01", "--key", str(inside)],
+                             cli)[0] == 2 and not inside.exists()
+        finally:
+            inside.unlink(missing_ok=True)   # a broken check must not leave names in the repo
+
+
+def test_compare_all_identical_is_exit_zero():
+    cli = _HistoryCli()
+    with tempfile.TemporaryDirectory() as d:
+        sheet = _day_sheet(Path(d) / "Nguyen Van A & 2026-06-01.xlsx", [("08:00", "09:00")])
+        cli.put_version("results/Nguyen Van A & 2026-06-01.xlsx", sheet.read_bytes())
+        code, said = _run_tool(compare_outputs, ["--output", d, "--date", "2026-06-01"], cli)
+    assert code == 0 and "1 of 1 day(s) IDENTICAL" in said
+
+
+def test_switches_show_both_writers_and_change_neither():
+    cli = _HistoryCli(switch="false")
+    code, said = _run_tool(switches, [], cli, pc_on=True)
+    assert code == 0
+    assert "PC      on                   config.py: sheets_sync_enabled = False" in said
+    assert "AWS     off                  tools/put_parameters.py --sync-enabled true" in said
+    cli.switch = "true"
+    assert "Both write" in _run_tool(switches, [], cli, pc_on=True)[1]
+    assert "Nobody writes" in _run_tool(switches, [], _HistoryCli(switch="no"), pc_on=False)[1]
+    assert cli.log == ["ssm get-parameter", "ssm get-parameter"] and cli.dynamo.writes == 0
+
+
+def test_switches_say_unknown_when_aws_is_unreadable():
+    def run(cmd, capture_output, text, encoding, errors):
+        return SimpleNamespace(returncode=255, stdout="", stderr="Unable to locate credentials")
+
+    code, said = _run_tool(switches, [], run, pc_on=False)
+    assert code == 1 and "AWS     unknown" in said
+
+
+def test_status_records_ready_time_on_ready_and_requeue():
+    store, now = _store()
+    store.create(_RUN_PD, _RUN_UP, 2)
+    assert "readyAt" not in store.get(_RUN_PD, _RUN_UP)
+    store.mark_ready(_RUN_PD, _RUN_UP)
+    first = store.get(_RUN_PD, _RUN_UP)["readyAt"]
+    store.begin_run(_RUN_PD, _RUN_UP, "run-1")
+    store.finish(_RUN_PD, _RUN_UP)
+    now[0] += 3600
+    store.requeue(_RUN_PD, _RUN_UP)
+    assert store.get(_RUN_PD, _RUN_UP)["readyAt"] > first
+
+
+def test_status_imported_day_is_done_and_kept_out_of_the_page_view():
+    store, _ = _store()
+    store.record_import(_RUN_PD, _RUN_UP)
+    item = store.get(_RUN_PD, _RUN_UP)
+    assert item["status"] == "Done" and item["imported"] == "true" and item["imageCount"] == 0
+    assert store.recent(fstatus.up_day(_RUN_UP)) == []
+    try:
+        store.record_import(_RUN_PD, _RUN_UP)
+    except fstatus.TransitionRefused:
+        pass
+    else:
+        raise AssertionError("the same import item twice must be refused")
+
+
+def test_turnaround_reports_median_and_p95_against_two_hours():
+    cli = _HistoryCli()
+    store = fstatus.FolderStatus(cli.dynamo, "calls-log-folders")
+    waits = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]   # minutes
+    for n, minutes in enumerate(waits):
+        up = f"20260605T08{n:02d}00Z-0000000{n}"
+        store.create(f"Nguyen Van A & 2026-06-{n + 1:02d}", up, 1)
+        item = cli.dynamo.items[(f"pd#Nguyen Van A & 2026-06-{n + 1:02d}", f"up#{up}")]
+        ready = _dt.datetime(2026, 6, 5, 9, 0, tzinfo=_dt.timezone.utc)
+        item.update(status="Done", readyAt=ready.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    updatedAt=(ready + _dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    store.create("Tran Thi B & 2026-06-05", "20260605T120000Z-0000000a", 1)   # still Uploading
+    code, said = _run_tool(turnaround, ["--days", "7"], cli, today=_dt.date(2026, 6, 8))
+    assert code == 0, said
+    assert "Uploads in the last 7 day(s): 11  Done 10  Uploading 1" in said
+    assert "median 50 min, p95 1 h 40 min (within the 2 h target), slowest 1 h 40 min" in said
+    assert "Nguyen" not in said and "Tran" not in said
+    item["updatedAt"] = (ready + _dt.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert _run_tool(turnaround, [], cli, today=_dt.date(2026, 6, 8))[0] == 3
+
+
+class _WebApp:
+    """The Web App's doPost order: the secret first, then the name (apps_script/WebAppSync.gs)."""
+
+    def __init__(self, secret, fail=False):
+        self.secret, self.fail, self.bodies = secret, fail, []
+
+    def __call__(self, req, timeout):
+        if self.fail:
+            raise OSError("unreachable")
+        body = json.loads(req.data)
+        self.bodies.append(body)
+        if body["secret"] != self.secret:
+            answer = {"ok": False, "error": "bad secret"}
+        else:
+            answer = {"ok": False, "error": "unknown name: " + body["name"]}
+        return _io.BytesIO(json.dumps(answer).encode("utf-8"))
+
+
+def test_check_secret_probes_without_reaching_a_sheet_and_never_prints_it():
+    from tools import check_secret
+
+    cfg = SimpleNamespace(sheets_webapp_url="https://script.google.com/macros/s/FICTIONAL/exec",
+                          sheets_sync_secret="the-new-secret")
+    app = _WebApp("the-new-secret")
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(out):
+        assert check_secret.main([], opener=app, config=cfg) == 0
+        assert check_secret.main(["--old"], opener=app, config=cfg, ask=lambda p: "the-old-secret") == 0
+        assert check_secret.main(["--old"], opener=app, config=cfg, ask=lambda p: "the-new-secret") == 1
+        assert check_secret.main([], opener=_WebApp("x", fail=True), config=cfg) == 1
+    said = out.getvalue()
+    assert "ACCEPTED (expected ACCEPTED)" in said and "REFUSED (expected REFUSED)" in said
+    assert all(b["name"] == "zz-secret-check" and b["sessions"] == [] for b in app.bodies)
+    assert "the-new-secret" not in said and "the-old-secret" not in said

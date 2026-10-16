@@ -14,11 +14,12 @@ from the expected prior state: a write whose condition fails changes nothing
 and raises TransitionRefused (or returns False for the lease).
 
     create        -> Uploading
-    mark_ready    Uploading -> Pending
+    record_import -> Done, imported (Story 5.1: a PC Day Sheet brought over; no images)
+    mark_ready    Uploading -> Pending (readyAt: the start of the turnaround)
     begin_run     take the lease, then Pending | Failed | Processing -> Processing
                   (attempts + 1), or -> Parked when 3 Runs have already started
     finish        Processing -> Done | Failed
-    requeue       Done | Failed | Parked -> Pending, attempts back to 0
+    requeue       Done | Failed | Parked -> Pending, attempts back to 0, readyAt again
 
 Processing -> Processing is a redelivered message after a Run that timed out
 and so never wrote Failed. It needs the lease, which outlives the 900 s Lambda
@@ -59,7 +60,7 @@ class Busy(Exception):
 
 
 _NAMES = {"#s": "status", "#a": "attempts", "#u": "updatedAt", "#r": "lastRunAt",
-          "#e": "lastError", "#h": "holder", "#x": "expiresAt"}
+          "#e": "lastError", "#h": "holder", "#x": "expiresAt", "#y": "readyAt"}
 
 
 def _s(value: str) -> Dict[str, str]:
@@ -169,9 +170,27 @@ class FolderStatus:
                 raise TransitionRefused(f"{person_day} / {upload_id} already exists") from None
             raise
 
+    def record_import(self, person_day: str, upload_id: str) -> None:
+        """
+        A Day Sheet imported from the PC's output/ (Story 5.1): Done from the
+        start, no images, and no upDay, so the upload page's 7-day view doesn't
+        fill with history.
+        """
+        now = _iso(self.clock())
+        item = {**self._key(person_day, upload_id), "status": _s(Status.DONE.value),
+                "personDay": _s(person_day), "uploadId": _s(upload_id), "imported": _s("true"),
+                "imageCount": _n(0), "attempts": _n(0), "createdAt": _s(now), "updatedAt": _s(now)}
+        try:
+            self.client.put_item(TableName=self.table, Item=item,
+                                 ConditionExpression="attribute_not_exists(pk)")
+        except Exception as e:
+            if _refused(e):
+                raise TransitionRefused(f"{person_day} / {upload_id} already exists") from None
+            raise
+
     def mark_ready(self, person_day: str, upload_id: str) -> Dict[str, Any]:
         """Uploading -> Pending, once the intake has counted every image."""
-        return self._update(person_day, upload_id, "SET #s = :to, #u = :now", "#s IN (:from0)",
+        return self._update(person_day, upload_id, "SET #s = :to, #u = :now, #y = :now", "#s IN (:from0)",
                             {":to": _s(Status.PENDING.value), ":from0": _s(Status.UPLOADING.value),
                              ":now": _s(_iso(self.clock()))})
 
@@ -222,7 +241,7 @@ class FolderStatus:
     def requeue(self, person_day: str, upload_id: str) -> Dict[str, Any]:
         """Done | Failed | Parked -> Pending with the attempt count reset (the Owner's re-queue)."""
         return self._update(
-            person_day, upload_id, "SET #s = :to, #a = :zero, #u = :now REMOVE #e",
+            person_day, upload_id, "SET #s = :to, #a = :zero, #u = :now, #y = :now REMOVE #e",
             "#s IN (:from0, :from1, :from2)",
             {":to": _s(Status.PENDING.value), ":zero": _n(0), ":now": _s(_iso(self.clock())),
              ":from0": _s(Status.DONE.value), ":from1": _s(Status.FAILED.value),

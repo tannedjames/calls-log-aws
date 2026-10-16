@@ -44,6 +44,8 @@ above never import it.
 | `cloud/bench.py` | Story 3.1's benchmark function (only while `enable_bench` is on). |
 | `tools/enqueue.py` | From the PC: sends Folders to the AWS runner, or re-queues a stored one (§11). |
 | `tools/resync.py` | From the PC: re-sends stored Day Sheets to the Sheets, the AWS `resync_output.py` (§11). |
+| `tools/import_outputs.py` | From the PC, once: the PC's past Day Sheets into AWS, every `(n)` copy as a version (§11). |
+| `tools/compare_outputs.py`, `tools/switches.py`, `tools/turnaround.py`, `tools/check_secret.py` | From the PC, for the switch-over (§11): PC vs AWS Day Sheets by F-label, who writes to the Sheets, Ready-to-Done times, and which secret the Web App accepts. |
 | `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters and the page's passphrase, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
 | `infra/`, `infra/bootstrap/` | Terraform: everything in AWS. `docs/AWS_SETUP.md` has the manual steps. |
 
@@ -913,3 +915,107 @@ purpose:
 ```powershell
 aws lambda put-function-concurrency --function-name calls-log-intake --reserved-concurrent-executions 0 --region ap-southeast-2
 ```
+
+### Who writes to the Sheets (the two switches)
+
+The PC and AWS each have their own switch; neither reads the other's (AD-10).
+See both at once:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 tools\switches.py
+```
+
+| Writer | The switch | Change it with |
+|---|---|---|
+| PC | `sheets_sync_enabled` in `config.py` | edit the line (`True` or `False`), save |
+| AWS | `/calls-log/sync_enabled` | `tools\put_parameters.py --sync-enabled true` or `false`; the next Run reads it |
+
+With both on, process each Folder in one place only, except during the
+Comparison Period (below), where the PC writes and AWS doesn't.
+
+### Importing the PC's history (once, before the Comparison Period)
+
+Brings every Day Sheet in `output/` into AWS, so `tools\resync.py` and the page's
+Day Sheet search work for past days too. Each `(n)` copy becomes a version, and
+the current one is the file `resync_output.py` would send. It changes nothing on
+the PC, and a second run changes nothing in AWS:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 tools\import_outputs.py --dry-run
+.\.venv\Scripts\python.exe -X utf8 tools\import_outputs.py
+.\.venv\Scripts\python.exe -X utf8 tools\import_outputs.py --verify
+```
+
+The last line of the import adds up: PC Person-Days = imported + imported before
++ processed in AWS (a day AWS already made keeps its own Day Sheet). `--verify`
+must end with every day present and the sampled checksums matching. If the
+import stops with an AWS error, run it again: finished days are skipped and a
+day cut short is completed.
+
+### The Comparison Period (two weeks, every working day)
+
+The PC stays the writer: PC switch on, AWS switch off. Each day:
+
+1. Process the day's Folders on the PC as usual.
+2. Send the same Folders to AWS (`tools\enqueue.py` or the page).
+3. Once AWS has finished them (the page's status, or `tools\turnaround.py`):
+   ```powershell
+   .\.venv\Scripts\python.exe -X utf8 tools\compare_outputs.py --date 2026-06-01 --key D:\private\compare-2026-06-01.txt
+   ```
+   It prints F-labels, dates, counts and times, never a name, so its output
+   can go straight into `docs/aws/comparison-log.md` with the switches table
+   and the Operator's hands-on minutes that day (SM-5's baseline). The `--key`
+   file says which Person-Day each label is; it has names, so it stays outside
+   the repo (the tool refuses a path inside it).
+4. Any `DIFFERENT` or `MISSING` stops the plan until it is explained and fixed:
+   look the label up in the key file, then run `diagnose.py` on that day's
+   images on the PC.
+
+Cutover needs every day of the two weeks `IDENTICAL`.
+
+### Switching back to the PC (rehearse it once before cutover)
+
+The way out of any AWS problem, within 30 minutes. Time the rehearsal and
+write the time in the comparison log:
+
+1. AWS off: `tools\put_parameters.py --sync-enabled false`. AWS keeps making Day
+   Sheets but no longer writes to the Sheets.
+2. PC on: `sheets_sync_enabled = True` in `config.py`.
+3. `tools\switches.py` shows PC on, AWS off.
+4. Process one Folder on the PC as usual, and check its tab in the Sheet.
+
+If AWS itself is the problem, also stop the runner ("Stopping the runner by
+hand" above) and close the page ("Stopping the upload page by hand"). After any
+change to `requirements.lock`, a model or the `Dockerfile`, run the parity check
+(§2, "Parity check") before both systems are trusted to write again.
+
+### Cutover day
+
+1. **Rotate the Web App secret**, at a quiet time with AWS's switch off:
+   - make a new secret (e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"`);
+   - in the live Apps Script project set `SECRET`, then **Deploy → Manage
+     deployments → edit the existing deployment → New version**. Never "New
+     deployment": that makes a new `/exec` URL;
+   - put it in `secrets_local.py`, then `tools\put_parameters.py --from-private-files`;
+   - check: `tools\check_secret.py` says ACCEPTED, and `tools\check_secret.py --old`
+     (type the old one) says REFUSED. The check syncs a made-up name, so it
+     never reaches a sheet;
+   - AWS reads the new secret within 15 minutes; then send one day with
+     `tools\resync.py --name ... --date ...` and check its tab.
+2. **Switch writers**: AWS on (`--sync-enabled true`), PC off
+   (`sheets_sync_enabled = False`); `tools\switches.py` to confirm.
+3. **The Operator moves to the page**: give them its address and the
+   passphrase, and `docs/OPERATOR_GUIDE.md`. They upload that day's Folders
+   through it.
+
+### The first week after cutover
+
+Once a day, and into the comparison log:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 tools\turnaround.py --days 1
+```
+
+It gives the Ready-to-Done median and p95 against the 2-hour target, and the
+day's counts by status. Also note any alert email (Parked, kill switch, budget),
+and the month's cost so far (Billing → Bills, or the budget's email).
