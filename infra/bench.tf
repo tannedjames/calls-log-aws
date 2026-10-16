@@ -87,5 +87,5 @@ resource "aws_lambda_function" "bench" {
     variables = { CALLS_LOG_BUCKET = aws_s3_bucket.data.bucket }
   }
 
-  depends_on = [aws_cloudwatch_log_group.bench, aws_iam_role_policy.bench]
+  depends_on = [aws_cloudwatch_log_group.bench, aws_iam_role_policy.bench, aws_ecr_repository_policy.runner]
 }
