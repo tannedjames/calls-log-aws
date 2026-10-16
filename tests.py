@@ -1220,3 +1220,143 @@ def test_core_modules_never_import_cloud():
     for name in core:
         text = (root / f"{name}.py").read_text(encoding="utf-8")
         assert not _re.search(r"^\s*(from|import)\s+cloud\b", text, _re.M), f"{name}.py imports cloud"
+
+
+# ---------------------------------------------------------------------------
+# Run-time settings (cloud/settings.py, AD-9 and AD-10) and config.py's
+# environment path. SSM is faked; every value is fictional.
+# ---------------------------------------------------------------------------
+
+import dataclasses
+import logging
+import sys
+import types
+
+import config as config_module
+import sheets_sync
+from cloud import settings
+
+_ST_SECRET = "s3cr3t-Value-For-Tests"
+_ST_URL = "https://script.google.com/macros/s/FICTIONAL-DEPLOYMENT/exec"
+
+
+class _FakeSsm:
+    def __init__(self, values, switch="false"):
+        self.values, self.switch = values, switch
+        self.batch_calls = self.switch_calls = 0
+
+    def get_parameters(self, Names, WithDecryption):
+        assert WithDecryption is True
+        self.batch_calls += 1
+        found = [{"Name": n, "Value": self.values[n.removeprefix("/calls-log/")]}
+                 for n in Names if n.removeprefix("/calls-log/") in self.values]
+        return {"Parameters": found,
+                "InvalidParameters": [n for n in Names if n.removeprefix("/calls-log/") not in self.values]}
+
+    def get_parameter(self, Name, WithDecryption):
+        assert Name == "/calls-log/sync_enabled" and WithDecryption is True
+        self.switch_calls += 1
+        return {"Parameter": {"Name": Name, "Value": self.switch}}
+
+
+_ST_VALUES = {
+    "webapp_url": _ST_URL, "sync_secret": _ST_SECRET,
+    "name_prefixes": '["nguyen van a", "tran thi b"]',
+    "intake_passphrase_hash": "unset", "alert_email": "owner@example.com",
+}
+_ST_ENV = {"CALLS_LOG_BUCKET": "calls-log-data-123456789012", "CALLS_LOG_TABLE": "calls-log-folders"}
+
+
+def test_settings_are_read_once_per_container():
+    ssm = _FakeSsm(_ST_VALUES)
+    settings.reset_cache()
+    try:
+        first = settings.load(ssm, _ST_ENV)
+        again = settings.load(ssm, {})
+    finally:
+        settings.reset_cache()
+    assert ssm.batch_calls == 1 and again is first
+    assert (first.bucket, first.table, first.queue_url) == ("calls-log-data-123456789012", "calls-log-folders", "")
+    assert first.webapp_url == _ST_URL and first.sync_secret == _ST_SECRET
+    assert first.name_prefixes == ("nguyen van a", "tran thi b")
+    assert first.intake_passphrase_hash == ""   # Terraform's placeholder counts as empty
+
+
+def test_settings_missing_parameters_are_empty():
+    s = settings.read(_FakeSsm({"webapp_url": "unset"}), {})
+    assert (s.webapp_url, s.sync_secret, s.name_prefixes) == ("", "", ())
+
+
+def test_sync_switch_is_read_fresh_each_run():
+    ssm = _FakeSsm(_ST_VALUES, switch="false")
+    assert settings.sync_enabled(ssm) is False
+    ssm.switch = " TRUE "
+    assert settings.sync_enabled(ssm) is True
+    ssm.switch = "yes"   # only "true" turns it on
+    assert settings.sync_enabled(ssm) is False
+    assert ssm.switch_calls == 3
+
+
+def test_config_environment_wins_over_secrets_local():
+    local = types.ModuleType("secrets_local")
+    local.SHEETS_WEBAPP_URL, local.SHEETS_SYNC_SECRET = "https://example.invalid/local", "local-secret"
+    env = {"SHEETS_WEBAPP_URL": "https://example.invalid/env", "SHEETS_SYNC_SECRET": "env-secret"}
+    with mock.patch.dict(sys.modules, {"secrets_local": local}):
+        assert config_module._credentials(env) == ("https://example.invalid/env", "env-secret")
+        assert config_module._credentials({}) == ("https://example.invalid/local", "local-secret")
+    with mock.patch.dict(sys.modules, {"secrets_local": None}):   # no file: import fails
+        assert config_module._credentials({}) == ("", "")
+
+
+def test_sync_with_no_credentials_raises_its_existing_error():
+    target = config_module.Config()
+    target.sheets_webapp_url, target.sheets_sync_secret = "", ""
+    settings.configure_core(settings.Settings(), sync_on=True, config=target)
+    with mock.patch.object(sheets_sync, "CONFIG", target):
+        try:
+            sheets_sync.sync_day("Nguyen Van A", "2026-06-01", [])
+        except sheets_sync.SheetsSyncError as e:
+            assert "sheets_webapp_url is empty" in str(e)
+        else:
+            raise AssertionError("sync_day did not refuse an empty Web App URL")
+
+
+def test_settings_cannot_change_the_load_bearing_flags():
+    env = dict(_ST_ENV, CALLS_LOG_OCR_STRICT_ENGINE="false", CALLS_LOG_PADDLE_ENABLE_MKLDNN="true",
+               CALLS_LOG_POST_9AM_EXCEPTION_LIMIT="99", OCR_STRICT_ENGINE="false",
+               PADDLE_ENABLE_MKLDNN="true", POST_9AM_EXCEPTION_LIMIT="99")
+    before = config_module.Config()
+    target = dataclasses.replace(before)
+    with mock.patch.dict(os.environ, env):
+        s = settings.read(_FakeSsm(_ST_VALUES), env)
+        settings.configure_core(s, sync_on=True, config=target)
+    changed = {f.name for f in dataclasses.fields(before) if getattr(before, f.name) != getattr(target, f.name)}
+    assert changed <= {"sheets_webapp_url", "sheets_sync_secret", "sheets_sync_enabled"}
+    assert (target.ocr_strict_engine, target.paddle_enable_mkldnn, target.post_9am_exception_limit) == (True, False, 4)
+    assert (target.sheets_webapp_url, target.sheets_sync_secret, target.sheets_sync_enabled) == (_ST_URL, _ST_SECRET, True)
+
+
+def test_settings_never_log_secrets_or_names():
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            records.append(self.format(record))
+
+    handler = _Keep(level=logging.DEBUG)
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    settings.reset_cache()
+    try:
+        s = settings.load(_FakeSsm(_ST_VALUES), _ST_ENV)
+        settings.configure_core(s, sync_on=False, config=config_module.Config())
+        text = "\n".join(records) + repr(s) + str(s)
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
+        settings.reset_cache()
+    assert "settings loaded" in text
+    for private in (_ST_SECRET, _ST_URL, "nguyen van a", "tran thi b", "owner@example.com"):
+        assert private not in text, f"{private!r} reached a log line or repr"
