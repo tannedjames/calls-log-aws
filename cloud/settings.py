@@ -40,6 +40,7 @@ ENVIRONMENT = {
     "table": "CALLS_LOG_TABLE",
     "queue_url": "CALLS_LOG_QUEUE_URL",
     "alerts_topic_arn": "CALLS_LOG_ALERTS_TOPIC_ARN",
+    "runner_function": "CALLS_LOG_RUNNER_FUNCTION",   # the kill switch's only
 }
 
 
@@ -49,6 +50,7 @@ class Settings:
     table: str = ""
     queue_url: str = ""
     alerts_topic_arn: str = ""
+    runner_function: str = ""
     # Private: kept out of repr, so a log line can't show them.
     webapp_url: str = field(default="", repr=False)
     sync_secret: str = field(default="", repr=False)
@@ -87,6 +89,11 @@ def read(ssm: Any, environ: Mapping[str, str] = os.environ) -> Settings:
         intake_passphrase_hash=_value(values.get("intake_passphrase_hash")),
         alert_email=_value(values.get("alert_email")),
     )
+
+
+def from_environment(environ: Mapping[str, str] = os.environ) -> Settings:
+    """Only the CALLS_LOG_* names, for a function that reads no parameter (the kill switch)."""
+    return Settings(**{name: environ.get(var, "") for name, var in ENVIRONMENT.items()})
 
 
 def load(ssm: Any = None, environ: Mapping[str, str] = os.environ) -> Settings:

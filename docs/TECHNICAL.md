@@ -30,6 +30,20 @@ explain why the current settings are what they are.
 | `tools/check_private_data.py` | tool | Fails if a commit or push would publish employee data or credentials. |
 | `tests.py` / `run_tests.py` | tests | Acceptance + regression tests; `run_tests.py` runs them without pytest. |
 
+The AWS side (`cloud/`, `infra/`) wraps the same pipeline. The core modules
+above never import it.
+
+| File | What it does |
+|---|---|
+| `cloud/runner.py` | One Run: a queued Folder through the unchanged pipeline, its Day Sheet to `results/`, then the Sheet if the AWS Sync Switch is on. The Lambda handler, and a CLI for parity. |
+| `cloud/status.py` | Folder Status: the only writer of the `calls-log-folders` table (states, lease, attempts). |
+| `cloud/storage.py`, `cloud/naming.py`, `cloud/settings.py` | The data bucket, the one folder-name parser, and run-time settings and secrets. |
+| `cloud/killswitch.py` | Called by a guardrail alarm: turns the runner's queue trigger off and emails the Owner (§11). |
+| `cloud/bench.py` | Story 3.1's benchmark function (only while `enable_bench` is on). |
+| `tools/enqueue.py` | From the PC: sends Folders to the AWS runner (§11). |
+| `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
+| `infra/`, `infra/bootstrap/` | Terraform: everything in AWS. `docs/AWS_SETUP.md` has the manual steps. |
+
 ---
 
 ## 2. Install
@@ -406,8 +420,9 @@ and `post_9am_exception_limit`, is the same on the PC and in AWS.
 
 **AWS settings (`cloud/settings.py`).** It is the only reader of the
 `CALLS_LOG_*` environment variables, which Terraform sets: `CALLS_LOG_BUCKET`,
-`CALLS_LOG_TABLE`, `CALLS_LOG_QUEUE_URL` and `CALLS_LOG_ALERTS_TOPIC_ARN`. It
-is also the only reader of the `/calls-log/` parameters (docs/AWS_SETUP.md
+`CALLS_LOG_TABLE`, `CALLS_LOG_QUEUE_URL` and `CALLS_LOG_ALERTS_TOPIC_ARN`,
+plus `CALLS_LOG_RUNNER_FUNCTION` for the kill switch. A test fails if
+`infra/` sets a name it doesn't read. It is also the only reader of the `/calls-log/` parameters (docs/AWS_SETUP.md
 §5).
 - **Once per container:** it reads the Web App URL and secret, the allowed name
   prefixes, the upload passphrase hash and the alert address. A parameter
@@ -685,17 +700,104 @@ as repository variables.
     which the plan role must never read.
 
   Nothing is applied.
-- **Once CI is green on a push to `main`**, *Apply and push the runner image*:
-  - applies `infra/`, then plans again and fails if any drift is left;
+- **Once CI is green on a push to `main`**, *Push the runner image and apply*:
   - builds the image, runs the unit tests inside it, and pushes it to the ECR
-    repository `calls-log-runner`, tagged with the commit's full SHA.
+    repository `calls-log-runner`, tagged with the commit's full SHA;
+  - then applies `infra/` with that tag, so every function runs the new
+    image, then plans again and fails if any drift is left.
 
-  Tags are immutable and ECR keeps only the newest 2 images. A re-run for the
-  same commit skips the build. A manual run (*Run workflow*) deploys only if
-  CI is green for that commit.
+  The image goes first because Lambda refuses an image that isn't in the
+  registry; if the apply fails, the functions keep the previous image. On a
+  new account the job creates the registry before the first push. Tags are
+  immutable and ECR keeps only the newest 2 images: the running one and the
+  one before it. A re-run for the same commit skips the build. A manual run
+  (*Run workflow*) deploys only if CI is green for that commit.
 
 The deploy role trusts only `main` of this repo, so a run from any other branch
 or from a fork is refused by AWS. Roles and setup: `docs/AWS_SETUP.md`.
 
 Licenses of dependencies: PaddleOCR, EasyOCR and Tesseract (Apache 2.0, as are
 PaddleOCR's downloaded models), openpyxl (MIT), Pillow (HPND), NumPy (BSD-3).
+
+---
+
+## 11. Runbook (AWS runner)
+
+The PC keeps working as before; these steps are for the AWS side. Run them on
+the Owner's PC after `aws login`. Every alert below arrives by email through
+the `calls-log-alerts` topic (docs/AWS_SETUP.md §5).
+
+### Sending Folders to AWS
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 tools\enqueue.py "input_images\Nguyen Van A & 2026-06-01"
+.\.venv\Scripts\python.exe -X utf8 tools\enqueue.py --dry-run "input_images\Nguyen Van A & 2026-06-01"
+```
+
+It checks every folder first and sends nothing if any is refused (a name that
+isn't `<Name> & <yyyy-mm-dd>` with a real date, no images, more than
+`max_images`, or the same Person-Day twice). Then, per folder: a new upload,
+the images to `inbox/<uploadId>/`, the Folder Status Pending, one queue
+message. It moves nothing on the PC. The runner picks the message up within
+about 20 seconds and runs at most two Folders at a time. The Day Sheet lands in
+`results/<Name> & <date>.xlsx` (each Run a new version), and in the Sheet if
+the AWS Sync Switch is on.
+
+If the tool stops with an AWS error, that folder never runs (it isn't
+Pending, or has no message): send it again. The folders after it weren't
+tried.
+
+### "A Folder is Parked"
+
+The Folder failed 3 Runs; the email gives the last error. It won't run again by
+itself. Fix the cause, then send the folder again with `tools/enqueue.py`
+(Story 3.8 adds re-queueing a stored Folder). Logs, one JSON line per step:
+
+```powershell
+aws logs tail /aws/lambda/calls-log-runner --since 1d --region ap-southeast-2
+```
+
+### "The runner is stopped (kill switch)"
+
+A guardrail alarm fired and the kill switch turned the runner's queue trigger
+off. No new Run starts; Runs already going finish, and queued Folders wait in
+the queue for up to 14 days. The alarms:
+
+| Alarm | Fires when |
+|---|---|
+| `calls-log-runner-dlq` | a message reached the dead-letter queue: it was received 10 times without the runner finishing it, a crash loop (failed Runs park after 3) |
+| `calls-log-runner-errors` | 6 or more runner crashes in 15 minutes (a failed Run is not a crash) |
+| `calls-log-runner-runaway` | both Run slots busy for N quarter-hours in a row; the alarm's description gives N (7 at 2,048 MB). N is set from the memory size so that, past the free tier, a runaway costs at most $0.50 before the stop ($0.48 at 2,048 MB) |
+
+Find the cause first, with the logs above, and in the dead-letter queue:
+
+```powershell
+$acct = aws sts get-caller-identity --query Account --output text
+aws sqs get-queue-attributes --queue-url "https://sqs.ap-southeast-2.amazonaws.com/$acct/calls-log-runs-dlq" --attribute-names ApproximateNumberOfMessages --region ap-southeast-2
+```
+
+### Turning the runner back on
+
+Only once the cause is fixed (and deployed). A deploy never turns it back on:
+Terraform ignores the trigger's on/off flag on purpose.
+
+```powershell
+$uuid = aws lambda list-event-source-mappings --function-name calls-log-runner --query "EventSourceMappings[0].UUID" --output text --region ap-southeast-2
+aws lambda update-event-source-mapping --uuid $uuid --enabled --region ap-southeast-2
+aws lambda get-event-source-mapping --uuid $uuid --query State --region ap-southeast-2   # "Enabled" within a minute
+```
+
+The alarm itself returns to OK on its own once its metric is quiet. A message
+in the dead-letter queue keeps `calls-log-runner-dlq` in alarm; after reading
+it, purge the queue (`aws sqs purge-queue --queue-url <dlq url>`), then send
+that Folder again.
+
+### Stopping the runner by hand
+
+If the kill switch emailed that it could NOT stop the runner, or to pause AWS
+on purpose:
+
+```powershell
+$uuid = aws lambda list-event-source-mappings --function-name calls-log-runner --query "EventSourceMappings[0].UUID" --output text --region ap-southeast-2
+aws lambda update-event-source-mapping --uuid $uuid --no-enabled --region ap-southeast-2
+```

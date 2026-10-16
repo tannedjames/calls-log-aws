@@ -70,5 +70,6 @@ COPY tools/ tools/
 COPY --chmod=0755 cloud/ cloud/
 
 ENTRYPOINT ["/var/task/cloud/entrypoint.sh"]
-# Epic 3 adds the Lambda handler:
-#   CMD ["/lambda-entrypoint.sh", "cloud.runner.handler"]
+# No CMD: each Lambda function sets its own handler as its command
+# (infra/runner.tf, guardrails.tf, bench.tf), for example
+#   ["/lambda-entrypoint.sh", "cloud.runner.handler"]

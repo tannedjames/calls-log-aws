@@ -1,7 +1,7 @@
-# Deploy (Story 2.3). Every pull request gets a `terraform plan` for infra/,
-# posted on the PR, and nothing is applied. Once CI is green on a push to
-# main, the deploy job applies infra/ and pushes the runner image to ECR,
-# tagged with the full git SHA.
+# Deploy (Stories 2.3, 3.7). Every pull request gets a `terraform plan` for
+# infra/, posted on the PR, and nothing is applied. Once CI is green on a push
+# to main, the deploy job pushes the runner image to ECR, tagged with the full
+# git SHA, then applies infra/, which points every function at that image.
 #
 # AWS access is keyless (GitHub OIDC). Each role trusts exactly one token
 # subject: calls-log-deploy only main of this repo, calls-log-plan (read-only)
@@ -91,10 +91,13 @@ jobs:
           # plan compares the code with the state the last deploy left; the
           # deploy itself refreshes and checks for drift.
           # An init error is captured too, so every failure reaches the PR.
+          # The functions are planned with this commit's image tag; the deploy
+          # uses the merge commit's, so expect image_uri to change.
           set +e
           {
             terraform -chdir=infra init -no-color &&
-            terraform -chdir=infra plan -lock=false -refresh=false -no-color -detailed-exitcode
+            terraform -chdir=infra plan -lock=false -refresh=false -no-color -detailed-exitcode \
+              -var "runner_image_tag=$HEAD_SHA"
           } > plan.txt 2>&1
           code=$?
           set -e
@@ -107,7 +110,7 @@ jobs:
           {
             echo "### Terraform plan for \`infra/\`: $result"
             echo
-            echo "Commit $HEAD_SHA, compared with the state after the last deploy (not refreshed). Nothing is applied until this is merged and CI is green on main."
+            echo "Commit $HEAD_SHA, compared with the state after the last deploy (not refreshed). Nothing is applied until this is merged and CI is green on main; the functions then run the merge commit's image, not this commit's."
             echo
             echo "<details><summary>Plan output</summary>"
             echo
@@ -135,7 +138,7 @@ jobs:
           exit 1
 
   deploy:
-    name: Apply and push the runner image
+    name: Push the runner image and apply
     # workflow_run fires for every CI run on a branch named main, including a
     # fork's pull request from its own main, so it is narrowed to a green CI
     # run for a push to this repo's main.
@@ -196,26 +199,19 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: Terraform apply
-        run: |
-          terraform -chdir=infra init
-          terraform -chdir=infra plan -no-color -out=tfplan | tee plan.txt
-          {
-            echo "### Terraform apply for $SHA"
-            echo '```'
-            grep -E "^(Plan:|No changes)" plan.txt || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          terraform -chdir=infra apply -no-color tfplan
+      - name: Terraform init
+        run: terraform -chdir=infra init -no-color
 
-      - name: No drift after the apply
+      # The functions run an image from the registry, so on a new account the
+      # registry comes first (docs/AWS_SETUP.md); after that this does nothing.
+      - name: The image registry exists
         run: |
-          if ! terraform -chdir=infra plan -no-color -detailed-exitcode > drift.txt 2>&1; then
-            cat drift.txt
-            echo "::error::infra/ still differs from AWS after the apply (or the plan failed)"
-            exit 1
+          if terraform -chdir=infra output -raw runner_repository_url > /dev/null 2>&1; then
+            echo "calls-log-runner is in the state."
+          else
+            terraform -chdir=infra apply -no-color -auto-approve -var "runner_image_tag=$SHA" \
+              -target=aws_ecr_repository.runner -target=aws_ecr_lifecycle_policy.runner
           fi
-          echo "infra/ matches AWS."
 
       - name: Is this commit's image already in ECR?
         id: image
@@ -246,6 +242,9 @@ jobs:
           REF: ${{ steps.image.outputs.ref }}
         run: docker run --rm --network none "$REF" python3 -X utf8 run_tests.py
 
+      # Before the apply: the functions are created or updated with this tag,
+      # and Lambda refuses an image that isn't in the registry yet. If the
+      # apply then fails, the functions keep the previous image.
       - name: Push to ECR
         if: steps.image.outputs.exists == 'false'
         env:
@@ -268,3 +267,23 @@ jobs:
               --output table
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform apply
+        run: |
+          terraform -chdir=infra plan -no-color -var "runner_image_tag=$SHA" -out=tfplan | tee plan.txt
+          {
+            echo "### Terraform apply for $SHA"
+            echo '```'
+            grep -E "^(Plan:|No changes)" plan.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          terraform -chdir=infra apply -no-color tfplan
+
+      - name: No drift after the apply
+        run: |
+          if ! terraform -chdir=infra plan -no-color -detailed-exitcode -var "runner_image_tag=$SHA" > drift.txt 2>&1; then
+            cat drift.txt
+            echo "::error::infra/ still differs from AWS after the apply (or the plan failed)"
+            exit 1
+          fi
+          echo "infra/ matches AWS."

@@ -39,12 +39,24 @@ project was created in, and AWS refuses others (decision D-22).
 - account-wide S3 Block Public Access, so no bucket in the account can be
   made public. It lives here so the deploy role can never turn it off;
 - GitHub's OIDC provider;
-- the two roles GitHub Actions uses. No access key is ever created.
+- the two roles GitHub Actions uses. No access key is ever created;
+- `calls-log-workload-boundary`, the permissions boundary every function role
+  carries (below).
 
 | Role | Trusts only | Can |
 |---|---|---|
-| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories; manage the data bucket's settings (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets; create and describe the `calls-log-*` tables (not delete them, nor read or write items) |
+| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories; manage the data bucket's settings (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets; create and describe the `calls-log-*` tables (not delete them, nor read or write items); create roles only under the path `/calls-log/` and only with the workload boundary, and pass them only to Lambda; manage the `calls-log-*` functions, their queue triggers, queues, log groups and alarms |
 | `calls-log-plan` | pull requests of that repo | read the prod state and describe those repositories, nothing else |
+
+**Function roles are fenced twice.** The roles the functions run as
+(`calls-log-runner`, `calls-log-killswitch`, `calls-log-bench`) are created by
+the deploy, from `infra/`. The deploy role may create a role only under
+`/calls-log/` and only with `calls-log-workload-boundary` attached, so whatever
+a merged commit puts in a function's policy, the role can never do more than
+the boundary allows: this project's bucket, table, parameters, queues, alert
+topic, image and logs, and turning the runner's queue trigger off. The deploy
+role and the plan role sit at `/`, out of their own reach, and the boundary is
+here, where only a person changes it.
 
 A pull request can change the workflow it runs, so the plan role must stay
 harmless in any hands. That is why pull-request plans run with
@@ -75,6 +87,10 @@ terraform -chdir=infra/bootstrap apply bootstrap.tfplan
 terraform -chdir=infra/bootstrap output
 ```
 
+The bootstrap only works in calls-log's account: `account_id` defaults to
+`333596351215`, and Terraform refuses credentials for any other account before
+it reads or changes anything. A new account passes `-var account_id=<its id>`.
+
 The bootstrap's own state (`infra/bootstrap/terraform.tfstate`) stays on this
 PC and is gitignored; back it up with the repo folder. If it is ever lost, the
 resources are untouched; re-import them (replace `<account id>`):
@@ -99,7 +115,33 @@ terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_tables calls-
 terraform -chdir=infra/bootstrap import aws_s3_account_public_access_block.account <account id>
 terraform -chdir=infra/bootstrap import aws_iam_role.plan calls-log-plan
 terraform -chdir=infra/bootstrap import aws_iam_role_policy.plan_read calls-log-plan:read-only-plan
+terraform -chdir=infra/bootstrap import aws_iam_policy.workload_boundary arn:aws:iam::<account id>:policy/calls-log-workload-boundary
+terraform -chdir=infra/bootstrap import aws_iam_role_policy.deploy_lambda_platform calls-log-deploy:lambda-platform
 ```
+
+**From CloudShell, without the PC.** Any browser will do: CloudShell is a
+terminal in the AWS console, already signed in, with nothing to install.
+`infra/bootstrap/cloudshell.sh` checks the account, rebuilds the state by
+importing what exists (read-only), and plans; a second run applies.
+
+1. In the console, open calls-log's account (or project), region **Asia
+   Pacific (Sydney)**, then CloudShell (top bar).
+2. On GitHub, download the branch to apply as a ZIP (*Code → Download ZIP*).
+   In CloudShell, remove any older ZIP (`rm -f ~/calls-log-aws-*.zip`), then
+   *Actions → Upload file*.
+3. Run it with `bash`, never pasted line by line, so an error stops the script
+   and not the shell:
+   ```bash
+   rm -rf /tmp/cl && mkdir /tmp/cl && cd /tmp/cl && unzip -q ~/calls-log-aws-*.zip
+   bash /tmp/cl/calls-log-aws-*/infra/bootstrap/cloudshell.sh
+   ```
+4. Read the plan. Only if it shows additions alone (0 to change, 0 to destroy):
+   `bash /tmp/cl/calls-log-aws-*/infra/bootstrap/cloudshell.sh apply`.
+5. *Actions → Download file* `bootstrap/terraform.tfstate`, and put it in the
+   PC's `infra/bootstrap/` (keep the old one as a backup), or the PC's copy
+   won't know what was just created.
+
+It works in `/tmp`: the AWS provider is larger than CloudShell's 1 GB home.
 
 Never put a deploy job in a GitHub *environment*. That changes the token's
 subject to `repo:…:environment:<name>`, which no role trusts.
@@ -159,6 +201,20 @@ A higher limit costs nothing; Lambda bills per use.
   alert ever arrives. To change the address, run it again with the new one,
   then remove the old one with the *unsubscribe* link in any alert email. Check with
   `aws sns list-subscriptions-by-topic --topic-arn (terraform -chdir=infra output -raw alerts_topic_arn)`.
+- **Lambda cost per image** (Story 3.1, once, right after the first deploy
+  with the functions): `enable_bench` starts on, so the deploy creates one
+  benchmark function per memory size. Measure with made-up images only:
+  ```powershell
+  .\.venv\Scripts\python.exe tools\gen_synth.py
+  .\.venv\Scripts\python.exe tools\gen_synth.py --out synthetic\big --images 40 --photos 0 --sideways 0
+  .\.venv\Scripts\python.exe tools\bench_lambda.py "synthetic\Nguyen Van A & 2026-06-01" "synthetic\Nguyen Van A & 2026-06-01_photo" "synthetic\Nguyen Van A & 2026-06-01_sideways" --big "synthetic\big\Nguyen Van A & 2026-06-01" --out docs\aws\lambda-benchmark.md
+  ```
+  It prints and writes the report: GB-s per image at 1,536, 2,048 and
+  3,008 MB, the month at 12,000 images against 350,000 GB-s, and whether a
+  40-image Folder fits in one 900 s Run. Then a PR sets `runner_memory_mb` to
+  the chosen size and `enable_bench = false` (in `infra/variables.tf`), with
+  the report; merging it removes the benchmark functions. Exit code 3 means
+  the plan doesn't hold, and the report says what follows.
 - **AWS Sync Switch** (AD-10): off until the Owner turns it on.
   `tools\put_parameters.py --sync-enabled true` (or `false`). The PC's own
   switch stays in `config.py`.

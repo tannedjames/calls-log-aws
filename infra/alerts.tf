@@ -46,9 +46,37 @@ data "aws_iam_policy_document" "alerts_topic" {
   }
 }
 
+data "aws_iam_policy_document" "alerts_topic_cloudwatch" {
+  source_policy_documents = [data.aws_iam_policy_document.alerts_topic.json]
+
+  # Story 3.7: the guardrail alarms email the Owner too.
+  statement {
+    sid       = "CloudWatchAlarmsPublish"
+    actions   = ["sns:Publish"]
+    resources = [local.alerts_topic_arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudwatch.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [var.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:cloudwatch:${var.region}:${var.account_id}:alarm:calls-log-*"]
+    }
+  }
+}
+
 resource "aws_sns_topic_policy" "alerts" {
   arn    = aws_sns_topic.alerts.arn
-  policy = data.aws_iam_policy_document.alerts_topic.json
+  policy = data.aws_iam_policy_document.alerts_topic_cloudwatch.json
 }
 
 # The $2 cap (constraint 1a). AWS has no hard cap: budgets refresh up to three

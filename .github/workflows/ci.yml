@@ -73,8 +73,10 @@ jobs:
           fi
           echo "None of secrets_local.py, Employees.gs, input_images/, output/ is in the image."
 
+      # infra/ isn't in the image; mounted read-only here so the tests that
+      # check the functions' handlers and environment names against it run.
       - name: Unit tests, inside the image (Linux, the AWS runtime)
-        run: docker run --rm --network none "$IMAGE" python3 -X utf8 run_tests.py
+        run: docker run --rm --network none -v "$PWD/infra:/var/task/infra:ro" "$IMAGE" python3 -X utf8 run_tests.py
 
       - name: Threads follow the container's CPU limit
         run: |
