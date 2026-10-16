@@ -44,7 +44,7 @@ _WEBAPP_URL, _SYNC_SECRET = _credentials()
 @dataclass
 class Config:
     # ----- Limits -----
-    max_images: int = 40
+    max_images: int = 50
     safe_warn_images: int = 35  # warn (not fail) above this many files
 
     # ----- OCR -----

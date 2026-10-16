@@ -31,7 +31,7 @@ install, no AWS account.
 
 - Its name is `<Name> & <yyyy-mm-dd>` with a real date, and the name is a
   registered employee.
-- At most 40 images, each at most 15 MB, as `.jpg`, `.jpeg`, `.png`, `.webp`
+- At most 50 images, each at most 15 MB, as `.jpg`, `.jpeg`, `.png`, `.webp`
   or `.bmp`. HEIC photos aren't read: set the phone to save screenshots as
   JPEG, or convert them.
 

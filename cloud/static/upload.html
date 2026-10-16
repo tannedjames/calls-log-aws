@@ -116,7 +116,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
   const DAY = /\d{4}-\d{1,2}-\d{1,2}\s*$/;
   const PARALLEL = 4;
   let passphrase = "";            // kept in memory only, never stored
-  let limits = {maxImages: 40, maxImageMb: 15};
+  let limits = {maxImages: 50, maxImageMb: 15};
   let batch = [];                 // {folder, files, images, state, reason, ignored, upload, failed}
 
   const $ = (id) => document.getElementById(id);

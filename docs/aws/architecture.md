@@ -46,7 +46,7 @@ flowchart LR
 ## One Folder's path
 
 1. **Check.** The page checks each folder (name and real date, a registered
-   employee, 1 to 40 images, no HEIC-only, at most 15 MB each), and the server
+   employee, 1 to 50 images, no HEIC-only, at most 15 MB each), and the server
    checks again with the same parser the runner uses.
 2. **Upload.** The server writes the Folder Status item (Uploading) and returns
    one presigned POST per image, for its exact key and type. The browser sends
