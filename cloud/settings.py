@@ -5,7 +5,9 @@ The only reader of the CALLS_LOG_* environment variables, which Terraform sets
 (resource names), and of the /calls-log/ SSM parameters (the secrets and
 switches set out of band, infra/parameters.tf):
 
-* load() reads both once per container and caches them;
+* load() reads both once per container and caches them for 15 minutes, so a
+  rotated Web App secret or a new employee list reaches warm containers
+  without a deploy (Story 5.4);
 * sync_enabled() reads the AWS Sync Switch fresh, once per Run, so the Owner
   can turn it on or off between Runs;
 * configure_core() hands the pipeline core exactly three values: the Web App
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Tuple
 
@@ -61,7 +64,9 @@ class Settings:
     alert_email: str = field(default="", repr=False)
 
 
+CACHE_SECONDS = 900
 _cache: Optional[Settings] = None
+_cached_at = 0.0
 
 
 def _ssm_client():
@@ -98,11 +103,12 @@ def from_environment(environ: Mapping[str, str] = os.environ) -> Settings:
     return Settings(**{name: environ.get(var, "") for name, var in ENVIRONMENT.items()})
 
 
-def load(ssm: Any = None, environ: Mapping[str, str] = os.environ) -> Settings:
-    """The settings for this container: read once, then cached."""
-    global _cache
-    if _cache is None:
+def load(ssm: Any = None, environ: Mapping[str, str] = os.environ, *, clock=time.monotonic) -> Settings:
+    """The settings for this container: read, then cached for CACHE_SECONDS."""
+    global _cache, _cached_at
+    if _cache is None or clock() - _cached_at > CACHE_SECONDS:
         _cache = read(ssm or _ssm_client(), environ)
+        _cached_at = clock()
         log.info("settings loaded: %r", _cache)
     return _cache
 
