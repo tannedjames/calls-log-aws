@@ -1,0 +1,19 @@
+[
+  ["Nguyen Van A", "nguyen van a"],
+  ["Nguy\u1ec5n V\u0103n A", "nguyen van a"],
+  ["Nguye\u0302\u0303n Va\u0306n A", "nguyen van a"],
+  ["TR\u1ea6N TH\u1eca B", "tran thi b"],
+  ["\u0110\u1ed7 V\u0103n C", "do van c"],
+  ["  L\u00ea   Th\u1ecb\tD  ", "le thi d"],
+  ["Ph\u1ea1m\u00a0V\u0103n\u3000E", "pham van e"],
+  ["\ufeffHo\u00e0ng F", "hoang f"],
+  ["Ng\u00f4\u2028Gia", "ngo gia"],
+  ["B\u00f9i\u0085X", "bui\u0085x"],
+  ["V\u0169\u001fY", "vu\u001fy"],
+  ["\u30ac\u30ae\u30b0", "\u30ab\u3099\u30ad\u3099\u30af\u3099"],
+  ["a\u1dc0b", "a\u1dc0b"],
+  ["\u0130stanbul", "istanbul"],
+  ["\u039f\u0394\u03a5\u03a3\u03a3\u0395\u03a5\u03a3", "\u03bf\u03b4\u03c5\u03c3\u03c3\u03b5\u03c5\u03c2"],
+  ["", ""],
+  ["Nguyen Van A & 2026-06-01", "nguyen van a & 2026-06-01"]
+]

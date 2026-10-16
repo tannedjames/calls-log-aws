@@ -43,6 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      - name: Names fold exactly like the Web App (norm_ under Node)
+        # cloud/naming.py copies norm_() from apps_script/WebAppSync.gs; the
+        # unit tests check it against the same cases this runs through norm_.
+        run: node tools/check_norm_parity.js
+
       - name: Plant decoy private files in the build folder
         # The Owner's PC has these next to the Dockerfile; the image must not.
         run: |
