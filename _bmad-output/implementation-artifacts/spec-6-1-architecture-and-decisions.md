@@ -21,7 +21,8 @@ account numbers or token subjects.
   orientation fix), plus 7 (hand-applied bootstrap and role fence) and 8 (secrets
   out of state).
 - `lessons-from-the-first-deploys.md`; the ECR row records the verified fix
-  (#18's deploy: 13 added, no drift).
+  (#18's deploy: 13 added, no drift), and the last row a plan read during
+  Epic 4's deploy (12 added, 7 changed, no drift).
 - The runbook stays in `docs/TECHNICAL.md` §11 and the Operator guide in
   `docs/OPERATOR_GUIDE.md`; the index links both rather than copying them.
 
