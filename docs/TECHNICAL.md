@@ -40,7 +40,8 @@ above never import it.
 | `cloud/storage.py`, `cloud/naming.py`, `cloud/settings.py` | The data bucket, the one folder-name parser, and run-time settings and secrets. |
 | `cloud/killswitch.py` | Called by a guardrail alarm: turns the runner's queue trigger off and emails the Owner (§11). |
 | `cloud/bench.py` | Story 3.1's benchmark function (only while `enable_bench` is on). |
-| `tools/enqueue.py` | From the PC: sends Folders to the AWS runner (§11). |
+| `tools/enqueue.py` | From the PC: sends Folders to the AWS runner, or re-queues a stored one (§11). |
+| `tools/resync.py` | From the PC: re-sends stored Day Sheets to the Sheets, the AWS `resync_output.py` (§11). |
 | `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
 | `infra/`, `infra/bootstrap/` | Terraform: everything in AWS. `docs/AWS_SETUP.md` has the manual steps. |
 
@@ -750,12 +751,45 @@ tried.
 ### "A Folder is Parked"
 
 The Folder failed 3 Runs; the email gives the last error. It won't run again by
-itself. Fix the cause, then send the folder again with `tools/enqueue.py`
-(Story 3.8 adds re-queueing a stored Folder). Logs, one JSON line per step:
+itself. Fix the cause, then re-queue it (below). Logs, one JSON line per step:
 
 ```powershell
 aws logs tail /aws/lambda/calls-log-runner --since 1d --region ap-southeast-2
 ```
+
+### Re-queueing a Folder
+
+Runs a stored Folder again without uploading it: after a fix, for a Parked or
+Failed Folder, or to redo a Done day.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 tools\enqueue.py --requeue "Nguyen Van A & 2026-06-01"
+.\.venv\Scripts\python.exe -X utf8 tools\enqueue.py --requeue "Nguyen Van A & 2026-06-01" --upload-id 20260601T083005Z-0a1b2c3d
+```
+
+It takes the newest upload of that day (or the one named), if it is Done, Failed
+or Parked. It becomes Pending with its attempts back at 0, and runs again. The
+new Day Sheet is a new version of `results/<Name> & <date>.xlsx`; earlier
+versions stay. With the AWS Sync Switch on, the day's tab is overwritten, as
+when the PC re-runs a date. Uploads are kept 30 days: if some of its images are
+gone, it refuses, and you send the folder again instead.
+
+### Re-sending stored Day Sheets
+
+The AWS `resync_output.py`: it sends the stored Day Sheets to the Web App again,
+**whatever the AWS Sync Switch says**, and overwrites the days' tabs. Use it
+after the Sheets were fixed or the Web App was down. Try `--dry-run` first:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 tools\resync.py --dry-run --name "Nguyen Van A"
+.\.venv\Scripts\python.exe -X utf8 tools\resync.py --name "Nguyen Van A" --date 2026-06-01
+```
+
+`--name` is a name prefix and `--date` a day (`2026-6-1` works too); give
+either, both or neither (every stored day). Each day becomes one queue message;
+the runner sends the current version of its Day Sheet within a minute or so.
+A failed send is tried 3 times, then emailed ("a re-send to the Sheet failed"),
+and is never retried on its own: fix the cause and run it again.
 
 ### "The runner is stopped (kill switch)"
 

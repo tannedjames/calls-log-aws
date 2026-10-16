@@ -89,6 +89,18 @@ run "function_roles_are_fenced" {
     error_message = "The runner writes checkpoints and Day Sheets only, never uploads."
   }
 
+  assert {
+    condition = toset(flatten([
+      for s in jsondecode(data.aws_iam_policy_document.runner.json).Statement : s.Resource
+      if contains(flatten([s.Action]), "s3:GetObject")
+      ])) == toset([
+      "arn:aws:s3:::calls-log-data-333596351215/inbox/*",
+      "arn:aws:s3:::calls-log-data-333596351215/work/*",
+      "arn:aws:s3:::calls-log-data-333596351215/results/*",
+    ])
+    error_message = "The runner reads uploads, checkpoints and, to re-send them (Story 3.8), Day Sheets; nothing else."
+  }
+
   # A missing checkpoint must read as 404 (NoSuchKey), not 403: S3 gives 404
   # only to a caller allowed to list the bucket, and a GetObject request has
   # no s3:prefix for a condition to match.
