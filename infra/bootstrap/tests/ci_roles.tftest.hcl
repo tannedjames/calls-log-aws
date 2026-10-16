@@ -101,3 +101,72 @@ run "a_wildcard_subject_is_refused" {
 
   expect_failures = [var.github_subject_prefix]
 }
+
+run "deploy_rights_on_the_data_stay_off_the_data" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_data_bucket.json).Statement :
+      s.Resource == "arn:aws:s3:::calls-log-data-123456789012"
+    ])
+    error_message = "The deploy role's S3 rights must name the data bucket itself only: no objects, no other bucket."
+  }
+
+  assert {
+    condition = length([
+      for a in flatten([for s in jsondecode(data.aws_iam_policy_document.deploy_data_bucket.json).Statement : s.Action]) :
+      a if a == "s3:*" || a == "s3:DeleteBucket" || strcontains(a, "Object")
+    ]) == 0
+    error_message = "The deploy role may not touch objects or delete the data bucket."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_parameters.json).Statement :
+      s.Action == "ssm:DescribeParameters" ? s.Resource == "*" :
+      s.Resource == "arn:aws:ssm:ap-southeast-2:123456789012:parameter/calls-log/*"
+    ])
+    error_message = "Only ssm:DescribeParameters may use \"*\"; every other SSM right must stay under /calls-log/."
+  }
+
+  assert {
+    condition = !contains(
+      flatten([for s in jsondecode(data.aws_iam_policy_document.deploy_parameters.json).Statement : s.Action]),
+      "ssm:DeleteParameter",
+    )
+    error_message = "The deploy role may not delete a parameter: removing one is a reviewed bootstrap change."
+  }
+
+  assert {
+    condition = toset([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_alerts.json).Statement : s.Resource
+      ]) == toset([
+      "arn:aws:sns:ap-southeast-2:123456789012:calls-log-*",
+      "arn:aws:budgets::123456789012:budget/calls-log-*",
+    ])
+    error_message = "The deploy role's topic and budget rights must stay on calls-log-* resources."
+  }
+
+  assert {
+    condition = length([
+      for a in flatten([for s in jsondecode(data.aws_iam_policy_document.deploy_alerts.json).Statement : s.Action]) :
+      a if startswith(a, "sns:Subscribe") || a == "sns:Publish"
+    ]) == 0
+    error_message = "The deploy role may not subscribe anyone to alerts, or publish them."
+  }
+}
+
+run "no_bucket_in_the_account_can_be_public" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      aws_s3_account_public_access_block.account.block_public_acls,
+      aws_s3_account_public_access_block.account.block_public_policy,
+      aws_s3_account_public_access_block.account.ignore_public_acls,
+      aws_s3_account_public_access_block.account.restrict_public_buckets,
+    ])
+    error_message = "All four account-wide Block Public Access settings must be on."
+  }
+}

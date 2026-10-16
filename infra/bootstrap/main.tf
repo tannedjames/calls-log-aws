@@ -19,6 +19,27 @@ locals {
   }
   # Every repository infra/ manages is named calls-log-<component>.
   ecr_repositories = "arn:aws:ecr:${var.region}:${local.account_id}:repository/calls-log-*"
+  # What infra/ manages from Story 2.4 on (infra/data.tf, parameters.tf,
+  # alerts.tf). The data bucket's name is fixed; everything else is
+  # calls-log-* or under /calls-log/.
+  data_bucket_arn = "arn:aws:s3:::calls-log-data-${local.account_id}"
+  parameters      = "arn:aws:ssm:${var.region}:${local.account_id}:parameter/calls-log/*"
+  topics          = "arn:aws:sns:${var.region}:${local.account_id}:calls-log-*"
+  budgets         = "arn:aws:budgets::${local.account_id}:budget/calls-log-*"
+}
+
+# ---------------------------------------------------------------------------
+# Account-wide Block Public Access (AD-18): no bucket in this account can be
+# made public, whatever its own settings. It lives here, applied by hand,
+# because the deploy role must never be able to turn it off.
+# ---------------------------------------------------------------------------
+
+resource "aws_s3_account_public_access_block" "account" {
+  account_id              = local.account_id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 
 # ---------------------------------------------------------------------------
@@ -238,12 +259,115 @@ resource "aws_iam_role_policy" "deploy_ecr" {
   policy = data.aws_iam_policy_document.deploy_ecr.json
 }
 
+# The data bucket (Story 2.4): create it and manage its configuration, the
+# calls the provider makes and nothing more. No object access, so the deploy
+# role can't read or change uploads or Day Sheets, and no s3:DeleteBucket.
+# s3:ListBucket is what HeadBucket needs; it lists keys, not contents.
+data "aws_iam_policy_document" "deploy_data_bucket" {
+  statement {
+    sid = "ManageDataBucket"
+    actions = [
+      "s3:CreateBucket",
+      "s3:ListBucket",
+      "s3:GetBucket*",
+      "s3:GetAccelerateConfiguration",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetReplicationConfiguration",
+      "s3:PutBucketPublicAccessBlock",
+      "s3:PutBucketOwnershipControls",
+      "s3:PutEncryptionConfiguration",
+      "s3:PutBucketVersioning",
+      "s3:PutBucketPolicy",
+      "s3:DeleteBucketPolicy",
+      "s3:PutLifecycleConfiguration",
+      "s3:PutBucketTagging",
+      "s3:TagResource",
+    ]
+    resources = [local.data_bucket_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "deploy_data_bucket" {
+  name   = "data-bucket"
+  role   = aws_iam_role.deploy.id
+  policy = data.aws_iam_policy_document.deploy_data_bucket.json
+}
+
+# The /calls-log/ parameters (Story 2.4). Terraform reads them back when it
+# refreshes, so the deploy role can read them; its state never holds the
+# values (write-only value_wo, infra/parameters.tf). No ssm:DeleteParameter:
+# removing one is a deliberate change made here first.
+data "aws_iam_policy_document" "deploy_parameters" {
+  statement {
+    sid = "ManageParameters"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:GetParameter",
+      "ssm:GetParameters",
+      "ssm:AddTagsToResource",
+      "ssm:RemoveTagsFromResource",
+      "ssm:ListTagsForResource",
+    ]
+    resources = [local.parameters]
+  }
+
+  statement {
+    sid       = "DescribeParameters"
+    actions   = ["ssm:DescribeParameters"]
+    resources = ["*"] # this action has no resource-level form
+  }
+}
+
+resource "aws_iam_role_policy" "deploy_parameters" {
+  name   = "parameters"
+  role   = aws_iam_role.deploy.id
+  policy = data.aws_iam_policy_document.deploy_parameters.json
+}
+
+# The alert topic and the $2 budget (Story 2.4). Subscriptions are made out of
+# band, so the deploy role can't add or change who gets alerts.
+data "aws_iam_policy_document" "deploy_alerts" {
+  statement {
+    sid = "ManageTopics"
+    actions = [
+      "sns:CreateTopic",
+      "sns:DeleteTopic",
+      "sns:GetTopicAttributes",
+      "sns:SetTopicAttributes",
+      "sns:TagResource",
+      "sns:UntagResource",
+      "sns:ListTagsForResource",
+    ]
+    resources = [local.topics]
+  }
+
+  statement {
+    sid = "ManageBudgets"
+    actions = [
+      "budgets:ViewBudget",
+      "budgets:ModifyBudget",
+      "budgets:TagResource",
+      "budgets:UntagResource",
+      "budgets:ListTagsForResource",
+    ]
+    resources = [local.budgets]
+  }
+}
+
+resource "aws_iam_role_policy" "deploy_alerts" {
+  name   = "alerts"
+  role   = aws_iam_role.deploy.id
+  policy = data.aws_iam_policy_document.deploy_alerts.json
+}
+
 # ---------------------------------------------------------------------------
 # Plan role: what a pull request's `terraform plan` gets. A pull request can
 # change the workflow it runs, so this role must be harmless in any hands:
 # it reads the state and describes resources, and can't write anything, pull
 # images, or read data or parameters. Plans run with -lock=false, so it never
-# needs to write the lock file.
+# needs to write the lock file, and with -refresh=false, so it never reads the
+# resources themselves: refreshing a parameter would decrypt the secret.
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "plan" {

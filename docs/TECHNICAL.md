@@ -680,6 +680,9 @@ as repository variables.
     exact subject and that the plan role can only read;
   - a check that the deploy role refuses the PR's token;
   - `terraform plan` with the read-only plan role, posted as one PR comment.
+    It doesn't refresh: it compares the code with the state the last deploy
+    left, because refreshing would decrypt the `/calls-log/` parameters,
+    which the plan role must never read.
 
   Nothing is applied.
 - **Once CI is green on a push to `main`**, *Apply and push the runner image*:
