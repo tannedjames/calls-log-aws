@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 
 resource "aws_dynamodb_table" "folders" {
-  name                        = "calls-log-folders"
+  name                        = local.names.table
   billing_mode                = "PAY_PER_REQUEST"
   hash_key                    = "pk"
   range_key                   = "sk"

@@ -190,3 +190,78 @@ run "deploy_table_rights_stay_on_calls_log_tables" {
     error_message = "The deploy role may not delete tables or read or write items."
   }
 }
+
+run "workload_roles_are_fenced_by_the_boundary" {
+  command = plan
+
+  # Every action that creates or changes a role's permissions needs the
+  # boundary, and only under /calls-log/ (the CI roles sit at /).
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_lambda_platform.json).Statement :
+      s.Resource == "arn:aws:iam::123456789012:role/calls-log/*" &&
+      s.Condition == { StringEquals = { "iam:PermissionsBoundary" = "arn:aws:iam::123456789012:policy/calls-log-workload-boundary" } }
+      if length(setintersection(toset(flatten([s.Action])), toset([
+        "iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:PutRolePermissionsBoundary",
+      ]))) > 0
+    ])
+    error_message = "Creating a role or changing its permissions must require the calls-log boundary and the /calls-log/ path."
+  }
+
+  assert {
+    condition = length([
+      for a in flatten([for s in jsondecode(data.aws_iam_policy_document.deploy_lambda_platform.json).Statement : s.Action]) :
+      a if contains([
+        "iam:AttachRolePolicy", "iam:DeleteRolePermissionsBoundary", "iam:UpdateAssumeRolePolicy",
+        "iam:CreatePolicyVersion", "iam:SetDefaultPolicyVersion", "iam:*",
+      ], a)
+    ]) == 0
+    error_message = "The deploy role may not attach managed policies, drop the boundary, rewrite trusts, or edit policies."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_lambda_platform.json).Statement :
+      s.Resource == "arn:aws:iam::123456789012:role/calls-log/*"
+      if length([for a in flatten([s.Action]) : a if startswith(a, "iam:")]) > 0
+    ])
+    error_message = "Every IAM right of the deploy role must stay on roles under /calls-log/."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_lambda_platform.json).Statement :
+      s.Condition == { StringEquals = { "iam:PassedToService" = "lambda.amazonaws.com" } }
+      if contains(flatten([s.Action]), "iam:PassRole")
+    ])
+    error_message = "Workload roles may be passed to Lambda only."
+  }
+}
+
+run "the_boundary_reaches_only_this_project" {
+  command = plan
+
+  assert {
+    condition = length([
+      for a in flatten([for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement : s.Action]) :
+      a if endswith(a, ":*") || startswith(a, "iam:") || a == "s3:DeleteObject" || a == "s3:PutBucketPolicy"
+    ]) == 0
+    error_message = "The boundary may not grant whole services, IAM, object deletion or bucket policy changes."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement :
+      s.Resource != "*" || contains(["KillSwitch", "FindTheTrigger"], s.Sid)
+    ])
+    error_message = "Only the kill switch's mapping rights may use \"*\" in the boundary."
+  }
+
+  assert {
+    condition = one([
+      for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement : s.Condition
+      if s.Sid == "KillSwitch"
+    ]) == { ArnLike = { "lambda:FunctionArn" = "arn:aws:lambda:ap-southeast-2:123456789012:function:calls-log-*" } }
+    error_message = "The kill switch may change only calls-log functions' queue triggers."
+  }
+}

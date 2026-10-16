@@ -1981,3 +1981,363 @@ def test_runner_local_mode_reports_sessions_like_parity_check():
         got = runner.run_local(folder, ["correct output.png"], None)
     assert got == {"images": 3, "records": 4, "countable": 4,
                    "sessions": [["08:00", "09:00"], ["10:00", "11:00"]]}
+
+
+# ---------------------------------------------------------------------------
+# The Lambda platform (Stories 3.1, 3.7): the AWS CLI adapter the PC tools use,
+# tools/enqueue.py, the kill switch, and the benchmark. The AWS CLI, Lambda,
+# SNS and S3 are faked; DynamoDB is the conditional-write fake above, reached
+# through the CLI adapter. All names and values are fictional.
+# ---------------------------------------------------------------------------
+
+import base64 as _b64
+import importlib as _importlib
+
+from cloud import bench as cbench, killswitch
+from tools import aws_cli, bench_lambda, enqueue
+
+_NFD_PD = unicodedata.normalize("NFD", "Nguyễn Văn A & 2026-06-01")
+
+
+def _ok(stdout=""):
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+class _FakeCli:
+    """Stands in for subprocess.run under the AWS CLI; DynamoDB calls go to a _FakeDynamo."""
+
+    def __init__(self, fail_on=None):
+        self.dynamo, self.log, self.inputs, self.files = _FakeDynamo(), [], [], []
+        self.fail_on = fail_on
+
+    def __call__(self, cmd, capture_output, text, encoding, errors):
+        assert cmd[0] == "aws" and encoding == "utf-8" and cmd[cmd.index("--region") + 1] == "ap-southeast-2"
+        payload = None
+        if "--cli-input-json" in cmd:
+            path = Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://"))
+            raw = path.read_bytes()
+            assert raw.isascii(), "the CLI's input file must be ASCII"
+            payload = json.loads(raw)
+            self.files.append(path)
+            self.inputs.append(payload)
+        op = f"{cmd[1]} {cmd[2]}"
+        self.log.append(op)
+        if op == self.fail_on:
+            return SimpleNamespace(returncode=1, stdout="", stderr="upload failed: connection reset")
+        if op == "sts get-caller-identity":
+            return _ok('{"Account": "123456789012"}')
+        if cmd[1] == "dynamodb":
+            method = getattr(self.dynamo, cmd[2].replace("-", "_"))
+            try:
+                return _ok(json.dumps(method(**payload) or {}, ensure_ascii=False))
+            except _CondFailed:
+                return SimpleNamespace(returncode=254, stdout="", stderr=(
+                    "An error occurred (ConditionalCheckFailedException) when calling the "
+                    "UpdateItem operation: The conditional request failed"))
+        if op in ("s3 cp", "sqs send-message"):
+            return _ok()
+        raise AssertionError(f"unexpected AWS call {cmd}")
+
+
+def test_aws_cli_writes_ascii_input_reads_utf8_output_and_cleans_up():
+    seen = {}
+
+    def run(cmd, capture_output, text, encoding, errors):
+        path = Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://"))
+        seen["raw"], seen["path"] = path.read_bytes(), path
+        return _ok(json.dumps({"Attributes": {"personDay": {"S": "Nguyễn Văn A & 2026-06-01"}}},
+                              ensure_ascii=False))
+
+    out = aws_cli.Client("dynamodb", run=run).update_item(TableName="t", Key={"pk": {"S": "Nguyễn"}})
+    assert seen["raw"].isascii() and json.loads(seen["raw"])["Key"]["pk"]["S"] == "Nguyễn"
+    assert out["Attributes"]["personDay"]["S"] == "Nguyễn Văn A & 2026-06-01"
+    assert not seen["path"].exists()
+
+
+def test_aws_cli_errors_carry_the_aws_code_and_hide_values():
+    def run(cmd, capture_output, text, encoding, errors):
+        return SimpleNamespace(returncode=254, stdout="", stderr=(
+            "An error occurred (ConditionalCheckFailedException) when calling the PutItem "
+            "operation: s3cr3t was in the request"))
+
+    try:
+        aws_cli.run_cli(["dynamodb", "put-item"], {"x": 1}, run=run, hide=["s3cr3t"])
+    except aws_cli.AwsError as e:
+        assert e.response["Error"]["Code"] == "ConditionalCheckFailedException"
+        assert "s3cr3t" not in str(e)
+    else:
+        raise AssertionError("no AwsError")
+    # cloud/status.py reads a refused condition from the CLI as it would from boto3.
+    assert fstatus._refused(aws_cli.AwsError("x", "ConditionalCheckFailedException", ""))
+
+
+def _enqueue_folder(root, name, files):
+    folder = Path(root) / name
+    folder.mkdir()
+    for f in files:
+        (folder / f).write_bytes(b"made-up image")
+    return folder
+
+
+def _enqueue(argv, cli, max_images=40):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = enqueue.main(argv, run=cli, max_images=max_images)
+    return code, out.getvalue() + err.getvalue()
+
+
+def test_enqueue_uploads_then_marks_pending_then_queues():
+    cli = _FakeCli()
+    with tempfile.TemporaryDirectory() as d:
+        folder = _enqueue_folder(d, _NFD_PD, ["shot_b.jpg", "Shot_a.PNG", "notes.txt"])
+        code, said = _enqueue([str(folder)], cli)
+    assert code == 0, said
+    assert cli.log == ["sts get-caller-identity", "dynamodb put-item", "s3 cp", "s3 cp",
+                       "dynamodb update-item", "sqs send-message"]
+    message = cli.inputs[-1]
+    assert message["QueueUrl"] == "https://sqs.ap-southeast-2.amazonaws.com/123456789012/calls-log-runs"
+    body = json.loads(message["MessageBody"])
+    nfc = "Nguyễn Văn A & 2026-06-01"
+    assert body["personDay"] == nfc and body["mode"] == "process" and naming.is_upload_id(body["uploadId"])
+    (item,) = cli.dynamo.items.values()
+    assert item["status"] == "Pending" and item["imageCount"] == 2 and item["personDay"] == nfc
+    assert item["uploadId"] == body["uploadId"]
+    assert not any(p.exists() for p in cli.files)
+    assert f"upload {body['uploadId']}" in said
+
+
+def test_enqueue_uploads_images_in_the_pc_order_to_the_inbox():
+    calls = []
+    cli = _FakeCli()
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return cli(cmd, **kw)
+
+    with tempfile.TemporaryDirectory() as d:
+        folder = _enqueue_folder(d, _RUN_PD, ["shot_b.jpg", "Shot_a.PNG"])
+        assert _enqueue([str(folder)], run)[0] == 0
+    copies = [c for c in calls if c[1:3] == ["s3", "cp"]]
+    upload_id = json.loads(cli.inputs[-1]["MessageBody"])["uploadId"]
+    assert [c[3] for c in copies] == [str(folder / "Shot_a.PNG"), str(folder / "shot_b.jpg")]
+    assert [c[4] for c in copies] == [f"s3://calls-log-data-123456789012/inbox/{upload_id}/Shot_a.PNG",
+                                      f"s3://calls-log-data-123456789012/inbox/{upload_id}/shot_b.jpg"]
+
+
+def test_enqueue_refuses_every_folder_before_sending_anything():
+    cli = _FakeCli()
+    with tempfile.TemporaryDirectory() as d:
+        good = _enqueue_folder(d, _RUN_PD, ["a.jpg"])
+        args = [str(good), str(good),
+                str(_enqueue_folder(d, "holiday photos", ["a.jpg"])),              # no Person-Day
+                str(_enqueue_folder(d, "Tran Thi B & 2026-02-30", ["a.jpg"])),     # no such day
+                str(_enqueue_folder(d, "Le Van C & 2026-06-02", ["notes.txt"])),   # no images
+                str(_enqueue_folder(d, "Pham Thi D & 2026-06-03", ["1.jpg", "2.jpg", "3.jpg"])),
+                str(Path(d) / "missing")]
+        code, said = _enqueue(args, cli, max_images=2)
+    assert code == 2 and cli.log == []
+    assert said.count("\n  ") == 6 and "given twice" in said and "more than max_images (2)" in said
+
+
+def test_enqueue_dry_run_touches_no_aws():
+    cli = _FakeCli()
+    with tempfile.TemporaryDirectory() as d:
+        code, said = _enqueue(["--dry-run", str(_enqueue_folder(d, _RUN_PD, ["a.jpg", "b.jpg"]))], cli)
+    assert code == 0 and cli.log == [] and f"would send {_RUN_PD}: 2 image(s)" in said
+
+
+def test_enqueue_stops_at_an_aws_failure_and_sends_no_message():
+    cli = _FakeCli(fail_on="s3 cp")
+    with tempfile.TemporaryDirectory() as d:
+        first = _enqueue_folder(d, _RUN_PD, ["a.jpg"])
+        second = _enqueue_folder(d, "Tran Thi B & 2026-06-01", ["a.jpg"])
+        code, said = _enqueue([str(first), str(second)], cli)
+    assert code == 1
+    assert "sqs send-message" not in cli.log and cli.log.count("dynamodb put-item") == 1
+    (item,) = cli.dynamo.items.values()
+    assert item["status"] == "Uploading"   # never Pending, so no Run can pick it up
+    assert "Not tried: 1 folder(s)" in said
+
+
+class _FakeLambda:
+    def __init__(self, pages, fail=False):
+        self.pages, self.fail, self.listed, self.updates = pages, fail, [], []
+
+    def list_event_source_mappings(self, FunctionName, Marker=None):
+        self.listed.append((FunctionName, Marker))
+        return self.pages[int(Marker or 0)]
+
+    def update_event_source_mapping(self, UUID, Enabled):
+        if self.fail:
+            raise TimeoutError("simulated")
+        self.updates.append((UUID, Enabled))
+
+
+_KS_SETTINGS = settings.Settings(runner_function="calls-log-runner",
+                                 alerts_topic_arn="arn:aws:sns:ap-southeast-2:123456789012:calls-log-alerts")
+
+
+def _alarm_event(state="ALARM"):
+    # The documented shape of a CloudWatch alarm's Lambda action.
+    return {"source": "aws.cloudwatch",
+            "alarmArn": "arn:aws:cloudwatch:ap-southeast-2:123456789012:alarm:calls-log-runner-dlq",
+            "alarmData": {"alarmName": "calls-log-runner-dlq",
+                          "state": {"value": state, "reason": "Threshold Crossed: 1 datapoint was >= 1.0"}}}
+
+
+def test_kill_switch_turns_the_running_trigger_off_and_emails():
+    lam = _FakeLambda([
+        {"EventSourceMappings": [{"UUID": "u-1", "State": "Enabled"}], "NextMarker": "1"},
+        {"EventSourceMappings": [{"UUID": "u-2", "State": "Disabled"}]},
+    ])
+    sns = _FakeSns()
+    out = killswitch.respond(killswitch.alarm_of(_alarm_event()), _KS_SETTINGS, lam, sns)
+    assert lam.listed == [("calls-log-runner", None), ("calls-log-runner", "1")]
+    assert lam.updates == [("u-1", False)] and out["stopped"] == [{"uuid": "u-1", "was": "Enabled"}]
+    (mail,) = sns.sent
+    assert mail["TopicArn"] == _KS_SETTINGS.alerts_topic_arn and "stopped" in mail["Subject"]
+    assert "calls-log-runner-dlq" in mail["Message"] and "Turning the runner back on" in mail["Message"]
+
+
+def test_kill_switch_ignores_an_alarm_that_is_not_in_alarm():
+    lam, sns = _FakeLambda([{"EventSourceMappings": [{"UUID": "u-1", "State": "Enabled"}]}]), _FakeSns()
+    assert killswitch.respond(killswitch.alarm_of(_alarm_event("OK")), _KS_SETTINGS, lam, sns)["ignored"]
+    assert lam.listed == [] and sns.sent == []
+
+
+def test_kill_switch_says_so_when_the_trigger_was_already_off():
+    lam, sns = _FakeLambda([{"EventSourceMappings": [{"UUID": "u-1", "State": "Disabling"}]}]), _FakeSns()
+    assert killswitch.respond(killswitch.alarm_of(_alarm_event()), _KS_SETTINGS, lam, sns)["stopped"] == []
+    assert lam.updates == [] and "already off" in sns.sent[0]["Message"]
+
+
+def test_kill_switch_emails_when_it_cannot_stop_and_fails_so_lambda_retries():
+    lam, sns = _FakeLambda([{"EventSourceMappings": [{"UUID": "u-1", "State": "Enabled"}]}], fail=True), _FakeSns()
+    try:
+        killswitch.respond(killswitch.alarm_of(_alarm_event()), _KS_SETTINGS, lam, sns)
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("the failure must reach Lambda, which retries the invocation")
+    assert "could NOT stop" in sns.sent[0]["Subject"] and "by hand" in sns.sent[0]["Message"]
+
+
+def test_kill_switch_reads_only_the_environment():
+    env = {"CALLS_LOG_RUNNER_FUNCTION": "calls-log-runner", "CALLS_LOG_ALERTS_TOPIC_ARN": "arn:topic"}
+    got = settings.from_environment(env)
+    assert got.runner_function == "calls-log-runner" and got.alerts_topic_arn == "arn:topic"
+    assert got.sync_secret == "" and got.webapp_url == ""
+
+
+def _infra_text():
+    """infra/*.tf, or None inside the runner image, which has no infra/ (CI mounts it in)."""
+    infra = Path(__file__).resolve().parent / "infra"
+    if not infra.is_dir():
+        return None
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(infra.glob("*.tf")))
+
+
+def test_function_environments_name_only_what_settings_reads():
+    text = _infra_text()
+    if text is None:
+        return
+    named = set(_re.findall(r"\b(CALLS_LOG_[A-Z_]+)\s*=", text))
+    assert named == set(settings.ENVIRONMENT.values()), named ^ set(settings.ENVIRONMENT.values())
+
+
+def test_every_function_command_names_a_real_handler():
+    text = _infra_text()
+    if text is None:
+        return
+    handlers = set(_re.findall(r'"/lambda-entrypoint\.sh",\s*"([\w.]+)"', text))
+    assert handlers == {"cloud.runner.handler", "cloud.killswitch.handler", "cloud.bench.handler"}
+    for dotted in handlers:
+        module, _, name = dotted.rpartition(".")
+        assert callable(getattr(_importlib.import_module(module), name)), dotted
+
+
+def test_bench_times_each_image_and_returns_no_names_or_text():
+    rig = _Rig()
+    s3 = _FakeS3()
+    for name in list(_BY_IMAGE) + ["notes.txt"]:
+        s3.objects[f"bench/1/{name}"] = b"made-up image"
+    with tempfile.TemporaryDirectory() as d, \
+            mock.patch.object(runner.pipeline, "extract_calls", rig.extract_calls):
+        got = cbench.measure(s3, "calls-log-data-123456789012", "bench/1/", lambda: 800_000,
+                             memory_mb=2048, cold=True, workdir=Path(d))
+        assert not (Path(d) / "images").exists()   # the downloaded images are gone
+    assert rig.ocr_calls == ["Shot_01.jpg", "shot_02.jpg", "shot_03.png"]   # the PC's order
+    assert (got["images"], got["processed"], got["records"], got["sessions"]) == (3, 3, 4, 2)
+    assert got["cutOff"] is False and got["memoryMb"] == 2048 and got["cold"] is True
+    text = json.dumps(got)
+    assert "Shot_01" not in text and _PHONE not in text
+
+
+def test_bench_stops_before_the_time_limit_and_says_so():
+    rig = _Rig()
+    s3 = _FakeS3()
+    for name in _BY_IMAGE:
+        s3.objects[f"bench/2/{name}"] = b"made-up image"
+    left = iter([800_000, 800_000, cbench.STOP_MARGIN_MS - 1])
+    with tempfile.TemporaryDirectory() as d, \
+            mock.patch.object(runner.pipeline, "extract_calls", rig.extract_calls):
+        got = cbench.measure(s3, "b", "bench/2/", lambda: next(left), memory_mb=1536, cold=False,
+                             workdir=Path(d))
+    assert got["cutOff"] is True and got["processed"] == 2 and got["images"] == 3
+
+
+def test_bench_refuses_a_prefix_outside_bench():
+    for event in ({"prefix": "inbox/x/"}, {"prefix": "bench/1"}, {}):
+        try:
+            cbench.handler(event, None)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {event}")
+
+
+_REPORT_COLD = ("START RequestId: r1 Version: $LATEST\nEND RequestId: r1\n"
+                "REPORT RequestId: r1\tDuration: 30000.00 ms\tBilled Duration: 38000 ms\t"
+                "Memory Size: 2048 MB\tMax Memory Used: 900 MB\tInit Duration: 7950.12 ms\t\n")
+_REPORT_WARM = "REPORT RequestId: r2\tDuration: 24000.00 ms\tBilled Duration: 24000 ms\t" \
+               "Memory Size: 2048 MB\tMax Memory Used: 910 MB\t\n"
+
+
+def test_bench_report_line_is_read_cold_and_warm():
+    cold = bench_lambda.parse_report(_REPORT_COLD)
+    assert cold == {"durationMs": 30000.0, "billedMs": 38000, "memoryMb": 2048, "maxUsedMb": 900,
+                    "initMs": 7950.12}
+    assert bench_lambda.parse_report(_REPORT_COLD + _REPORT_WARM)["initMs"] is None   # the last one
+
+
+def test_bench_invoke_reads_the_result_file_and_the_log_tail():
+    def run(cmd, capture_output, text, encoding, errors):
+        assert cmd[cmd.index("--payload") + 1] == '{"prefix": "bench/1/"}'
+        assert int(cmd[cmd.index("--cli-read-timeout") + 1]) > 900
+        Path(cmd[cmd.index("--output") + 2]).write_text('{"images": 12, "processed": 12, "cold": true}',
+                                                         encoding="utf-8")
+        return _ok(json.dumps({"StatusCode": 200, "LogResult": _b64.b64encode(_REPORT_COLD.encode()).decode()}))
+
+    got = bench_lambda.invoke("calls-log-bench-2048", "bench/1/", run=run)
+    assert got["processed"] == 12 and got["billedMs"] == 38000 and got["initMs"] == 7950.12
+
+
+def _bench_run(prefix, cold, billed, images=12, median=1800, used=900):
+    return {"prefix": prefix, "cold": cold, "billedMs": billed, "images": images, "processed": images,
+            "medianImageMs": median, "maxUsedMb": used, "initMs": 8000.0 if cold else None}
+
+
+def test_bench_picks_the_lowest_gb_s_per_image_and_projects_the_month():
+    small = bench_lambda.per_size([_bench_run("bench/1/", True, 40000), _bench_run("bench/1/", False, 30000)], 1536)
+    big = bench_lambda.per_size([_bench_run("bench/1/", True, 30000), _bench_run("bench/1/", False, 18000)], 3008)
+    assert abs(small["gbsPerImage"] - 30 * 1.5 / 12) < 1e-9          # 3.75 GB-s an image
+    assert abs(small["coldGbs"] - 10 * 1.5) < 1e-9                   # the cold run's extra 10 s
+    assert abs(small["monthGbs"] - (3.75 * 12_000 + 15 * 450)) < 1e-6
+    text, holds = bench_lambda.report([small, big], None, "2026-10-16")
+    assert holds and "**Chosen: 1,536 MB**" in text and "`runner_memory_mb = 1536`" in text   # 3.75 < 4.41
+
+
+def test_bench_says_when_the_plan_does_not_hold_or_a_folder_does_not_fit():
+    slow = bench_lambda.per_size([_bench_run("bench/1/", False, 400_000)], 2048)   # 66.7 GB-s an image
+    text, holds = bench_lambda.report([slow], {"error": "timed out", "images": 40, "durationMs": 900000.0,
+                                               "memoryMb": 2048}, "2026-10-16")
+    assert not holds and "Fargate Spot" in text and "checkpoints (AD-16)" in text

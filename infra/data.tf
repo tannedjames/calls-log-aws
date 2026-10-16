@@ -12,8 +12,9 @@
 locals {
   data_bucket     = "calls-log-data-${var.account_id}"
   data_bucket_arn = "arn:aws:s3:::${local.data_bucket}"
-  # Uploads and checkpoints expire; results/ has no rule, so nothing in it does.
-  expiring_prefixes = ["inbox/", "work/"]
+  # Uploads, checkpoints and Story 3.1's benchmark images expire; results/
+  # has no rule, so nothing in it does.
+  expiring_prefixes = ["inbox/", "work/", "bench/"]
 }
 
 resource "aws_s3_bucket" "data" {

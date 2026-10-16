@@ -15,6 +15,10 @@ provider "aws" {
   skip_metadata_api_check     = true
 }
 
+variables {
+  runner_image_tag = "0123456789abcdef0123456789abcdef01234567"
+}
+
 run "data_bucket_is_locked_down" {
   command = plan
 
@@ -71,8 +75,8 @@ run "only_uploads_and_checkpoints_expire" {
   # printing a failed for-expression over these rules.
 
   assert {
-    condition     = local.expiring_prefixes == ["inbox/", "work/"]
-    error_message = "Only inbox/ and work/ may expire: Day Sheets in results/ are kept forever."
+    condition     = local.expiring_prefixes == ["inbox/", "work/", "bench/"]
+    error_message = "Only inbox/, work/ and bench/ may expire: Day Sheets in results/ are kept forever."
   }
 
   assert {
@@ -95,10 +99,19 @@ run "only_uploads_and_checkpoints_expire" {
 
   assert {
     condition = (
-      contains(["", "-"], try(coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[2].filter[0].prefix, "-"), "-")) &&
-      coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[2].expiration[0].days, 0) == 0 &&
-      aws_s3_bucket_lifecycle_configuration.data.rule[2].expiration[0].expired_object_delete_marker &&
-      length(aws_s3_bucket_lifecycle_configuration.data.rule[2].noncurrent_version_expiration) == 0
+      aws_s3_bucket_lifecycle_configuration.data.rule[2].filter[0].prefix == "bench/" &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[2].expiration[0].days == 30 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[2].noncurrent_version_expiration[0].noncurrent_days == 1
+    )
+    error_message = "bench/ (Story 3.1's made-up images) must expire after 30 days, and its noncurrent versions 1 day later."
+  }
+
+  assert {
+    condition = (
+      contains(["", "-"], try(coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[3].filter[0].prefix, "-"), "-")) &&
+      coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[3].expiration[0].days, 0) == 0 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[3].expiration[0].expired_object_delete_marker &&
+      length(aws_s3_bucket_lifecycle_configuration.data.rule[3].noncurrent_version_expiration) == 0
     )
     error_message = "The whole-bucket rule may only tidy delete markers and uploads: Day Sheets in results/ are kept forever."
   }

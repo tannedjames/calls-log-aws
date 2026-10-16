@@ -18,6 +18,9 @@ terraform {
 
 provider "aws" {
   region = var.region
+  # Signed in to any other account (a second console project, say), Terraform
+  # stops here, before importing, planning or creating anything.
+  allowed_account_ids = [var.account_id]
 
   default_tags {
     tags = {
