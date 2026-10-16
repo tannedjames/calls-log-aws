@@ -1360,3 +1360,222 @@ def test_settings_never_log_secrets_or_names():
     assert "settings loaded" in text
     for private in (_ST_SECRET, _ST_URL, "nguyen van a", "tran thi b", "owner@example.com"):
         assert private not in text, f"{private!r} reached a log line or repr"
+
+
+# ---------------------------------------------------------------------------
+# Folder Status (cloud/status.py, AD-4 to AD-6). DynamoDB is faked with a
+# small in-memory table that evaluates the expressions status.py sends and,
+# like DynamoDB, refuses undefined or unused #names and :values.
+# ---------------------------------------------------------------------------
+
+import copy
+import itertools
+
+from cloud import status as fstatus
+
+
+class _CondFailed(Exception):
+    response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
+class _FakeDynamo:
+    def __init__(self):
+        self.items = {}
+        self.writes = 0
+
+    @staticmethod
+    def _k(key):
+        return key["pk"]["S"], key["sk"]["S"]
+
+    @staticmethod
+    def _v(typed):
+        return int(typed["N"]) if "N" in typed else typed["S"]
+
+    @staticmethod
+    def _check_placeholders(exprs, names, values):
+        text = " ".join(e for e in exprs if e)
+        used_n, used_v = set(_re.findall(r"#\w+", text)), set(_re.findall(r":\w+", text))
+        assert used_n == set(names), f"names used {sorted(used_n)} vs given {sorted(names)}"
+        assert used_v == set(values), f"values used {sorted(used_v)} vs given {sorted(values)}"
+
+    def _atom(self, atom, item, names, values):
+        if atom == "attribute_not_exists(pk)":
+            return item is None
+        if item is None:
+            return False
+        m = _re.fullmatch(r"(#\w+) IN \((.*)\)", atom)
+        if m:
+            return item.get(names[m.group(1)]) in [self._v(values[v.strip()]) for v in m.group(2).split(",")]
+        m = _re.fullmatch(r"(#\w+) (<|>=|=) (:\w+)", atom)
+        assert m, f"unsupported condition {atom!r}"
+        have, want = item.get(names[m.group(1)]), self._v(values[m.group(3)])
+        if have is None:
+            return False
+        return {"<": have < want, ">=": have >= want, "=": have == want}[m.group(2)]
+
+    def _holds(self, condition, item, names, values):
+        return any(all(self._atom(a.strip(), item, names, values) for a in alt.split(" AND "))
+                   for alt in condition.split(" OR "))
+
+    def get_item(self, TableName, Key, ConsistentRead=False):
+        item = self.items.get(self._k(Key))
+        if item is None:
+            return {}
+        return {"Item": {k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}}
+
+    def put_item(self, TableName, Item, ConditionExpression):
+        self._check_placeholders([ConditionExpression], {}, {})
+        key = self._k(Item)
+        if not self._holds(ConditionExpression, self.items.get(key), {}, {}):
+            raise _CondFailed()
+        self.writes += 1
+        self.items[key] = {k: self._v(v) for k, v in Item.items()}
+
+    def update_item(self, TableName, Key, UpdateExpression, ConditionExpression,
+                    ExpressionAttributeNames, ExpressionAttributeValues, ReturnValues=None):
+        names, values = ExpressionAttributeNames, ExpressionAttributeValues
+        self._check_placeholders([UpdateExpression, ConditionExpression], names, values)
+        key = self._k(Key)
+        current = self.items.get(key)
+        if not self._holds(ConditionExpression, current, names, values):
+            raise _CondFailed()
+        item = copy.deepcopy(current) if current else {"pk": key[0], "sk": key[1]}
+        set_part, _, remove_part = UpdateExpression.partition(" REMOVE ")
+        for clause in set_part.removeprefix("SET ").split(", "):
+            target, expr = (s.strip() for s in clause.split(" = "))
+            m = _re.fullmatch(r"(#\w+) \+ (:\w+)", expr)
+            item[names[target]] = (item[names[m.group(1)]] + self._v(values[m.group(2)])) if m \
+                else self._v(values[expr])
+        for name in filter(None, (s.strip() for s in remove_part.split(","))):
+            item.pop(names[name], None)
+        self.writes += 1
+        self.items[key] = item
+        return {"Attributes": {k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}}
+
+    def delete_item(self, TableName, Key, ConditionExpression, ExpressionAttributeNames,
+                    ExpressionAttributeValues):
+        self._check_placeholders([ConditionExpression], ExpressionAttributeNames, ExpressionAttributeValues)
+        key = self._k(Key)
+        if not self._holds(ConditionExpression, self.items.get(key), ExpressionAttributeNames,
+                           ExpressionAttributeValues):
+            raise _CondFailed()
+        self.writes += 1
+        del self.items[key]
+
+
+_PD, _UP = "Nguyen Van A & 2026-06-01", "20260601T083005Z-0a1b2c3d"
+
+
+def _store(clock=None):
+    now = [1_780_000_000.0]
+    return fstatus.FolderStatus(_FakeDynamo(), "calls-log-folders", clock or (lambda: now[0])), now
+
+
+def _at(state):
+    """A store holding one upload in the given state (attempts 0)."""
+    store, now = _store()
+    store.create(_PD, _UP, 12)
+    key = ("pd#" + _PD, "up#" + _UP)
+    store.client.items[key]["status"] = state.value
+    return store, now, key
+
+
+_ALLOWED = {   # (operation, from state) pairs the AD-4 diagram allows
+    ("mark_ready", fstatus.Status.UPLOADING),
+    ("begin_run", fstatus.Status.PENDING), ("begin_run", fstatus.Status.FAILED),
+    ("begin_run", fstatus.Status.PROCESSING),   # a Run that timed out, its lease expired
+    ("finish_ok", fstatus.Status.PROCESSING), ("finish_error", fstatus.Status.PROCESSING),
+    ("requeue", fstatus.Status.DONE), ("requeue", fstatus.Status.FAILED), ("requeue", fstatus.Status.PARKED),
+}
+_OPS = {
+    "mark_ready": lambda s: s.mark_ready(_PD, _UP),
+    "begin_run": lambda s: s.begin_run(_PD, _UP, "run-1"),
+    "finish_ok": lambda s: s.finish(_PD, _UP),
+    "finish_error": lambda s: s.finish(_PD, _UP, "zero sessions"),
+    "requeue": lambda s: s.requeue(_PD, _UP),
+}
+
+
+@pytest.mark.parametrize("op,state", list(itertools.product(sorted(_OPS), list(fstatus.Status))))
+def test_status_only_the_ad4_transitions_succeed(op, state):
+    store, _, key = _at(state)
+    before = copy.deepcopy(store.client.items[key])
+    if (op, state) in _ALLOWED:
+        _OPS[op](store)
+        assert store.client.items[key]["status"] != state.value or op == "begin_run"
+    else:
+        try:
+            _OPS[op](store)
+        except fstatus.TransitionRefused:
+            pass
+        else:
+            raise AssertionError(f"{op} from {state.value} was allowed")
+        assert store.client.items[key] == before, "a refused change altered the item"
+        assert ("pd#" + _PD, "lease") not in store.client.items, "a refused start kept the lease"
+
+
+def test_status_create_twice_is_refused():
+    store, _ = _store()
+    store.create(_PD, _UP, 12)
+    try:
+        store.create(_PD, _UP, 3)
+    except fstatus.TransitionRefused:
+        assert store.get(_PD, _UP)["imageCount"] == 12
+    else:
+        raise AssertionError("an existing upload was overwritten")
+
+
+def test_status_second_run_cannot_take_the_lease_or_count_an_attempt():
+    store, now, key = _at(fstatus.Status.PENDING)
+    assert store.begin_run(_PD, _UP, "run-1")["attempts"] == 1
+    try:
+        store.begin_run(_PD, _UP, "run-2")
+    except fstatus.Busy:
+        pass
+    else:
+        raise AssertionError("two Runs held one Person-Day")
+    assert store.get(_PD, _UP)["attempts"] == 1
+    now[0] += fstatus.LEASE_SECONDS + 1   # run-1 timed out; its lease has expired
+    item = store.begin_run(_PD, _UP, "run-2")
+    assert (item["status"], item["attempts"]) == ("Processing", 2)
+
+
+def test_status_counts_attempts_first_and_parks_at_the_fourth_start():
+    store, now, key = _at(fstatus.Status.PENDING)
+    for run in (1, 2, 3):
+        item = store.begin_run(_PD, _UP, f"run-{run}")
+        assert (item["status"], item["attempts"]) == ("Processing", run)   # counted before any work
+        store.finish(_PD, _UP, f"error in run {run}")
+        store.release_lease(_PD, f"run-{run}")
+    item = store.begin_run(_PD, _UP, "run-4")
+    assert (item["status"], item["attempts"]) == ("Parked", 4)
+    assert ("pd#" + _PD, "lease") not in store.client.items   # a parked Run doesn't keep the lease
+    assert store.get(_PD, _UP)["lastError"] == "error in run 3"
+    try:
+        store.begin_run(_PD, _UP, "run-5")
+    except fstatus.TransitionRefused:
+        pass
+    else:
+        raise AssertionError("a Parked Folder ran again")
+    item = store.requeue(_PD, _UP)
+    assert (item["status"], item["attempts"]) == ("Pending", 0) and "lastError" not in item
+
+
+def test_status_lease_is_released_only_by_its_holder():
+    store, now = _store()
+    assert store.take_lease(_PD, "run-1")
+    store.release_lease(_PD, "run-2")   # not the holder: nothing happens
+    assert not store.take_lease(_PD, "run-2")
+    store.release_lease(_PD, "run-1")
+    assert store.take_lease(_PD, "run-2")
+
+
+def test_status_done_clears_the_error_and_records_times():
+    store, now, key = _at(fstatus.Status.PENDING)
+    store.begin_run(_PD, _UP, "run-1")
+    store.finish(_PD, _UP, "Web App timed out")
+    now[0] += 60
+    store.begin_run(_PD, _UP, "run-1")
+    item = store.finish(_PD, _UP)
+    assert item["status"] == "Done" and "lastError" not in item
+    assert item["updatedAt"] == "2026-05-28T20:27:40Z" and item["createdAt"] == "2026-05-28T20:26:40Z"
