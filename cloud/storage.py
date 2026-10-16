@@ -19,6 +19,10 @@ from cloud import naming
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".bmp")   # main.IMAGE_SUFFIXES
 
 
+def _missing(error: Exception) -> bool:
+    return getattr(error, "response", {}).get("Error", {}).get("Code") in ("NoSuchKey", "404")
+
+
 def pc_order(names: List[str]) -> List[str]:
     """
     The order main.gather_jpg_files gives on the Owner's Windows PC, where
@@ -61,13 +65,24 @@ class S3Storage:
                 ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         return out.get("VersionId")
 
+    def get_result(self, day: naming.PersonDay, target: Path) -> bool:
+        """The current version of results/<Person-Day>.xlsx into target; False if there is none."""
+        try:
+            out = self.client.get_object(Bucket=self.bucket, Key=naming.result_key(day))
+        except Exception as e:
+            if _missing(e):
+                return False
+            raise
+        target.write_bytes(out["Body"].read())
+        return True
+
     # ----- per-image checkpoints (AD-16) -------------------------------------
 
     def get_checkpoint(self, upload_id: str, name: str) -> Optional[list]:
         try:
             out = self.client.get_object(Bucket=self.bucket, Key=naming.work_key(upload_id, name))
         except Exception as e:
-            if getattr(e, "response", {}).get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            if _missing(e):
                 return None
             raise
         return json.loads(out["Body"].read().decode("utf-8"))

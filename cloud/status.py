@@ -100,6 +100,20 @@ class FolderStatus:
                                    ConsistentRead=True)
         return _plain(out["Item"]) if "Item" in out else None
 
+    def uploads(self, person_day: str) -> list:
+        """Every upload of a Person-Day (not the lease), oldest first: uploadIds start with UTC time."""
+        kwargs: Dict[str, Any] = {
+            "TableName": self.table, "ConsistentRead": True,
+            "KeyConditionExpression": "pk = :pk AND begins_with(sk, :up)",
+            "ExpressionAttributeValues": {":pk": _s(f"pd#{person_day}"), ":up": _s("up#")}}
+        items = []
+        while True:
+            out = self.client.query(**kwargs)
+            items += [_plain(i) for i in out.get("Items", [])]
+            if not out.get("LastEvaluatedKey"):
+                return sorted(items, key=lambda i: i.get("uploadId") or "")
+            kwargs["ExclusiveStartKey"] = out["LastEvaluatedKey"]
+
     # ----- transitions ------------------------------------------------------
 
     def _update(self, person_day: str, upload_id: str, update: str, condition: str,

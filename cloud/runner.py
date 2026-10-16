@@ -20,6 +20,12 @@ A Run, in main.py's order (AD-7):
   5. sync_day (unchanged, 3 tries) if the AWS Sync Switch is on;
   6. Done. Any exception leaves the Folder Failed and the message returns.
 One JSON log line per transition. Never OCR text, image content or secrets.
+
+A "resync" message (Story 3.8, FR-13) re-sends the stored Day Sheet of one
+Person-Day to the Web App, whatever the AWS Sync Switch says (AD-10), as
+resync_output.py does on the PC. A failed re-send returns its message until
+its 3rd delivery, then the Owner is emailed and the message is dropped, so a
+broken Web App can't fill the dead-letter queue and trip the kill switch.
 """
 
 import runtime_env  # noqa: F401  -- first: sets OpenMP variables before numpy/cv2/paddle
@@ -50,6 +56,7 @@ log = logging.getLogger("calls-log.runner")
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "sprs.xlsx"
 WORKDIR = Path("/tmp/calls-log")
+RESYNC_TRIES = 3   # deliveries of one resync message before it is dropped with an email
 _ERROR_LIMIT = 500
 
 
@@ -204,6 +211,69 @@ def _alert_parked(sns: Any, settings: settings_mod.Settings, day: naming.PersonD
 
 
 # ---------------------------------------------------------------------------
+# Re-send a stored Day Sheet (Story 3.8, FR-13).
+# ---------------------------------------------------------------------------
+
+def resync_day(person_day: str, *, storage: S3Storage, settings: settings_mod.Settings,
+               sns: Any = None, deliveries: int = 1, workdir: Path = WORKDIR) -> Outcome:
+    """
+    The current results/<Person-Day>.xlsx, read back and sent with the unchanged
+    sync_day. Raises RunFailed (the message returns) until the RESYNC_TRIES-th
+    delivery; then emails the Owner and returns Dropped. Nothing to send is
+    Skipped, with an email, and never retried.
+    """
+    from resync_output import read_sessions   # the PC's reader of a Day Sheet's sessions
+
+    day = naming.parse(person_day)
+    if day is None or day.key != person_day:
+        raise ValueError("the message has no valid Person-Day")
+    started = time.monotonic()
+    ids = {"personDay": day.key, "mode": "resync", "attempt": deliveries}
+    folder = workdir / f"resync-{uuid.uuid4().hex}"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        xlsx = folder / "day-sheet.xlsx"
+        sessions = read_sessions(xlsx) if storage.get_result(day, xlsx) else None
+        if not sessions:
+            why = "no stored Day Sheet" if sessions is None else "the stored Day Sheet has no sessions"
+            _alert_resync(sns, settings, day, why, dropped=False)
+            _event(**ids, status="Skipped", error=why)
+            return Outcome("Skipped", error=why)
+        settings_mod.configure_core(settings, sync_on=True)   # an explicit re-send ignores the switch
+        sync_day(day.name, day.date, sessions)
+        _event(**ids, status="Synced", durationMs=int((time.monotonic() - started) * 1000),
+               sessions=len(sessions))
+        return Outcome("Synced", sessions=len(sessions))
+    except Exception as e:
+        error = _short(e, (settings.sync_secret, settings.webapp_url))
+        if deliveries >= RESYNC_TRIES:
+            _alert_resync(sns, settings, day, error, dropped=True)
+            _event(**ids, status="Dropped", error=error)
+            return Outcome("Dropped", error=error)
+        _event(**ids, status="Failed", error=error)
+        raise RunFailed(error) from None
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _alert_resync(sns: Any, settings: settings_mod.Settings, day: naming.PersonDay,
+                  why: str, *, dropped: bool) -> None:
+    if not (sns and settings.alerts_topic_arn):
+        log.error("re-send of %s not done (%s) but no alert topic is configured", day.key, why)
+        return
+    if dropped:
+        subject = "calls-log: a re-send to the Sheet failed"
+        text = (f"Re-sending the stored Day Sheet of {day.key} to the Google Sheet failed "
+                f"{RESYNC_TRIES} times, so it was dropped.\n\nLast error: {why}")
+    else:
+        subject = "calls-log: nothing to re-send"
+        text = f"The re-send of {day.key} found {why}, so nothing was sent to the Google Sheet."
+    sns.publish(TopicArn=settings.alerts_topic_arn, Subject=subject, Message=(
+        text + "\n\nFix the cause, then re-send it: docs/TECHNICAL.md, Runbook, "
+        "\"Re-sending stored Day Sheets\"."))
+
+
+# ---------------------------------------------------------------------------
 # Lambda: one container, clients made once.
 # ---------------------------------------------------------------------------
 
@@ -223,15 +293,21 @@ def _clients() -> Dict[str, Any]:
 
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """SQS -> Run. A Busy or failed Run reports its message as failed, so SQS returns it."""
+    """SQS -> Run or re-send. A Busy or failed one reports its message as failed, so SQS returns it."""
     logging.getLogger().setLevel(logging.INFO)
     aws = _clients()
     failures = []
     for record in event.get("Records", []):
         try:
             message = json.loads(record["body"])
-            if message.get("mode", "process") != "process":
-                raise ValueError(f"unknown mode {message.get('mode')!r}")
+            mode = message.get("mode", "process")
+            if mode == "resync":
+                deliveries = int(record.get("attributes", {}).get("ApproximateReceiveCount", 1))
+                resync_day(message["personDay"], storage=aws["storage"], settings=aws["settings"],
+                           sns=aws["sns"], deliveries=deliveries)
+                continue
+            if mode != "process":
+                raise ValueError(f"unknown mode {mode!r}")
             outcome = run_folder(message["uploadId"], message["personDay"],
                                  holder=getattr(context, "aws_request_id", None), **aws)
             if outcome.status == "Busy":
