@@ -82,5 +82,5 @@ fi
 grep -E '^  # |^Plan:|^No changes' plan.txt || true
 echo
 echo "Full plan: $(pwd)/plan.txt"
-echo "Apply only if the Plan line shows additions alone (0 to change, 0 to destroy):"
+echo "Apply only if the Plan line shows 0 to destroy and what the story's PR lists:"
 echo "  bash $(pwd)/cloudshell.sh apply"

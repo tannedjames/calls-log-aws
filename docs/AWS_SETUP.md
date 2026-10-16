@@ -136,7 +136,14 @@ importing what exists (read-only), and plans; a second run applies.
    rm -rf /tmp/cl && mkdir /tmp/cl && cd /tmp/cl && unzip -q ~/calls-log-aws-*.zip
    bash /tmp/cl/calls-log-aws-*/infra/bootstrap/cloudshell.sh
    ```
-4. Read the plan. Only if it shows additions alone (0 to change, 0 to destroy):
+   If CloudShell's own credentials fail (an HTTP 500 from its container
+   role), sign in for the shell instead, then run the script again:
+   ```bash
+   aws login --remote --profile calls-log
+   eval "$(aws configure export-credentials --profile calls-log --format env)"
+   ```
+4. Read the plan. Only if it shows **0 to destroy** and the changes the
+   story's PR lists (Epic 4: 0 to add, 2 to change):
    `bash /tmp/cl/calls-log-aws-*/infra/bootstrap/cloudshell.sh apply`.
 5. *Actions → Download file* `bootstrap/terraform.tfstate`, and put it in the
    PC's `infra/bootstrap/` (keep the old one as a backup), or the PC's copy
