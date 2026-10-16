@@ -231,12 +231,12 @@ A higher limit costs nothing; Lambda bills per use.
   benchmark function per memory size. Measure with made-up images only:
   ```powershell
   .\.venv\Scripts\python.exe tools\gen_synth.py
-  .\.venv\Scripts\python.exe tools\gen_synth.py --out synthetic\big --images 40 --photos 0 --sideways 0
+  .\.venv\Scripts\python.exe tools\gen_synth.py --out synthetic\big --images 50 --photos 0 --sideways 0
   .\.venv\Scripts\python.exe tools\bench_lambda.py "synthetic\Nguyen Van A & 2026-06-01" "synthetic\Nguyen Van A & 2026-06-01_photo" "synthetic\Nguyen Van A & 2026-06-01_sideways" --big "synthetic\big\Nguyen Van A & 2026-06-01" --out docs\aws\lambda-benchmark.md
   ```
   It prints and writes the report: GB-s per image at 1,536, 2,048 and
   3,008 MB, the month at 12,000 images against 350,000 GB-s, and whether a
-  40-image Folder fits in one 900 s Run. Then a PR sets `runner_memory_mb` to
+  50-image Folder fits in one 900 s Run. Then a PR sets `runner_memory_mb` to
   the chosen size and `enable_bench = false` (in `infra/variables.tf`), with
   the report; merging it removes the benchmark functions. Exit code 3 means
   the plan doesn't hold, and the report says what follows.

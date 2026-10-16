@@ -2785,6 +2785,13 @@ def test_intake_hello_gives_the_limits_and_the_sync_switch_read_only():
     assert not any(hasattr(svc.ssm, m) for m in ("put_parameter", "delete_parameter"))
 
 
+def test_the_image_limit_is_50_and_the_page_falls_back_to_it():
+    # The Owner raised it from 40 (2026-10-16); the page shows its fallback until /api/hello answers.
+    page = (Path(__file__).resolve().parent / "cloud" / "static" / "upload.html").read_text(encoding="utf-8")
+    assert CONFIG.max_images == 50
+    assert f"let limits = {{maxImages: {CONFIG.max_images}, maxImageMb: 15}};" in page
+
+
 def test_intake_refuses_bad_folders_in_plain_words_and_writes_nothing():
     svc, dynamo, s3 = _intake()
     folders = [

@@ -4,7 +4,7 @@ Story 3.1: measure what one image costs in Lambda, from the PC after
 function per memory size, running cloud/bench.py from the runner image).
 
     python tools/gen_synth.py                   # synthetic/: three made-up sets
-    python tools/gen_synth.py --out synthetic/big --images 40 --photos 0 --sideways 0
+    python tools/gen_synth.py --out synthetic/big --images 50 --photos 0 --sideways 0
     python tools/bench_lambda.py synthetic/Nguyen* --big "synthetic/big/Nguyen Van A & 2026-06-01" \\
         --out docs/aws/lambda-benchmark.md
 
@@ -170,7 +170,7 @@ def report(sizes: List[Dict[str, Any]], big: Optional[Dict[str, Any]], today: st
 def main(argv: Optional[List[str]] = None, *, run=subprocess.run) -> int:
     ap = argparse.ArgumentParser(description="Story 3.1: Lambda cost per image (calls-log).")
     ap.add_argument("folders", nargs="+", type=Path, help="Synthetic Set folders of images")
-    ap.add_argument("--big", type=Path, help="a 40-image Synthetic folder, run at the chosen size")
+    ap.add_argument("--big", type=Path, help="a 50-image Synthetic folder, run at the chosen size")
     ap.add_argument("--sizes", nargs="+", type=int, default=list(SIZES))
     ap.add_argument("--out", type=Path, help="also write the report here (docs/aws/...)")
     args = ap.parse_args(argv)
