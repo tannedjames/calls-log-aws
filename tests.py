@@ -1579,3 +1579,290 @@ def test_status_done_clears_the_error_and_records_times():
     item = store.finish(_PD, _UP)
     assert item["status"] == "Done" and "lastError" not in item
     assert item["updatedAt"] == "2026-05-28T20:27:40Z" and item["createdAt"] == "2026-05-28T20:26:40Z"
+
+
+# ---------------------------------------------------------------------------
+# The runner (cloud/runner.py, Stories 3.5 and 3.6). S3, DynamoDB, SSM and
+# SNS are faked; OCR (main.extract_calls) is stubbed per image, and the real
+# dedupe, session rules and xlsx writer run. urlopen fails the test if
+# reached, so nothing can touch a live Sheet. All values are fictional.
+# ---------------------------------------------------------------------------
+
+import io as _io
+
+from cloud import runner, storage as cstorage
+from cloud.status import FolderStatus
+
+
+class _NoKey(Exception):
+    response = {"Error": {"Code": "NoSuchKey"}}
+
+
+class _FakeS3:
+    """A versioned bucket in memory; lists in pages of 2 to exercise paging."""
+
+    def __init__(self):
+        self.objects, self.versions = {}, {}
+
+    def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+        keys = sorted(k for k in self.objects if k.startswith(Prefix))
+        start = int(ContinuationToken or 0)
+        page = keys[start:start + 2]
+        out = {"Contents": [{"Key": k} for k in page], "IsTruncated": start + 2 < len(keys)}
+        if out["IsTruncated"]:
+            out["NextContinuationToken"] = str(start + 2)
+        return out
+
+    def download_file(self, bucket, key, filename):
+        Path(filename).write_bytes(self.objects[key])
+
+    def put_object(self, Bucket, Key, Body, ContentType):
+        data = Body if isinstance(Body, bytes) else Body.read()
+        self.objects[Key] = data
+        self.versions.setdefault(Key, []).append(data)
+        return {"VersionId": str(len(self.versions[Key]))}
+
+    def get_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise _NoKey()
+        return {"Body": _io.BytesIO(self.objects[Key])}
+
+
+class _FakeSns:
+    def __init__(self):
+        self.sent = []
+
+    def publish(self, **kwargs):
+        self.sent.append(kwargs)
+
+
+_RUN_PD = "Nguyen Van A & 2026-06-01"
+_RUN_UP = "20260601T083005Z-0a1b2c3d"
+_PHONE = "090-1234-5678"   # fictional; OCR text must never reach a log line
+_BY_IMAGE = {
+    "Shot_01.jpg": [_sess("08:00", "08:20", "Shot_01.jpg"), _sess("08:23", "09:00", "Shot_01.jpg")],
+    "shot_02.jpg": [_sess("10:00", "10:30", "shot_02.jpg")],
+    "shot_03.png": [_sess("10:33", "11:00", "shot_03.png")],
+}
+for _recs in _BY_IMAGE.values():
+    for _r in _recs:
+        _r.raw_text = f"{_PHONE} 発信 {_r.start_time}"
+
+
+class _Rig:
+    """Everything one Run touches, faked, with the upload Pending."""
+
+    def __init__(self, by_image=None, switch="false"):
+        self.by_image = dict(_BY_IMAGE if by_image is None else by_image)
+        self.s3, self.sns = _FakeS3(), _FakeSns()
+        self.ssm = _FakeSsm({}, switch=switch)
+        self.status = FolderStatus(_FakeDynamo(), "calls-log-folders", lambda: 1_780_000_000.0)
+        self.status.create(_RUN_PD, _RUN_UP, len(self.by_image))
+        self.status.mark_ready(_RUN_PD, _RUN_UP)
+        for name in list(self.by_image) + ["notes.txt"]:
+            self.s3.objects[f"inbox/{_RUN_UP}/{name}"] = b"placeholder, never decoded"
+        self.settings = settings.Settings(
+            bucket="calls-log-data-123456789012", table="calls-log-folders",
+            alerts_topic_arn="arn:aws:sns:ap-southeast-2:123456789012:calls-log-alerts",
+            webapp_url=_ST_URL, sync_secret=_ST_SECRET)
+        self.ocr_calls, self.written, self.fail_on = [], [], None
+
+    def extract_calls(self, files):
+        assert len(files) == 1, "the runner OCRs one image at a time"
+        name = files[0].name
+        self.ocr_calls.append(name)
+        if name == self.fail_on:
+            raise TimeoutError("simulated cut-off")
+        return [copy.deepcopy(r) for r in self.by_image[name]], [], {"ocr_failures": 0, "ocr_empty": 0}
+
+    def run(self, sync_effect=None, holder="run-1"):
+        logs = []
+
+        class _Keep(logging.Handler):
+            def emit(self, record):
+                logs.append(record.getMessage())
+
+        keep = _Keep()
+        runner.log.addHandler(keep)
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
+            for k in ("sheets_webapp_url", "sheets_sync_secret", "sheets_sync_enabled"):
+                st.enter_context(mock.patch.object(CONFIG, k, getattr(CONFIG, k)))
+            st.enter_context(mock.patch.object(runner.pipeline, "extract_calls", self.extract_calls))
+            self.sync = st.enter_context(mock.patch.object(runner, "sync_day", side_effect=sync_effect))
+            real_write = runner.write_sessions
+
+            def write(template, path, sessions):
+                self.written.append([(s.start_time, s.end_time) for s in sessions])
+                return real_write(template, path, sessions)
+
+            st.enter_context(mock.patch.object(runner, "write_sessions", write))
+            st.enter_context(mock.patch.object(
+                sheets_sync.urllib.request, "urlopen",
+                side_effect=AssertionError("a test reached the network")))
+            st.enter_context(mock.patch.object(excel_writer, "log"))
+            self.workdir = Path(tmp)
+            try:
+                return runner.run_folder(
+                    _RUN_UP, _RUN_PD, status=self.status, storage=cstorage.S3Storage(self.s3, "b"),
+                    settings=self.settings, ssm=self.ssm, sns=self.sns, holder=holder,
+                    workdir=Path(tmp))
+            finally:
+                runner.log.removeHandler(keep)
+                self.logs = logs
+                self.left_over = list(Path(tmp).iterdir())
+
+    def item(self):
+        return self.status.get(_RUN_PD, _RUN_UP)
+
+    def events(self):
+        return [json.loads(line) for line in self.logs if line.startswith("{")]
+
+
+def test_pc_order_matches_windows_path_sorting():
+    assert cstorage.pc_order(["b.jpg", "A.jpg", "a2.JPG", "a10.jpg"]) == ["A.jpg", "a10.jpg", "a2.JPG", "b.jpg"]
+
+
+def test_runner_processes_a_folder_and_stores_the_day_sheet():
+    rig = _Rig()
+    outcome = rig.run()
+    assert (outcome.status, outcome.images, outcome.sessions) == ("Done", 3, 2)
+    assert rig.ocr_calls == ["Shot_01.jpg", "shot_02.jpg", "shot_03.png"]   # the PC's order, images only
+    assert rig.written == [[("08:00", "09:00"), ("10:00", "11:00")]]
+    assert len(rig.s3.versions["results/Nguyen Van A & 2026-06-01.xlsx"]) == 1
+    assert rig.item()["status"] == "Done" and rig.item()["attempts"] == 1
+    assert not rig.sync.called   # the AWS Sync Switch is off
+    assert ("pd#" + _RUN_PD, "lease") not in rig.status.client.items and rig.left_over == []
+    assert [e["status"] for e in rig.events()] == ["Processing", "Done"]
+
+
+def test_runner_syncs_only_when_the_switch_is_on_and_then_is_done():
+    rig = _Rig(switch="true")
+    assert rig.run().status == "Done"
+    assert rig.sync.call_count == 1
+    name, date, sessions = rig.sync.call_args.args
+    assert (name, date, [(s.start_time, s.end_time) for s in sessions]) == (
+        "Nguyen Van A", "2026-06-01", [("08:00", "09:00"), ("10:00", "11:00")])
+    assert CONFIG.sheets_sync_enabled is not None   # restored by the rig
+
+
+def test_runner_sync_failure_keeps_the_day_sheet_and_fails():
+    rig = _Rig(switch="true")
+    try:
+        rig.run(sync_effect=sheets_sync.SheetsSyncError("Web App timed out"))
+    except runner.RunFailed:
+        pass
+    else:
+        raise AssertionError("a failed sync counted as Done")
+    item = rig.item()
+    assert item["status"] == "Failed" and "Web App timed out" in item["lastError"]
+    assert len(rig.s3.versions["results/Nguyen Van A & 2026-06-01.xlsx"]) == 1   # stored before the sync
+    assert rig.events()[-1]["dayStored"] is True
+    assert ("pd#" + _RUN_PD, "lease") not in rig.status.client.items
+
+
+def test_runner_zero_sessions_fails_without_a_day_sheet():
+    rig = _Rig(by_image={"Shot_01.jpg": [], "shot_02.jpg": []})
+    try:
+        rig.run()
+    except runner.RunFailed as e:
+        assert "no sessions extracted from 2 image(s)" in str(e)
+    else:
+        raise AssertionError("zero sessions counted as Done")
+    assert rig.item()["status"] == "Failed"
+    assert not any(k.startswith("results/") for k in rig.s3.objects)
+
+
+def test_runner_waits_when_another_run_holds_the_person_day():
+    rig = _Rig()
+    assert rig.status.take_lease(_RUN_PD, "someone-else")
+    assert rig.run().status == "Busy"
+    assert rig.item()["attempts"] == 0 and rig.ocr_calls == []
+
+
+def test_runner_parks_at_the_fourth_start_and_alerts():
+    rig = _Rig()
+    key = ("pd#" + _RUN_PD, "up#" + _RUN_UP)
+    rig.status.client.items[key].update(status="Failed", attempts=3, lastError="RuntimeError: boom")
+    assert rig.run().status == "Parked"
+    assert rig.item()["status"] == "Parked" and rig.ocr_calls == []
+    (alert,) = rig.sns.sent
+    assert alert["TopicArn"].endswith(":calls-log-alerts")
+    assert _RUN_PD in alert["Message"] and "RuntimeError: boom" in alert["Message"]
+
+
+def test_runner_skips_a_duplicate_message_after_done():
+    rig = _Rig()
+    rig.run()
+    assert rig.run(holder="run-2").status == "Skipped"
+    assert rig.ocr_calls == ["Shot_01.jpg", "shot_02.jpg", "shot_03.png"]   # nothing OCR'd twice
+
+
+def test_runner_resumes_from_checkpoints_with_the_same_sessions():
+    whole = _Rig()
+    whole.run()
+    cut = _Rig()
+    cut.fail_on = "shot_03.png"   # the Run is cut off at the third image
+    try:
+        cut.run()
+    except runner.RunFailed:
+        pass
+    assert sorted(k for k in cut.s3.objects if k.startswith("work/")) == [
+        f"work/{_RUN_UP}/Shot_01.jpg.json", f"work/{_RUN_UP}/shot_02.jpg.json"]
+    cut.fail_on, cut.ocr_calls = None, []
+    assert cut.run(holder="run-2").status == "Done"
+    assert cut.ocr_calls == ["shot_03.png"]   # only the image without a checkpoint
+    assert cut.written == whole.written and cut.item()["attempts"] == 2
+
+
+def test_runner_logs_json_without_ocr_text_or_secrets():
+    rig = _Rig(switch="true")
+    try:
+        rig.run(sync_effect=sheets_sync.SheetsSyncError(f"bad secret {_ST_SECRET} at {_ST_URL}"))
+    except runner.RunFailed as e:
+        assert _ST_SECRET not in str(e)
+    text = "\n".join(rig.logs)
+    assert _PHONE not in text and _ST_SECRET not in text and _ST_URL not in text
+    failed = rig.events()[-1]
+    assert set(failed) >= {"uploadId", "personDay", "status", "attempt", "durationMs", "images", "error"}
+    assert "***" in failed["error"] and "***" in rig.item()["lastError"]
+
+
+def test_runner_handler_returns_busy_and_failed_messages():
+    rig = _Rig()
+    calls = []
+
+    def fake_run(upload_id, person_day, **kw):
+        calls.append(upload_id)
+        if upload_id.endswith("busy0000"):
+            return runner.Outcome("Busy")
+        if upload_id.endswith("fail0000"):
+            raise runner.RunFailed("boom")
+        return runner.Outcome("Done")
+
+    records = [
+        {"messageId": "m1", "body": json.dumps({"uploadId": "20260601T083005Z-done0000", "personDay": _RUN_PD})},
+        {"messageId": "m2", "body": json.dumps({"uploadId": "20260601T083005Z-busy0000", "personDay": _RUN_PD})},
+        {"messageId": "m3", "body": json.dumps({"uploadId": "20260601T083005Z-fail0000", "personDay": _RUN_PD})},
+        {"messageId": "m4", "body": "not json"},
+        {"messageId": "m5", "body": json.dumps({"uploadId": "x", "personDay": _RUN_PD, "mode": "resync"})},
+    ]
+    with mock.patch.dict(runner._aws, {"settings": rig.settings, "status": rig.status, "storage": None,
+                                       "ssm": None, "sns": None}), \
+            mock.patch.object(runner, "run_folder", fake_run), mock.patch.object(runner, "log"):
+        out = runner.handler({"Records": records}, types.SimpleNamespace(aws_request_id="req-1"))
+    assert out == {"batchItemFailures": [{"itemIdentifier": m} for m in ("m2", "m3", "m4", "m5")]}
+    assert len(calls) == 3
+
+
+def test_runner_local_mode_reports_sessions_like_parity_check():
+    rig = _Rig()
+    with tempfile.TemporaryDirectory() as d, \
+            mock.patch.object(runner.pipeline, "extract_calls", rig.extract_calls):
+        folder = Path(d) / _RUN_PD
+        folder.mkdir()
+        for name in list(_BY_IMAGE) + ["correct output.png", "notes.txt"]:
+            (folder / name).write_bytes(b"x")
+        rig.by_image["correct output.png"] = []
+        got = runner.run_local(folder, ["correct output.png"], None)
+    assert got == {"images": 3, "records": 4, "countable": 4,
+                   "sessions": [["08:00", "09:00"], ["10:00", "11:00"]]}
