@@ -45,16 +45,17 @@ project was created in, and AWS refuses others (decision D-22).
 
 | Role | Trusts only | Can |
 |---|---|---|
-| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories; manage the data bucket's settings (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets; create and describe the `calls-log-*` tables (not delete them, nor read or write items); create roles only under the path `/calls-log/` and only with the workload boundary, and pass them only to Lambda; manage the `calls-log-*` functions, their queue triggers, queues, log groups and alarms |
+| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories; manage the data bucket's settings, including CORS for the upload page (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets; create and describe the `calls-log-*` tables (not delete them, nor read or write items); create roles only under the path `/calls-log/` and only with the workload boundary, and pass them only to Lambda; manage the `calls-log-*` functions, their queue triggers, queues, log groups and alarms |
 | `calls-log-plan` | pull requests of that repo | read the prod state and describe those repositories, nothing else |
 
 **Function roles are fenced twice.** The roles the functions run as
-(`calls-log-runner`, `calls-log-killswitch`, `calls-log-bench`) are created by
+(`calls-log-runner`, `calls-log-killswitch`, `calls-log-intake`, `calls-log-bench`) are created by
 the deploy, from `infra/`. The deploy role may create a role only under
 `/calls-log/` and only with `calls-log-workload-boundary` attached, so whatever
 a merged commit puts in a function's policy, the role can never do more than
 the boundary allows: this project's bucket, table, parameters, queues, alert
-topic, image and logs, and turning the runner's queue trigger off. The deploy
+topic, image and logs, turning the runner's queue trigger off, and setting the
+upload page's reserved concurrency (the kill switch's two stops). The deploy
 role and the plan role sit at `/`, out of their own reach, and the boundary is
 here, where only a person changes it.
 
@@ -161,7 +162,20 @@ A higher limit costs nothing; Lambda bills per use.
   .\.venv\Scripts\python.exe tools\put_parameters.py --from-private-files   # Web App URL, secret, NAME_TO_ID keys
   ```
   Run it again whenever an employee is added or the secret is rotated
-  (Story 5.4). The upload page's passphrase hash is set in Story 4.1.
+  (Story 5.4).
+- **The upload page** (Epic 4). Its bootstrap change, applied by hand before
+  its PR merges, gives the deploy role `s3:PutBucketCORS` on the data bucket
+  and lets the kill switch set `calls-log-intake`'s reserved concurrency (the
+  boundary's `ThrottleTheUploadPage`); the plan shows 2 to change, 0 to add,
+  0 to destroy. After the deploy, set the passphrase (at least 12
+  characters; it asks twice, shows nothing and stores only a PBKDF2 hash)
+  and read the address to give the Operator:
+  ```powershell
+  .\.venv\Scripts\python.exe tools\put_parameters.py --passphrase
+  aws lambda get-function-url-config --function-name calls-log-intake --query FunctionUrl --output text
+  ```
+  Until a passphrase is set, the page answers every action with "isn't set
+  up yet". docs/TECHNICAL.md §11 has how it is used.
 - **Alert email** (Story 2.4): the $2 budget, and later Parked Folders and the
   kill switch, email through the `calls-log-alerts` topic. Subscribe your
   address once; it is stored only in `/calls-log/alert_email` and the

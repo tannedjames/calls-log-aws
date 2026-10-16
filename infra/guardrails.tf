@@ -7,12 +7,15 @@
 #   calls-log-runner-dlq      a message reached the dead-letter queue (a crash loop)
 #   calls-log-runner-errors   6+ function errors in 15 min (crashes, not slow Runs)
 #   calls-log-runner-runaway  both Run slots busy for N 15-min periods in a row
+#   calls-log-intake-runaway  600+ upload-page requests in 15 min (Epic 4)
+#   calls-log-intake-busy     60+ s of upload-page compute in 15 min (Epic 4)
+#                             either makes the kill switch throttle the page to 0
 #
 # N comes from the memory size so that, past the free tier, the worst case
 # stays at or under $0.50 (the AC), counting one more period for the alarm to
 # fire and the switch to act: at 2,048 MB that is 7 periods (1 h 45 min of
 # both slots busy, about 3 times a normal day's peak) and $0.48.
-# Cost: 3 alarms (10 are free) and a function that runs only when one fires.
+# Cost: 5 alarms (10 are free) and a function that runs only when one fires.
 # ---------------------------------------------------------------------------
 
 locals {
@@ -61,6 +64,13 @@ data "aws_iam_policy_document" "killswitch" {
     resources = ["*"] # no resource-level form
   }
 
+  # Epic 4: the upload page's alarm turns the page off, nothing else.
+  statement {
+    sid       = "ThrottleTheUploadPage"
+    actions   = ["lambda:PutFunctionConcurrency", "lambda:GetFunctionConcurrency"]
+    resources = [local.arns.intake]
+  }
+
   statement {
     sid       = "TellTheOwner"
     actions   = ["sns:Publish"]
@@ -103,6 +113,7 @@ resource "aws_lambda_function" "killswitch" {
   environment {
     variables = merge(local.calls_log_env, {
       CALLS_LOG_RUNNER_FUNCTION = aws_lambda_function.runner.function_name
+      CALLS_LOG_INTAKE_FUNCTION = aws_lambda_function.intake.function_name
     })
   }
 
@@ -160,12 +171,54 @@ resource "aws_cloudwatch_metric_alarm" "runaway" {
   depends_on          = [aws_lambda_function.killswitch, aws_sns_topic_policy.alerts]
 }
 
+# Normal use is under 100 requests in 15 minutes (a status refresh a minute
+# per open page, three calls per folder). 600 means a script, or a stranger
+# with the link guessing passphrases; each guess costs a full PBKDF2.
+resource "aws_cloudwatch_metric_alarm" "intake_runaway" {
+  alarm_name          = "calls-log-intake-runaway"
+  alarm_description   = "600 or more upload-page requests in 15 minutes. The kill switch set the page's reserved concurrency to 0."
+  namespace           = "AWS/Lambda"
+  metric_name         = "Invocations"
+  dimensions          = { FunctionName = aws_lambda_function.intake.function_name }
+  statistic           = "Sum"
+  period              = 900
+  evaluation_periods  = 1
+  threshold           = 600
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.guardrail_actions
+  depends_on          = [aws_lambda_function.killswitch, aws_sns_topic_policy.alerts]
+}
+
+# The slow version of the same: a guesser who stays under 600 requests still
+# pays a full PBKDF2 (about 1.4 s at 512 MB) per wrong passphrase. Normal use
+# is under 20 s of compute in 15 minutes, cold starts included. At 60 s a
+# guesser gets about 40 tries per quarter-hour, and the most the page can cost
+# while staying under it is about 86,000 GB-s a month.
+resource "aws_cloudwatch_metric_alarm" "intake_busy" {
+  alarm_name          = "calls-log-intake-busy"
+  alarm_description   = "The upload page computed for 60 s or more in 15 minutes (normal use: under 20 s). The kill switch set its reserved concurrency to 0."
+  namespace           = "AWS/Lambda"
+  metric_name         = "Duration"
+  dimensions          = { FunctionName = aws_lambda_function.intake.function_name }
+  statistic           = "Sum"
+  period              = 900
+  evaluation_periods  = 1
+  threshold           = 60000 # milliseconds
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.guardrail_actions
+  depends_on          = [aws_lambda_function.killswitch, aws_sns_topic_policy.alerts]
+}
+
 # CloudWatch alarms may invoke the kill switch, each named alarm only.
 resource "aws_lambda_permission" "alarms" {
   for_each = {
-    dlq     = aws_cloudwatch_metric_alarm.dlq.arn
-    errors  = aws_cloudwatch_metric_alarm.errors.arn
-    runaway = aws_cloudwatch_metric_alarm.runaway.arn
+    dlq            = aws_cloudwatch_metric_alarm.dlq.arn
+    errors         = aws_cloudwatch_metric_alarm.errors.arn
+    runaway        = aws_cloudwatch_metric_alarm.runaway.arn
+    intake_runaway = aws_cloudwatch_metric_alarm.intake_runaway.arn
+    intake_busy    = aws_cloudwatch_metric_alarm.intake_busy.arn
   }
 
   statement_id  = "alarm-${each.key}"

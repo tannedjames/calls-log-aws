@@ -291,6 +291,7 @@ data "aws_iam_policy_document" "deploy_data_bucket" {
       "s3:PutBucketVersioning",
       "s3:PutBucketPolicy",
       "s3:DeleteBucketPolicy",
+      "s3:PutBucketCORS", # Epic 4: the upload page's origin only (infra/data.tf)
       "s3:PutLifecycleConfiguration",
       "s3:PutBucketTagging",
       "s3:TagResource",
@@ -518,6 +519,14 @@ data "aws_iam_policy_document" "workload_boundary" {
     sid       = "FindTheTrigger"
     actions   = ["lambda:ListEventSourceMappings"]
     resources = ["*"] # this action has no resource-level form
+  }
+
+  # Epic 4: the kill switch turns the public upload page off (reserved
+  # concurrency 0), and that function only.
+  statement {
+    sid       = "ThrottleTheUploadPage"
+    actions   = ["lambda:PutFunctionConcurrency", "lambda:GetFunctionConcurrency"]
+    resources = ["arn:aws:lambda:${var.region}:${local.account_id}:function:calls-log-intake"]
   }
 }
 

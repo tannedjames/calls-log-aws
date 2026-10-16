@@ -14,6 +14,9 @@ Owner's PC after `aws login`:
         AWS then emails ADDRESS a link to confirm
     python tools/put_parameters.py --sync-enabled true|false
         the AWS Sync Switch (AD-10)
+    python tools/put_parameters.py --passphrase
+        asks twice for the upload page's passphrase and stores only its
+        PBKDF2 hash in intake_passphrase_hash (cloud/passphrase.py, AD-17)
 
 Values go to the AWS CLI through a temporary file, never the command line,
 and are never printed: the output names the parameters only.
@@ -25,6 +28,7 @@ is missing (nothing is written then). Standard library only.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -35,6 +39,11 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from cloud import passphrase as passphrase_mod  # noqa: E402  (standard library only)
+
 REGION = "ap-southeast-2"
 PREFIX = "/calls-log/"
 TOPIC = "calls-log-alerts"
@@ -107,7 +116,18 @@ def subscribe(email: str, *, run=subprocess.run) -> None:
     print(f"subscribed the alert address to {TOPIC}: confirm it from the email AWS sends")
 
 
-def main(argv: list[str] | None = None, *, run=subprocess.run) -> int:
+def ask_passphrase(ask=getpass.getpass) -> str:
+    """The new passphrase, typed twice and never echoed; raises ValueError with the reason."""
+    first = ask("New upload-page passphrase: ")
+    why = passphrase_mod.weak(first)
+    if why:
+        raise ValueError(f"passphrase refused: {why}")
+    if ask("Type it again: ") != first:
+        raise ValueError("the two passphrases differ")
+    return first
+
+
+def main(argv: list[str] | None = None, *, run=subprocess.run, ask=getpass.getpass) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--from-private-files", action="store_true",
                     help="set webapp_url, sync_secret and name_prefixes from the private files")
@@ -115,11 +135,13 @@ def main(argv: list[str] | None = None, *, run=subprocess.run) -> int:
     ap.add_argument("--employees", type=Path, default=ROOT / "apps_script" / "Employees.gs")
     ap.add_argument("--alert-email", metavar="ADDRESS")
     ap.add_argument("--sync-enabled", choices=["true", "false"])
+    ap.add_argument("--passphrase", action="store_true", help="set the upload page's passphrase (asked, not echoed)")
     args = ap.parse_args(argv)
 
-    if not (args.from_private_files or args.alert_email or args.sync_enabled):
+    if not (args.from_private_files or args.alert_email or args.sync_enabled or args.passphrase):
         ap.print_usage(sys.stderr)
-        print("nothing to set: give --from-private-files, --alert-email or --sync-enabled", file=sys.stderr)
+        print("nothing to set: give --from-private-files, --alert-email, --sync-enabled or --passphrase",
+              file=sys.stderr)
         return 2
     if args.alert_email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", args.alert_email):
         print("--alert-email doesn't look like an email address", file=sys.stderr)
@@ -139,6 +161,12 @@ def main(argv: list[str] | None = None, *, run=subprocess.run) -> int:
         updates["alert_email"] = args.alert_email
     if args.sync_enabled:
         updates["sync_enabled"] = args.sync_enabled
+    if args.passphrase:
+        try:
+            updates["intake_passphrase_hash"] = passphrase_mod.hash_passphrase(ask_passphrase(ask))
+        except ValueError as e:
+            print(f"{e}; nothing written", file=sys.stderr)
+            return 2
 
     try:
         for name, value in updates.items():

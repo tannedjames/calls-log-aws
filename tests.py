@@ -1568,11 +1568,19 @@ class _FakeDynamo:
         return {"Attributes": {k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}}
 
     def query(self, TableName, KeyConditionExpression, ExpressionAttributeValues, ConsistentRead=False,
-              ExclusiveStartKey=None):
-        assert KeyConditionExpression == "pk = :pk AND begins_with(sk, :up)", KeyConditionExpression
-        pk, up = ExpressionAttributeValues[":pk"]["S"], ExpressionAttributeValues[":up"]["S"]
+              ExclusiveStartKey=None, IndexName=None):
+        if IndexName is not None:   # the uploads-by-day index (Epic 4): upload items carrying upDay
+            assert IndexName == "uploads-by-day" and KeyConditionExpression == "upDay = :d"
+            assert not ConsistentRead, "DynamoDB refuses consistent reads on a global secondary index"
+            day = ExpressionAttributeValues[":d"]["S"]
+            chosen = [item for _, item in sorted(self.items.items(), key=lambda kv: kv[0][1])
+                      if item.get("upDay") == day]
+        else:
+            assert KeyConditionExpression == "pk = :pk AND begins_with(sk, :up)", KeyConditionExpression
+            pk, up = ExpressionAttributeValues[":pk"]["S"], ExpressionAttributeValues[":up"]["S"]
+            chosen = [item for (p, sk), item in sorted(self.items.items()) if p == pk and sk.startswith(up)]
         found = [{k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}
-                 for (p, sk), item in sorted(self.items.items()) if p == pk and sk.startswith(up)]
+                 for item in chosen]
         start = int(ExclusiveStartKey["n"]["N"]) if ExclusiveStartKey else 0   # pages of 1
         out = {"Items": found[start:start + 1]}
         if start + 1 < len(found):
@@ -2265,7 +2273,7 @@ def test_every_function_command_names_a_real_handler():
     if text is None:
         return
     handlers = set(_re.findall(r'"/lambda-entrypoint\.sh",\s*"([\w.]+)"', text))
-    assert handlers == {"cloud.runner.handler", "cloud.killswitch.handler", "cloud.bench.handler"}
+    assert handlers == {"cloud.runner.handler", "cloud.killswitch.handler", "cloud.bench.handler", "cloud.intake.handler"}
     for dotted in handlers:
         module, _, name = dotted.rpartition(".")
         assert callable(getattr(_importlib.import_module(module), name)), dotted
@@ -2566,3 +2574,468 @@ def test_resync_tool_refuses_a_bad_date_and_says_when_nothing_matches():
     assert _resync_tool(["--date", "2026-02-30"], cli)[0] == 2 and cli.log == []
     code, said = _resync_tool(["--name", "Pham"], cli)
     assert code == 1 and "No stored Day Sheet matches" in said and "sqs send-message" not in cli.log
+
+
+# ---------------------------------------------------------------------------
+# Epic 4: the upload and status page (cloud/intake.py, cloud/passphrase.py,
+# cloud/static/upload.html). AWS is faked; the passphrase hashes use few
+# PBKDF2 rounds so the tests stay fast.
+# ---------------------------------------------------------------------------
+
+import hashlib
+import shutil as _shutil
+import urllib.parse
+import subprocess as _subprocess
+
+from cloud import intake, passphrase as cpass
+
+_PASS = "correct horse battery staple"
+_PASS_HASH = cpass.hash_passphrase(_PASS, iterations=1000)
+_IN_BUCKET = "calls-log-data-123456789012"
+
+
+def test_passphrase_hash_matches_only_the_same_passphrase():
+    assert cpass.verify(_PASS, _PASS_HASH)
+    assert not cpass.verify(_PASS + " ", _PASS_HASH) and not cpass.verify("", _PASS_HASH)
+    assert cpass.hash_passphrase(_PASS, iterations=1000) != _PASS_HASH   # a new salt every time
+    assert cpass.hash_passphrase(_PASS).split("$")[1] == "600000"
+    for broken in ("", "unset", "pbkdf2_sha256$x$AAAA$AAAA", "md5$1000$AAAA$AAAA",
+                   _PASS_HASH.replace("pbkdf2_sha256", "pbkdf2_sha1"), _PASS_HASH + "$extra",
+                   "pbkdf2_sha256$1000$not-base64!$AAAA", "pbkdf2_sha256$0$AAAA$AAAA"):
+        assert not cpass.verify(_PASS, broken), broken
+
+
+def test_passphrase_must_be_long_enough_and_unpadded():
+    assert cpass.weak("short") and cpass.weak(" " + _PASS) and cpass.weak(_PASS + " ")
+    assert cpass.weak(_PASS) is None
+
+
+def test_put_parameters_stores_only_the_passphrase_hash():
+    aws = _FakeAws()
+    answers = iter([_PASS, _PASS])
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = put_parameters.main(["--passphrase"], run=aws, ask=lambda prompt: next(answers))
+    said = out.getvalue() + err.getvalue()
+    assert code == 0, said
+    (stored,) = aws.inputs
+    assert stored["Name"] == "/calls-log/intake_passphrase_hash" and stored["Type"] == "SecureString"
+    assert cpass.verify(_PASS, stored["Value"]) and _PASS not in stored["Value"]
+    assert _PASS not in said and _PASS not in " ".join(" ".join(c) for c in aws.calls)
+
+
+def test_put_parameters_refuses_a_short_or_mistyped_passphrase():
+    for answers in (["short", "short"], [_PASS, _PASS + "!"]):
+        aws, it = _FakeAws(), iter(answers)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = put_parameters.main(["--passphrase"], run=aws, ask=lambda prompt: next(it))
+        assert code == 2 and aws.calls == [] and "nothing written" in err.getvalue()
+
+
+class _InS3(_FakeS3):
+    """The bucket plus the two presigning calls the page needs (local computations in boto3)."""
+
+    def __init__(self):
+        super().__init__()
+        self.posts, self.gets, self.modified = [], [], {}
+
+    def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+        assert Bucket == _IN_BUCKET
+        out = super().list_objects_v2(Bucket, Prefix, ContinuationToken)
+        for obj in out["Contents"]:
+            if obj["Key"] in self.modified:
+                obj["LastModified"] = self.modified[obj["Key"]]
+        return out
+
+    def generate_presigned_post(self, Bucket, Key, Fields, Conditions, ExpiresIn):
+        self.posts.append({"Bucket": Bucket, "Key": Key, "Fields": Fields, "Conditions": Conditions,
+                           "ExpiresIn": ExpiresIn})
+        return {"url": f"https://{Bucket}.s3.ap-southeast-2.amazonaws.com/",
+                "fields": {**Fields, "key": Key, "policy": "signed"}}
+
+    def generate_presigned_url(self, method, Params, ExpiresIn):
+        self.gets.append({"method": method, "Params": Params, "ExpiresIn": ExpiresIn})
+        return f"https://{Params['Bucket']}.s3.ap-southeast-2.amazonaws.com/signed-{len(self.gets)}"
+
+
+class _FakeSqs:
+    def __init__(self, fail=False):
+        self.sent, self.fail = [], fail
+
+    def send_message(self, QueueUrl, MessageBody):
+        if self.fail:
+            raise TimeoutError("simulated")
+        self.sent.append({"QueueUrl": QueueUrl, "body": json.loads(MessageBody)})
+
+
+class _Tripwire:
+    """Any call on it fails the test: the passphrase must be checked before data is touched."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"{name} was called before the passphrase was checked")
+
+
+_IN_VALUES = dict(_ST_VALUES, intake_passphrase_hash=_PASS_HASH)
+_IN_TODAY = _dt.date(2026, 6, 8)
+
+
+def _intake(values=None, sqs=None, switch="false"):
+    ssm = _FakeSsm(values or _IN_VALUES, switch=switch)
+    current = settings.read(ssm, dict(_ST_ENV, CALLS_LOG_QUEUE_URL="https://sqs/calls-log-runs"))
+    dynamo, s3 = _FakeDynamo(), _InS3()
+    svc = intake.Services(current, fstatus.FolderStatus(dynamo, "calls-log-folders"),
+                          cstorage.S3Storage(s3, _IN_BUCKET), s3, sqs or _FakeSqs(), ssm, 40,
+                          today=lambda: _IN_TODAY)
+    return svc, dynamo, s3
+
+
+def _call(svc, path, body=None, passphrase=_PASS, method="POST", raw=None):
+    headers = {"content-type": "application/json"}
+    if passphrase is not None:
+        headers["x-calls-log-passphrase"] = passphrase
+    event = {"rawPath": path, "requestContext": {"http": {"method": method}}, "headers": headers,
+             "body": raw if raw is not None else json.dumps(body or {}), "isBase64Encoded": False}
+    res = intake.handle(event, lambda: svc)
+    return res["statusCode"], json.loads(res["body"]) if res["body"] else None
+
+
+def _files(*names, size=1000):
+    return [{"name": n, "size": size} for n in names]
+
+
+def test_intake_serves_the_page_with_a_csp_that_allows_only_its_own_blocks():
+    def no_services():
+        raise AssertionError("GET / must not read settings or touch AWS")
+
+    with mock.patch.dict(os.environ, {"CALLS_LOG_BUCKET": _IN_BUCKET, "AWS_REGION": "ap-southeast-2"}):
+        res = intake.handle({"rawPath": "/", "requestContext": {"http": {"method": "GET"}}}, no_services)
+    assert res["statusCode"] == 200 and res["headers"]["Content-Type"].startswith("text/html")
+    csp = res["headers"]["Content-Security-Policy"]
+    html = res["body"]
+    for tag in ("script", "style"):
+        (block,) = _re.findall(rf"<{tag}>(.*?)</{tag}>", html, _re.S)
+        digest = _b64.b64encode(hashlib.sha256(block.encode("utf-8")).digest()).decode()
+        assert f"'sha256-{digest}'" in csp, tag
+    assert "unsafe-inline" not in csp and "frame-ancestors 'none'" in csp
+    assert f"connect-src 'self' https://{_IN_BUCKET}.s3.ap-southeast-2.amazonaws.com" in csp
+    assert 'style="' not in html and " on" + "click=" not in html   # inline attributes would be blocked
+    assert "localStorage" not in html and "sessionStorage" not in html   # the passphrase stays in memory
+
+
+def test_intake_checks_the_passphrase_before_touching_any_data():
+    svc, _, _ = _intake()
+    svc.status, svc.storage, svc.s3, svc.sqs = _Tripwire(), _Tripwire(), _Tripwire(), _Tripwire()
+    for given in (None, "", "wrong passphrase", _PASS.upper()):
+        code, body = _call(svc, "/api/status", passphrase=given)
+        assert code == 401 and body == {"ok": False, "error": "Wrong passphrase."}
+
+
+def test_intake_says_so_when_no_passphrase_is_set():
+    svc, _, _ = _intake(values=dict(_ST_VALUES))   # intake_passphrase_hash is the placeholder
+    code, body = _call(svc, "/api/hello")
+    assert code == 503 and "put_parameters.py --passphrase" in body["error"]
+
+
+def test_intake_remembers_the_right_passphrase_but_rechecks_wrong_ones():
+    svc, _, _ = _intake()
+    intake._verified.clear()
+    with mock.patch.object(intake.passphrase_mod, "verify", wraps=cpass.verify) as verify:
+        assert _call(svc, "/api/hello")[0] == 200
+        assert _call(svc, "/api/hello")[0] == 200
+        assert verify.call_count == 1   # the second call skipped the PBKDF2
+        assert _call(svc, "/api/hello", passphrase="guess one")[0] == 401
+        assert _call(svc, "/api/hello", passphrase="guess two")[0] == 401
+        assert _call(svc, "/api/hello", passphrase="guess two")[0] == 401   # a wrong one is never remembered
+        assert verify.call_count == 4   # every wrong one pays for it
+
+
+def test_intake_hello_gives_the_limits_and_the_sync_switch_read_only():
+    svc, _, _ = _intake(switch="true")
+    code, body = _call(svc, "/api/hello")
+    assert code == 200 and body == {"ok": True, "maxImages": 40, "maxImageMb": 15, "syncEnabled": True}
+    assert not any(hasattr(svc.ssm, m) for m in ("put_parameter", "delete_parameter"))
+
+
+def test_intake_refuses_bad_folders_in_plain_words_and_writes_nothing():
+    svc, dynamo, s3 = _intake()
+    folders = [
+        ("Nguyen Van A & 2026-06-01", _files("b.jpg", "A.png", "notes.txt"), None),
+        ("holiday photos", _files("a.jpg"), "isn't \"<Name> & <yyyy-mm-dd>\""),
+        ("Nguyen Van A & 2026-02-30", _files("a.jpg"), "real date"),
+        ("Le Van C & 2026-06-01", _files("a.jpg"), "Le Van C is not a registered employee"),
+        ("Tran Thi B & 2026-06-02", _files(*[f"{i:02}.jpg" for i in range(41)]), "41 images, more than 40"),
+        ("Tran Thi B & 2026-06-03", _files("a.HEIC", "b.heic"), "only HEIC photos"),
+        ("Tran Thi B & 2026-06-04", _files("readme.txt"), "no images"),
+        ("Tran Thi B & 2026-06-05", _files("a.jpg", size=0), "a.jpg is empty"),
+        ("Tran Thi B & 2026-06-06", _files("a.jpg", size=16 * 1024 * 1024), "more than 15 MB"),
+        ("Nguyen Van A 2026-6-1", _files("a.jpg"), "same Person-Day as Nguyen Van A & 2026-06-01"),
+    ]
+    code, body = _call(svc, "/api/check", {"folders": [{"folder": f, "files": files} for f, files, _ in folders]})
+    assert code == 200
+    for (folder, _, why), got in zip(folders, body["folders"]):
+        if why is None:
+            assert got["ok"] and got["images"] == 2 and got["ignored"] == ["notes.txt"], got
+            assert got["personDay"] == "Nguyen Van A & 2026-06-01"
+        else:
+            assert not got["ok"] and why in got["error"], (folder, got)
+    assert dynamo.writes == 0 and s3.posts == [] and svc.sqs.sent == []
+
+
+def test_intake_refuses_an_upload_the_check_would_refuse():
+    svc, dynamo, s3 = _intake()
+    code, body = _call(svc, "/api/uploads", {"folder": "Le Van C & 2026-06-01", "files": _files("a.jpg")})
+    assert code == 400 and "not a registered employee" in body["error"] and "Nothing was uploaded" in body["error"]
+    for files in ([{"name": "../a.jpg", "size": 1}], [{"name": "a.jpg", "size": "1"}], "a.jpg",
+                  [{"name": "a.jpg", "size": True}]):
+        code, body = _call(svc, "/api/uploads", {"folder": _RUN_PD, "files": files})
+        assert code == 400, files
+    assert dynamo.writes == 0 and s3.posts == []
+
+
+def test_intake_upload_starts_uploading_with_one_exact_presigned_form_per_image():
+    svc, dynamo, s3 = _intake()
+    files = _files("shot_10.jpg", "Shot_02.PNG", "shot_03.webp", "clip.mov")
+    code, body = _call(svc, "/api/uploads", {"folder": "Nguyễn Văn A & 2026-06-01", "files": files})
+    assert code == 200, body
+    up, pd = body["uploadId"], body["personDay"]
+    assert naming.is_upload_id(up) and pd == unicodedata.normalize("NFC", "Nguyễn Văn A & 2026-06-01")
+    item = svc.status.get(pd, up)
+    assert item["status"] == "Uploading" and item["imageCount"] == 3 and item["upDay"] == fstatus.up_day(up)
+    assert [f["name"] for f in body["forms"]] == ["Shot_02.PNG", "shot_03.webp", "shot_10.jpg"]   # the PC's order
+    assert body["ignored"] == ["clip.mov"] and body["expiresInSeconds"] == 900
+    types = {"Shot_02.PNG": "image/png", "shot_03.webp": "image/webp", "shot_10.jpg": "image/jpeg"}
+    for post in s3.posts:
+        name = post["Key"].rsplit("/", 1)[1]
+        assert post["Key"] == f"inbox/{up}/{name}" and post["ExpiresIn"] == 900
+        assert post["Fields"] == {"Content-Type": types[name]}
+        assert {"Content-Type": types[name]} in post["Conditions"]
+        assert ["content-length-range", 1, 15 * 1024 * 1024] in post["Conditions"]
+    assert svc.sqs.sent == []   # nothing is processed before Ready
+
+
+def _upload(svc, s3, names, folder=_RUN_PD):
+    code, body = _call(svc, "/api/uploads", {"folder": folder, "files": _files(*names)})
+    assert code == 200, body
+    return body
+
+
+def test_intake_ready_needs_every_image_then_queues_the_folder():
+    svc, dynamo, s3 = _intake()
+    up = _upload(svc, s3, ["a.jpg", "b.jpg"])
+    ids = {"personDay": up["personDay"], "uploadId": up["uploadId"]}
+    s3.objects[f"inbox/{up['uploadId']}/a.jpg"] = b"x"            # the upload broke after one image
+    code, body = _call(svc, "/api/ready", ids)
+    assert code == 409 and "Only 1 of 2 images arrived" in body["error"]
+    assert svc.status.get(**{"person_day": ids["personDay"], "upload_id": ids["uploadId"]})["status"] == "Uploading"
+    assert svc.sqs.sent == []
+    s3.objects[f"inbox/{up['uploadId']}/b.jpg"] = b"x"
+    code, body = _call(svc, "/api/ready", ids)
+    assert code == 200 and body["status"] == "Pending"
+    (message,) = svc.sqs.sent
+    assert message == {"QueueUrl": "https://sqs/calls-log-runs",
+                       "body": {"uploadId": up["uploadId"], "personDay": _RUN_PD, "mode": "process"}}
+
+
+def test_intake_ready_again_requeues_a_pending_folder_and_refuses_a_finished_one():
+    sqs = _FakeSqs(fail=True)
+    svc, dynamo, s3 = _intake(sqs=sqs)
+    up = _upload(svc, s3, ["a.jpg"])
+    ids = {"personDay": up["personDay"], "uploadId": up["uploadId"]}
+    s3.objects[f"inbox/{up['uploadId']}/a.jpg"] = b"x"
+    code, body = _call(svc, "/api/ready", ids)
+    assert code == 502 and "Click Ready again" in body["error"]
+    sqs.fail = False
+    code, body = _call(svc, "/api/ready", ids)                  # Pending with no message: queue it now
+    assert code == 200 and body["queuedAgain"] and len(sqs.sent) == 1
+    svc.status.begin_run(_RUN_PD, up["uploadId"], "run-1")
+    svc.status.finish(_RUN_PD, up["uploadId"])
+    code, body = _call(svc, "/api/ready", ids)
+    assert code == 409 and "already Done" in body["error"] and "upload the whole folder again" in body["error"]
+    assert len(sqs.sent) == 1
+
+
+def test_intake_ready_refuses_what_is_not_an_upload():
+    svc, _, _ = _intake()
+    assert _call(svc, "/api/ready", {"personDay": _RUN_PD, "uploadId": "../etc"})[0] == 400
+    assert _call(svc, "/api/ready", {"personDay": _RUN_PD, "uploadId": _RUN_UP})[0] == 404
+
+
+def test_status_recent_reads_one_day_from_the_index():
+    store, _ = _store()
+    store.create(_RUN_PD, "20260601T083005Z-0a1b2c3d", 2)
+    store.create(_RUN_PD, "20260602T010000Z-00000001", 2)
+    store.create("Tran Thi B & 2026-06-01", "20260601T235959Z-ffffffff", 1)
+    assert [i["uploadId"] for i in store.recent("2026-06-01")] == ["20260601T083005Z-0a1b2c3d",
+                                                                     "20260601T235959Z-ffffffff"]
+    assert store.recent("2026-05-31") == []
+
+
+def test_intake_status_shows_the_newest_upload_of_each_person_day_this_week():
+    svc, _, _ = _intake(switch="true")
+    svc.status.create(_RUN_PD, "20260602T080000Z-00000001", 3)
+    svc.status.create(_RUN_PD, "20260607T080000Z-00000002", 4)          # re-uploaded: this one shows
+    svc.status.create("Tran Thi B & 2026-06-05", "20260605T080000Z-00000003", 1)
+    svc.status.create("Tran Thi B & 2026-05-20", "20260530T080000Z-00000004", 1)   # 9 days ago: not shown
+    code, body = _call(svc, "/api/status")
+    assert code == 200 and body["syncEnabled"] is True
+    rows = body["folders"]
+    assert [(r["personDay"], r["uploadId"], r["imageCount"], r["uploads"]) for r in rows] == [
+        (_RUN_PD, "20260607T080000Z-00000002", 4, 2),
+        ("Tran Thi B & 2026-06-05", "20260605T080000Z-00000003", 1, 1)]
+    assert all(r["status"] == "Uploading" and "lastError" in r and "lastRunAt" in r for r in rows)
+
+
+def test_intake_finds_day_sheets_by_folded_name_and_date_with_short_links():
+    svc, _, s3 = _intake()
+    for key in ("results/Nguyễn Văn A & 2026-06-01.xlsx", "results/Nguyen Van An & 2026-06-01.xlsx",
+                "results/Nguyễn Văn A & 2026-06-02.xlsx", "results/Tran Thi B & 2026-06-01.xlsx",
+                "results/old/Nguyen Van A & 2026-06-01.xlsx", "results/notes.txt"):
+        s3.objects[unicodedata.normalize("NFC", key)] = b"x"
+    s3.modified[unicodedata.normalize("NFC", "results/Nguyễn Văn A & 2026-06-02.xlsx")] = \
+        _dt.datetime(2026, 6, 2, 10, 0, tzinfo=_dt.timezone.utc)
+    code, body = _call(svc, "/api/sheets", {"name": "nguyen van a", "date": ""})
+    assert code == 200 and not body["more"]
+    assert [s["personDay"] for s in body["sheets"]] == [
+        unicodedata.normalize("NFC", "Nguyễn Văn A & 2026-06-02"),
+        "Nguyen Van An & 2026-06-01", unicodedata.normalize("NFC", "Nguyễn Văn A & 2026-06-01")]
+    assert body["sheets"][0]["updatedAt"] == "2026-06-02T10:00:00Z"
+    get = s3.gets[0]
+    assert get["method"] == "get_object" and get["ExpiresIn"] == 300
+    disposition = get["Params"]["ResponseContentDisposition"]
+    assert disposition.startswith('attachment; filename="Nguyen Van A & 2026-06-02.xlsx"; filename*=UTF-8\'\'')
+    assert urllib.parse.unquote(disposition.split("''", 1)[1]) == unicodedata.normalize(
+        "NFC", "Nguyễn Văn A & 2026-06-02.xlsx")
+    code, body = _call(svc, "/api/sheets", {"name": "", "date": "2026-06-01"})
+    assert len(body["sheets"]) == 3 and "Tran Thi B & 2026-06-01" in [s["personDay"] for s in body["sheets"]]
+    assert _call(svc, "/api/sheets", {"name": "", "date": ""})[0] == 400
+    assert _call(svc, "/api/sheets", {"name": "a", "date": "1/6/2026"})[0] == 400
+
+
+def test_intake_answers_bad_requests_in_the_web_apps_shape():
+    svc, _, _ = _intake()
+    assert _call(svc, "/api/hello", raw="{not json")[0] == 400
+    assert _call(svc, "/api/hello", raw="[1, 2]")[0] == 400
+    code, body = _call(svc, "/api/check", raw=json.dumps({"folders": [{"folder": "x" * 1_100_000}]}))
+    assert code == 413 and body["ok"] is False
+    assert _call(svc, "/api/nothing")[0] == 404
+    assert _call(svc, "/api/status", method="GET")[0] == 404
+    assert _call(svc, "/api/check", {"folders": []})[0] == 400
+
+    def broken():
+        raise RuntimeError("Nguyen Van A secret detail")
+
+    res = intake.handle({"rawPath": "/api/hello", "requestContext": {"http": {"method": "POST"}},
+                         "headers": {"x-calls-log-passphrase": _PASS}, "body": "{}"}, broken)
+    assert res["statusCode"] == 500 and "Nguyen" not in res["body"] and "secret" not in res["body"]
+
+
+def test_intake_logs_no_passphrase_name_or_link():
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            records.append(self.format(record))
+
+    handler = _Keep(level=logging.DEBUG)
+    root = logging.getLogger()
+    old = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        svc, _, s3 = _intake()
+        up = _upload(svc, s3, ["a.jpg"])
+        s3.objects[f"inbox/{up['uploadId']}/a.jpg"] = b"x"
+        _call(svc, "/api/ready", {"personDay": up["personDay"], "uploadId": up["uploadId"]})
+        _call(svc, "/api/hello", passphrase="a wrong guess here")
+        s3.objects["results/Nguyen Van A & 2026-06-01.xlsx"] = b"x"
+        _call(svc, "/api/sheets", {"name": "nguyen", "date": ""})
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old)
+    text = "\n".join(records)
+    assert up["uploadId"] in text and '"result": "401"' in text
+    for private in (_PASS, "a wrong guess here", "Nguyen", "nguyen", "signed-", "amazonaws"):
+        assert private not in text, private
+
+
+def test_intake_s3_client_presigns_the_regional_endpoint():
+    try:
+        import boto3  # noqa: F401  -- in the runner image; the PC has none
+    except ImportError:
+        return
+    with mock.patch.dict(os.environ, {"AWS_ACCESS_KEY_ID": "AKIDOFFLINETEST", "AWS_SECRET_ACCESS_KEY": "offline",
+                                      "AWS_SESSION_TOKEN": "offline"}):
+        s3 = intake.s3_client("ap-southeast-2")
+        post = s3.generate_presigned_post(Bucket=_IN_BUCKET, Key="inbox/x/a.jpg", ExpiresIn=60)
+        url = s3.generate_presigned_url("get_object", Params={"Bucket": _IN_BUCKET, "Key": "results/a.xlsx"},
+                                        ExpiresIn=60)
+    assert post["url"] == f"https://{_IN_BUCKET}.s3.ap-southeast-2.amazonaws.com/"
+    assert url.startswith(f"https://{_IN_BUCKET}.s3.ap-southeast-2.amazonaws.com/results/a.xlsx?")
+
+
+def test_upload_page_script_is_valid_javascript():
+    node = _shutil.which("node")
+    if node is None:   # not in the runner image; CI's Node step and the PC run it
+        return
+    html = intake.PAGE.read_text(encoding="utf-8")
+    (script,) = _re.findall(r"<script>(.*?)</script>", html, _re.S)
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "page.js"
+        path.write_text(script, encoding="utf-8")
+        done = _subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+
+class _ThrottleLambda(_FakeLambda):
+    def __init__(self, reserved=2, fail=False):
+        super().__init__([])
+        self.reserved, self.fail_put, self.puts = reserved, fail, []
+
+    def get_function_concurrency(self, FunctionName):
+        return {"ReservedConcurrentExecutions": self.reserved}
+
+    def put_function_concurrency(self, FunctionName, ReservedConcurrentExecutions):
+        if self.fail_put:
+            raise TimeoutError("simulated")
+        self.puts.append((FunctionName, ReservedConcurrentExecutions))
+
+
+_KS_BOTH = dataclasses.replace(_KS_SETTINGS, intake_function="calls-log-intake")
+
+
+def _intake_alarm():
+    return {"alarmData": {"alarmName": "calls-log-intake-runaway",
+                          "state": {"value": "ALARM", "reason": "Threshold Crossed: 1 datapoint was >= 600.0"}}}
+
+
+def test_kill_switch_turns_the_upload_page_off_for_its_alarm_only():
+    lam, sns = _ThrottleLambda(), _FakeSns()
+    out = killswitch.respond(killswitch.alarm_of(_intake_alarm()), _KS_BOTH, lam, sns)
+    assert lam.puts == [("calls-log-intake", 0)] and lam.listed == [] and lam.updates == []
+    assert out["intake"] == {"function": "calls-log-intake", "was": 2}
+    (mail,) = sns.sent
+    assert "upload page is off" in mail["Subject"] and "Turning the upload page back on" in mail["Message"]
+    lam2, sns2 = _ThrottleLambda(), _FakeSns()
+    lam2.pages = [{"EventSourceMappings": [{"UUID": "u-1", "State": "Enabled"}]}]
+    killswitch.respond(killswitch.alarm_of(_alarm_event()), _KS_BOTH, lam2, sns2)
+    assert lam2.puts == [] and lam2.updates == [("u-1", False)]   # a runner alarm leaves the page alone
+
+
+def test_kill_switch_turns_the_page_off_for_the_slow_guesser_alarm_too():
+    lam, sns = _ThrottleLambda(), _FakeSns()
+    event = _intake_alarm()
+    event["alarmData"]["alarmName"] = "calls-log-intake-busy"
+    killswitch.respond(killswitch.alarm_of(event), _KS_BOTH, lam, sns)
+    assert lam.puts == [("calls-log-intake", 0)] and lam.updates == []
+
+
+def test_kill_switch_emails_when_it_cannot_turn_the_page_off():
+    lam, sns = _ThrottleLambda(fail=True), _FakeSns()
+    try:
+        killswitch.respond(killswitch.alarm_of(_intake_alarm()), _KS_BOTH, lam, sns)
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("the failure must reach Lambda, which retries the invocation")
+    assert "could NOT stop the upload page" in sns.sent[0]["Subject"]

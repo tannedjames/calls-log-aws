@@ -6,6 +6,8 @@ the attempt count that parks a Folder after 3 Runs.
 Table calls-log-folders, keys as strings:
     pk = "pd#<Person-Day>", sk = "up#<uploadId>"   one item per upload
     pk = "pd#<Person-Day>", sk = "lease"           at most one Run per Person-Day
+Index uploads-by-day: upDay (the uploadId's UTC date) and sk, on upload items
+only, so the status page reads one day's uploads without a scan (Epic 4).
 
 Only this module writes the table, and every change is a conditional write
 from the expected prior state: a write whose condition fails changes nothing
@@ -33,6 +35,7 @@ import time
 from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
+INDEX = "uploads-by-day"
 MAX_RUNS = 3            # AD-6: the 4th start parks the Folder
 LEASE_SECONDS = 1000    # AD-5: longer than the 900 s Lambda timeout
 _ERROR_LIMIT = 500      # characters of lastError kept
@@ -69,6 +72,11 @@ def _n(value: int) -> Dict[str, str]:
 
 def _iso(epoch: float) -> str:
     return _dt.datetime.fromtimestamp(epoch, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def up_day(upload_id: str) -> str:
+    """The UTC date an upload started, from its uploadId (<yyyymmdd>T<hhmmss>Z-<hex>)."""
+    return f"{upload_id[0:4]}-{upload_id[4:6]}-{upload_id[6:8]}"
 
 
 def _refused(error: Exception) -> bool:
@@ -114,6 +122,20 @@ class FolderStatus:
                 return sorted(items, key=lambda i: i.get("uploadId") or "")
             kwargs["ExclusiveStartKey"] = out["LastEvaluatedKey"]
 
+    def recent(self, day: str) -> list:
+        """Every upload started on one UTC date (yyyy-mm-dd), oldest first; the index is read eventually consistent."""
+        kwargs: Dict[str, Any] = {
+            "TableName": self.table, "IndexName": INDEX,
+            "KeyConditionExpression": "upDay = :d",
+            "ExpressionAttributeValues": {":d": _s(day)}}
+        items = []
+        while True:
+            out = self.client.query(**kwargs)
+            items += [_plain(i) for i in out.get("Items", [])]
+            if not out.get("LastEvaluatedKey"):
+                return sorted(items, key=lambda i: i.get("uploadId") or "")
+            kwargs["ExclusiveStartKey"] = out["LastEvaluatedKey"]
+
     # ----- transitions ------------------------------------------------------
 
     def _update(self, person_day: str, upload_id: str, update: str, condition: str,
@@ -136,7 +158,7 @@ class FolderStatus:
         """A new upload starts Uploading (the intake has just issued its upload links)."""
         now = self.clock()
         item = {**self._key(person_day, upload_id), "status": _s(Status.UPLOADING.value),
-                "personDay": _s(person_day), "uploadId": _s(upload_id),
+                "personDay": _s(person_day), "uploadId": _s(upload_id), "upDay": _s(up_day(upload_id)),
                 "imageCount": _n(image_count), "attempts": _n(0),
                 "createdAt": _s(_iso(now)), "updatedAt": _s(_iso(now))}
         try:

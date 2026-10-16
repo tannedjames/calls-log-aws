@@ -5,9 +5,13 @@ the dead-letter queue, or both Run slots stay busy for too long. It turns the
 runner's queue trigger off, so no new Run starts, and emails the Owner. Runs
 already going finish; queued Folders wait in the queue (kept 14 days).
 
-Turning the trigger back on is a runbook step (docs/TECHNICAL.md, Runbook),
-never automatic: infra/runner.tf ignores the trigger's enabled flag, so a
-deploy doesn't turn it back on either.
+The upload page's alarms (calls-log-intake-*, Epic 4) instead set the
+page's reserved concurrency to 0: the public URL then answers 429 and costs
+nothing. Uploads already in S3 and queued Folders are not affected.
+
+Turning either back on is a runbook step (docs/TECHNICAL.md, Runbook), never
+automatic: Terraform ignores the trigger's enabled flag and the page's
+reserved concurrency, so a deploy doesn't turn them back on either.
 
 Reads only the CALLS_LOG_* environment: no parameter, no secret, no data.
 The clients are passed in, so tests can fake Lambda and SNS.
@@ -23,6 +27,7 @@ from cloud import settings as settings_mod
 
 log = logging.getLogger("calls-log.killswitch")
 
+INTAKE_ALARMS = "calls-log-intake-"   # the upload page's alarms: they stop the page, not the runner
 # Trigger states in which the runner can still be started (or soon will be).
 _RUNNING = ("Enabled", "Enabling", "Updating", "Creating")
 _REASON_LIMIT = 500
@@ -55,6 +60,17 @@ def stop_runner(lambda_client: Any, function_name: str) -> List[Dict[str, str]]:
         kwargs["Marker"] = page["NextMarker"]
 
 
+def stop_intake(lambda_client: Any, function_name: str) -> int:
+    """Throttle the upload page to nothing; returns the reserved concurrency it had (-1: none)."""
+    try:
+        before = lambda_client.get_function_concurrency(FunctionName=function_name)
+        was = int(before.get("ReservedConcurrentExecutions", -1))
+    except Exception:   # reading is only for the email; the stop below is what matters
+        was = -1
+    lambda_client.put_function_concurrency(FunctionName=function_name, ReservedConcurrentExecutions=0)
+    return was
+
+
 def _email(sns: Any, topic: str, subject: str, lines: List[str]) -> None:
     if not topic:
         log.error("no alert topic is configured; the Owner is not emailed")
@@ -68,6 +84,8 @@ def respond(alarm: Dict[str, str], current: settings_mod.Settings,
     if alarm["state"] != "ALARM":   # alarm actions fire on ALARM only; anything else is ignored
         log.info(json.dumps({"killSwitch": "ignored", "alarm": alarm["name"], "state": alarm["state"]}))
         return {"stopped": [], "ignored": True}
+    if alarm["name"].startswith(INTAKE_ALARMS):
+        return _respond_intake(alarm, current, lambda_client, sns)
     if not current.runner_function:
         raise RuntimeError("CALLS_LOG_RUNNER_FUNCTION is not set")
 
@@ -94,6 +112,30 @@ def respond(alarm: Dict[str, str], current: settings_mod.Settings,
     _email(sns, current.alerts_topic_arn, "calls-log: the runner is stopped (kill switch)",
            why + [done, "", runbook])
     return {"stopped": stopped}
+
+
+def _respond_intake(alarm: Dict[str, str], current: settings_mod.Settings,
+                    lambda_client: Any, sns: Any) -> Dict[str, Any]:
+    if not current.intake_function:
+        raise RuntimeError("CALLS_LOG_INTAKE_FUNCTION is not set")
+    why = [f"The guardrail alarm {alarm['name']} fired.", f"Reason: {alarm['reason'] or 'not given'}", ""]
+    try:
+        was = stop_intake(lambda_client, current.intake_function)
+    except Exception as e:
+        log.error(json.dumps({"killSwitch": "failed", "alarm": alarm["name"], "error": type(e).__name__}))
+        _email(sns, current.alerts_topic_arn, "calls-log: the kill switch could NOT stop the upload page", why + [
+            f"Setting the upload page's reserved concurrency to 0 failed ({type(e).__name__}). Lambda "
+            "retries this twice; if no \"upload page is off\" email follows, turn it off by hand:",
+            "docs/TECHNICAL.md, Runbook, \"Stopping the upload page by hand\"."])
+        raise
+    log.info(json.dumps({"killSwitch": "stopped", "alarm": alarm["name"], "intakeWas": was}))
+    _email(sns, current.alerts_topic_arn, "calls-log: the upload page is off (kill switch)", why + [
+        "The upload page got far more requests than people make, so the kill switch set its reserved "
+        "concurrency to 0: the page now answers 429 and costs nothing. Uploads already made and queued "
+        "Folders carry on.", "",
+        "Find the cause first (someone has the link?), then turn it back on: docs/TECHNICAL.md, "
+        "Runbook, \"Turning the upload page back on\"."])
+    return {"stopped": [], "intake": {"function": current.intake_function, "was": was}}
 
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:

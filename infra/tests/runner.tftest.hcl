@@ -67,7 +67,7 @@ run "function_roles_are_fenced" {
 
   assert {
     condition = alltrue([
-      for r in [aws_iam_role.runner, aws_iam_role.killswitch] :
+      for r in [aws_iam_role.runner, aws_iam_role.killswitch, aws_iam_role.intake] :
       r.path == "/calls-log/" && r.permissions_boundary == "arn:aws:iam::333596351215:policy/calls-log-workload-boundary"
     ])
     error_message = "Every function role sits under /calls-log/ with the bootstrap's boundary (the deploy role can create no other kind)."
