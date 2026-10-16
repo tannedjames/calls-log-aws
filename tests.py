@@ -1567,6 +1567,18 @@ class _FakeDynamo:
         self.items[key] = item
         return {"Attributes": {k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}}
 
+    def query(self, TableName, KeyConditionExpression, ExpressionAttributeValues, ConsistentRead=False,
+              ExclusiveStartKey=None):
+        assert KeyConditionExpression == "pk = :pk AND begins_with(sk, :up)", KeyConditionExpression
+        pk, up = ExpressionAttributeValues[":pk"]["S"], ExpressionAttributeValues[":up"]["S"]
+        found = [{k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}
+                 for (p, sk), item in sorted(self.items.items()) if p == pk and sk.startswith(up)]
+        start = int(ExclusiveStartKey["n"]["N"]) if ExclusiveStartKey else 0   # pages of 1
+        out = {"Items": found[start:start + 1]}
+        if start + 1 < len(found):
+            out["LastEvaluatedKey"] = {"n": {"N": str(start + 1)}}
+        return out
+
     def delete_item(self, TableName, Key, ConditionExpression, ExpressionAttributeNames,
                     ExpressionAttributeValues):
         self._check_placeholders([ConditionExpression], ExpressionAttributeNames, ExpressionAttributeValues)
@@ -1959,7 +1971,7 @@ def test_runner_handler_returns_busy_and_failed_messages():
         {"messageId": "m2", "body": json.dumps({"uploadId": "20260601T083005Z-busy0000", "personDay": _RUN_PD})},
         {"messageId": "m3", "body": json.dumps({"uploadId": "20260601T083005Z-fail0000", "personDay": _RUN_PD})},
         {"messageId": "m4", "body": "not json"},
-        {"messageId": "m5", "body": json.dumps({"uploadId": "x", "personDay": _RUN_PD, "mode": "resync"})},
+        {"messageId": "m5", "body": json.dumps({"uploadId": "x", "personDay": _RUN_PD, "mode": "bogus"})},
     ]
     with mock.patch.dict(runner._aws, {"settings": rig.settings, "status": rig.status, "storage": None,
                                        "ssm": None, "sns": None}), \
@@ -2006,9 +2018,9 @@ def _ok(stdout=""):
 class _FakeCli:
     """Stands in for subprocess.run under the AWS CLI; DynamoDB calls go to a _FakeDynamo."""
 
-    def __init__(self, fail_on=None):
+    def __init__(self, fail_on=None, keys=()):
         self.dynamo, self.log, self.inputs, self.files = _FakeDynamo(), [], [], []
-        self.fail_on = fail_on
+        self.fail_on, self.keys = fail_on, list(keys)   # keys: the data bucket's objects
 
     def __call__(self, cmd, capture_output, text, encoding, errors):
         assert cmd[0] == "aws" and encoding == "utf-8" and cmd[cmd.index("--region") + 1] == "ap-southeast-2"
@@ -2034,6 +2046,9 @@ class _FakeCli:
                 return SimpleNamespace(returncode=254, stdout="", stderr=(
                     "An error occurred (ConditionalCheckFailedException) when calling the "
                     "UpdateItem operation: The conditional request failed"))
+        if op == "s3api list-objects-v2":   # the CLI pages through and returns every key
+            found = [{"Key": k} for k in sorted(self.keys) if k.startswith(payload["Prefix"])]
+            return _ok(json.dumps({"Contents": found} if found else {}, ensure_ascii=False))
         if op in ("s3 cp", "sqs send-message"):
             return _ok()
         raise AssertionError(f"unexpected AWS call {cmd}")
@@ -2354,3 +2369,213 @@ def test_bench_says_when_the_plan_does_not_hold_or_a_folder_does_not_fit():
     text, holds = bench_lambda.report([slow], {"error": "timed out", "images": 40, "durationMs": 900000.0,
                                                "memoryMb": 2048}, "2026-10-16")
     assert not holds and "Fargate Spot" in text and "checkpoints (AD-16)" in text
+
+
+# ---------------------------------------------------------------------------
+# Re-queue and re-send (Story 3.8): tools/enqueue.py --requeue, the runner's
+# resync mode and tools/resync.py. AWS is faked as above; nothing reaches a
+# live Sheet. All names are fictional.
+# ---------------------------------------------------------------------------
+
+from tools import resync as resync_tool
+
+_RQ_OLD = "20260601T080000Z-00000001"
+_RQ_NEW = "20260602T080000Z-00000002"
+
+
+def _stored_upload(status, upload_id, state, images=2, person_day=_RUN_PD):
+    """An upload of person_day left in the given state, through the real transitions."""
+    status.create(person_day, upload_id, images)
+    status.mark_ready(person_day, upload_id)
+    if state in ("Done", "Failed", "Processing", "Parked"):
+        status.begin_run(person_day, upload_id, "run-x")
+        status.release_lease(person_day, "run-x")
+        if state == "Done":
+            status.finish(person_day, upload_id)
+        elif state in ("Failed", "Parked"):
+            status.finish(person_day, upload_id, "boom")
+    if state == "Parked":
+        for _ in range(fstatus.MAX_RUNS):   # two more failed Runs, then the 4th start parks it
+            status.begin_run(person_day, upload_id, "run-x")
+            status.release_lease(person_day, "run-x")
+            if status.get(person_day, upload_id)["status"] == "Processing":
+                status.finish(person_day, upload_id, "boom")
+    assert status.get(person_day, upload_id)["status"] == state
+
+
+def _requeue_cli(states, inbox=None):
+    cli = _FakeCli()
+    status = FolderStatus(cli.dynamo, "calls-log-folders", lambda: 1_780_000_000.0)
+    for upload_id, state in states.items():
+        _stored_upload(status, upload_id, state)
+    for upload_id, n in (inbox if inbox is not None else {u: 2 for u in states}).items():
+        cli.keys += [f"inbox/{upload_id}/shot_{i}.jpg" for i in range(n)]
+    return cli, status
+
+
+def test_status_lists_a_person_days_uploads_oldest_first_without_the_lease():
+    cli, status = _requeue_cli({_RQ_NEW: "Done", _RQ_OLD: "Pending"})
+    status.take_lease(_RUN_PD, "someone")
+    assert [u["uploadId"] for u in status.uploads(_RUN_PD)] == [_RQ_OLD, _RQ_NEW]   # paged, in order
+    assert status.uploads("Tran Thi B & 2026-06-01") == []
+
+
+def test_requeue_runs_the_newest_stored_upload_again_with_attempts_reset():
+    for state in ("Done", "Failed", "Parked"):
+        cli, status = _requeue_cli({_RQ_OLD: "Done", _RQ_NEW: state})
+        code, said = _enqueue(["--requeue", _RUN_PD], cli)
+        assert code == 0, (state, said)
+        item = status.get(_RUN_PD, _RQ_NEW)
+        assert item["status"] == "Pending" and item["attempts"] == 0 and "lastError" not in item
+        assert status.get(_RUN_PD, _RQ_OLD)["status"] == "Done"   # the older upload is left alone
+        assert cli.log[-2:] == ["dynamodb update-item", "sqs send-message"]
+        assert json.loads(cli.inputs[-1]["MessageBody"]) == {
+            "uploadId": _RQ_NEW, "personDay": _RUN_PD, "mode": "process"}
+        assert f"re-queued {_RUN_PD}: upload {_RQ_NEW}, 2 image(s)" in said
+
+
+def test_requeue_can_name_an_older_upload():
+    cli, status = _requeue_cli({_RQ_OLD: "Failed", _RQ_NEW: "Done"})
+    assert _enqueue(["--requeue", _RUN_PD, "--upload-id", _RQ_OLD], cli)[0] == 0
+    assert status.get(_RUN_PD, _RQ_OLD)["status"] == "Pending" and status.get(_RUN_PD, _RQ_NEW)["status"] == "Done"
+
+
+def test_requeue_refuses_and_changes_nothing():
+    cases = [
+        ({_RQ_NEW: "Pending"}, None, "is Pending"),
+        ({_RQ_NEW: "Processing"}, None, "is Processing"),
+        ({_RQ_NEW: "Done"}, {_RQ_NEW: 1}, "1 of its 2 images are still in inbox/"),   # expired
+        ({}, None, "no stored upload"),
+    ]
+    for states, inbox, why in cases:
+        cli, status = _requeue_cli(states, inbox)
+        before = copy.deepcopy(cli.dynamo.items)
+        code, said = _enqueue(["--requeue", _RUN_PD], cli)
+        assert code == 2 and why in said, (states, said)
+        assert cli.dynamo.items == before and "sqs send-message" not in cli.log
+
+
+def test_requeue_usage_is_checked_before_any_aws_call():
+    cli = _FakeCli()
+    with tempfile.TemporaryDirectory() as d:
+        folder = str(_enqueue_folder(d, _RUN_PD, ["a.jpg"]))
+        for argv in (["--requeue", _RUN_PD, folder], ["--upload-id", _RQ_OLD, folder],
+                     ["--requeue", _RUN_PD, "--dry-run"], ["--requeue", "holiday photos"],
+                     ["--requeue", _RUN_PD, "--upload-id", "not-an-id"], []):
+            assert _enqueue(argv, cli)[0] == 2, argv
+    assert cli.log == []
+
+
+def _resync(rig, deliveries=1, sync_effect=None):
+    with ExitStack() as st, tempfile.TemporaryDirectory() as tmp:
+        for k in ("sheets_webapp_url", "sheets_sync_secret", "sheets_sync_enabled"):
+            st.enter_context(mock.patch.object(CONFIG, k, getattr(CONFIG, k)))
+        st.enter_context(mock.patch.object(
+            sheets_sync.urllib.request, "urlopen", side_effect=AssertionError("a test reached the network")))
+        rig.sync = st.enter_context(mock.patch.object(runner, "sync_day", side_effect=sync_effect))
+        st.enter_context(mock.patch.object(runner, "log"))
+        out = runner.resync_day(_RUN_PD, storage=cstorage.S3Storage(rig.s3, "b"), settings=rig.settings,
+                                sns=rig.sns, deliveries=deliveries, workdir=Path(tmp))
+        assert list(Path(tmp).iterdir()) == []
+        return out, CONFIG.sheets_sync_enabled
+
+
+def test_resync_sends_the_stored_day_sheet_even_with_the_switch_off():
+    rig = _Rig(switch="false")
+    assert rig.run().status == "Done" and not rig.sync.called   # stored, not synced
+    out, enabled = _resync(rig)
+    assert (out.status, out.sessions) == ("Synced", 2) and enabled is True and rig.sns.sent == []
+    name, date, sessions = rig.sync.call_args.args
+    assert (name, date, [(s.start_time, s.end_time) for s in sessions]) == (
+        "Nguyen Van A", "2026-06-01", [("08:00", "09:00"), ("10:00", "11:00")])
+
+
+def test_resync_retries_then_drops_with_one_email():
+    rig = _Rig()
+    rig.run()
+    failure = sheets_sync.SheetsSyncError(f"bad secret {_ST_SECRET}")
+    for deliveries in (1, 2):
+        try:
+            _resync(rig, deliveries, failure)
+        except runner.RunFailed:
+            continue
+        raise AssertionError("an early failure must return the message")
+    assert rig.sns.sent == []
+    out, _ = _resync(rig, runner.RESYNC_TRIES, failure)
+    assert out.status == "Dropped" and len(rig.sns.sent) == 1
+    mail = rig.sns.sent[0]
+    assert "failed" in mail["Subject"] and _RUN_PD in mail["Message"] and _ST_SECRET not in mail["Message"]
+
+
+def test_resync_with_no_stored_day_sheet_emails_once_and_never_retries():
+    rig = _Rig()
+    out, _ = _resync(rig)
+    assert out.status == "Skipped" and not rig.sync.called
+    assert "nothing to re-send" in rig.sns.sent[0]["Subject"]
+
+
+def test_runner_handler_dispatches_resync_messages_with_their_delivery_count():
+    rig = _Rig()
+    seen = []
+
+    def fake_resync(person_day, *, storage, settings, sns, deliveries):
+        seen.append((person_day, deliveries))
+        if deliveries == 1:
+            raise runner.RunFailed("Web App timed out")
+        return runner.Outcome("Dropped")
+
+    records = [
+        {"messageId": "r1", "attributes": {"ApproximateReceiveCount": "1"},
+         "body": json.dumps({"personDay": _RUN_PD, "mode": "resync"})},
+        {"messageId": "r3", "attributes": {"ApproximateReceiveCount": "3"},
+         "body": json.dumps({"personDay": _RUN_PD, "mode": "resync"})},
+    ]
+    with mock.patch.dict(runner._aws, {"settings": rig.settings, "status": rig.status, "storage": None,
+                                       "ssm": None, "sns": None}), \
+            mock.patch.object(runner, "resync_day", fake_resync), mock.patch.object(runner, "log"):
+        out = runner.handler({"Records": records}, types.SimpleNamespace(aws_request_id="req-1"))
+    assert seen == [(_RUN_PD, 1), (_RUN_PD, 3)]
+    assert out == {"batchItemFailures": [{"itemIdentifier": "r1"}]}
+
+
+_RS_KEYS = [
+    "results/Nguyen Van A & 2026-06-01.xlsx",
+    "results/Nguyen Van A & 2026-06-02.xlsx",
+    "results/Tran Thi B & 2026-06-01.xlsx",
+    "results/notes.txt",
+    "results/old/Le Van C & 2026-06-01.xlsx",
+    "inbox/20260601T083005Z-0a1b2c3d/shot_01.jpg",
+]
+
+
+def _resync_tool(argv, cli):
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = resync_tool.main(argv, run=cli)
+    return code, out.getvalue() + err.getvalue()
+
+
+def test_resync_tool_lists_and_filters_like_resync_output_on_a_dry_run():
+    cli = _FakeCli(keys=_RS_KEYS)
+    code, said = _resync_tool(["--dry-run", "--name", "Nguyen"], cli)
+    assert code == 0 and "sqs send-message" not in cli.log
+    assert said.count("would re-send") == 2 and "2 object(s) in results/" in said
+    code, said = _resync_tool(["--dry-run", "--date", "2026-6-1"], cli)   # an unpadded date counts
+    assert code == 0 and "would re-send Nguyen Van A & 2026-06-01" in said and "would re-send Tran Thi B" in said
+    assert "Le Van C" not in said and "2026-06-02" not in said
+
+
+def test_resync_tool_queues_one_resync_message_per_day():
+    cli = _FakeCli(keys=_RS_KEYS)
+    code, said = _resync_tool(["--name", "Tran", "--date", "2026-06-01"], cli)
+    assert code == 0, said
+    (message,) = [i for i in cli.inputs if "MessageBody" in i]
+    assert json.loads(message["MessageBody"]) == {"personDay": "Tran Thi B & 2026-06-01", "mode": "resync"}
+    assert message["QueueUrl"].endswith("/123456789012/calls-log-runs")
+
+
+def test_resync_tool_refuses_a_bad_date_and_says_when_nothing_matches():
+    cli = _FakeCli(keys=_RS_KEYS)
+    assert _resync_tool(["--date", "2026-02-30"], cli)[0] == 2 and cli.log == []
+    code, said = _resync_tool(["--name", "Pham"], cli)
+    assert code == 1 and "No stored Day Sheet matches" in said and "sqs send-message" not in cli.log

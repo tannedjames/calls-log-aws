@@ -107,9 +107,9 @@ data "aws_iam_policy_document" "runner" {
   }
 
   statement {
-    sid       = "ReadUploadsAndCheckpoints"
+    sid       = "ReadUploadsCheckpointsAndDaySheets"
     actions   = ["s3:GetObject"]
-    resources = ["${local.data_bucket_arn}/inbox/*", "${local.data_bucket_arn}/work/*"]
+    resources = ["${local.data_bucket_arn}/inbox/*", "${local.data_bucket_arn}/work/*", "${local.data_bucket_arn}/results/*"]
   }
 
   statement {
