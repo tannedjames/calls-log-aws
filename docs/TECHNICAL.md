@@ -396,8 +396,26 @@ input_archive_retention_days = 30
 
 sheets_sync_enabled = True                  # master on/off switch for Google Sheets
 sheets_sync_timeout = 60;  sheets_sync_retries = 3
-# sheets_webapp_url / sheets_sync_secret come from secrets_local.py (gitignored)
+# sheets_webapp_url / sheets_sync_secret: the environment variables
+# SHEETS_WEBAPP_URL / SHEETS_SYNC_SECRET if set, else secrets_local.py (gitignored)
 ```
+
+**The environment can change only the two credentials.** Every other value
+above, including the load-bearing `ocr_strict_engine`, `paddle_enable_mkldnn`
+and `post_9am_exception_limit`, is the same on the PC and in AWS.
+
+**AWS settings (`cloud/settings.py`).** It is the only reader of the
+`CALLS_LOG_*` environment variables, which Terraform sets: `CALLS_LOG_BUCKET`,
+`CALLS_LOG_TABLE`, `CALLS_LOG_QUEUE_URL` and `CALLS_LOG_ALERTS_TOPIC_ARN`. It
+is also the only reader of the `/calls-log/` parameters (docs/AWS_SETUP.md
+§5).
+- **Once per container:** it reads the Web App URL and secret, the allowed name
+  prefixes, the upload passphrase hash and the alert address. A parameter
+  still holding Terraform's placeholder `unset` counts as empty.
+- **At the start of every Run:** it reads the AWS Sync Switch
+  `/calls-log/sync_enabled`; only `true` turns it on.
+- **What it hands the core:** only the URL, the secret and the switch.
+- **Logs:** never the secret, the URL, names or the address.
 
 **Speed.** `lang="japan"` makes PaddleOCR pick the heavy server models. With
 oneDNN disabled (mandatory on Windows), that meant ~60 s per screenshot and
