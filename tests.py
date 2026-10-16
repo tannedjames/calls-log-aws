@@ -1160,3 +1160,824 @@ def test_put_parameters_refuses_bad_usage():
     assert _pp_main([], fake)[0] == 2
     assert _pp_main(["--alert-email", "not an address"], fake)[0] == 2
     assert fake.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Folder names (cloud/naming.py, AD-8): one parser for upload, processing,
+# resync and import. All names are fictional.
+# ---------------------------------------------------------------------------
+
+import datetime as _dt
+import re as _re
+import tempfile
+import unicodedata
+from pathlib import Path
+
+import openpyxl
+
+import main
+import resync_output
+from cloud import naming
+
+# Expected values from the real norm_() in apps_script/WebAppSync.gs:
+# tools/check_norm_parity.js runs it under Node on the same cases (CI does too).
+# They pin the edges where Python's defaults differ from JavaScript's: U+0085
+# and U+001F are not JS whitespace, U+FEFF is, and only U+0300-U+036F marks are
+# dropped.
+_NORM_FROM_WEBAPP = [tuple(c) for c in json.loads(
+    (Path(__file__).resolve().parent / "tools" / "norm_cases.json").read_text(encoding="utf-8"))]
+
+
+@pytest.mark.parametrize("text,expected", _NORM_FROM_WEBAPP)
+def test_naming_norm_matches_the_web_app(text, expected):
+    assert naming.norm(text) == expected
+
+
+@pytest.mark.parametrize("folder,name,date", [
+    ("Nguyen Van A & 2026-06-01", "Nguyen Van A", "2026-06-01"),
+    ("Nguyen Van A & 2026-6-1", "Nguyen Van A", "2026-06-01"),       # unpadded, as main accepts
+    ("Nguyen Van A 2026-06-01", "Nguyen Van A", "2026-06-01"),       # no "&"
+    ("Nguyễn Văn A - 2026-06-01", "Nguyễn Văn A", "2026-06-01"),
+    ("Tran Thi B & 2028-02-29", "Tran Thi B", "2028-02-29"),         # leap day
+])
+def test_naming_parses_the_folder_names_main_accepts(folder, name, date):
+    day = naming.parse(folder)
+    assert (day.name, day.date, day.key) == (name, date, f"{name} & {date}")
+    assert (day.name, day.date) == main.parse_name_date(folder)
+
+
+@pytest.mark.parametrize("folder", [
+    "Nguyen Van A & 2026-02-30", "Nguyen Van A & 2026-13-01", "Tran Thi B & 2027-02-29",
+    "Nguyen Van A", "& 2026-06-01", "",
+])
+def test_naming_rejects_impossible_or_missing_parts(folder):
+    assert naming.parse(folder) is None
+
+
+def test_naming_nfc_and_nfd_give_one_person_day():
+    nfc = "Nguyễn Văn A & 2026-06-01"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfd != nfc
+    assert naming.parse(nfd) == naming.parse(nfc)
+    assert naming.parse(nfd).key == nfc   # keys are NFC
+
+
+def test_naming_prefix_match_is_the_web_apps():
+    keys = ["nguyen van a", "nguyen van", "tran thi b"]   # stored order matters
+    assert naming.matching_prefix("Nguyễn Văn A", keys) == "nguyen van a"
+    assert naming.matching_prefix("NGUYEN VAN AN", keys) == "nguyen van a"   # prefix, first key wins
+    assert naming.matching_prefix("Nguyen Van Binh", keys) == "nguyen van"
+    assert naming.matching_prefix("Trần Thị B (2)", keys) == "tran thi b"
+    assert naming.matching_prefix("Le Van C", keys) is None
+    assert naming.matching_prefix("Nguyen Van A", ["Nguyen Van A"]) is None   # keys aren't folded, as in matchId_
+
+
+def test_naming_prefixes_json_must_be_a_list_of_names():
+    assert naming.prefixes_from_json('["nguyen van a", "tran thi b"]') == ["nguyen van a", "tran thi b"]
+    for bad in ('{"a": 1}', '["ok", 3]', '["ok", ""]', '"unset"'):
+        try:
+            naming.prefixes_from_json(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+
+
+@pytest.mark.parametrize("stem,expected", [
+    ("Nguyen Van A & 2026-06-01", ("Nguyen Van A", "2026-06-01", 0)),
+    ("Nguyen Van A & 2026-06-01(3)", ("Nguyen Van A", "2026-06-01", 3)),
+    ("Nguyen Van A & 2026-6-1", ("Nguyen Van A", "2026-06-01", 0)),
+    ("Nguyen Van A & 2026-06-01 redo", None),
+    ("Nguyen Van A & 2026-02-30", None),
+    ("Report 2026-06-01", None),
+])
+def test_naming_reads_day_sheet_file_names(stem, expected):
+    got = naming.parse_output_stem(stem)
+    assert (got and (got[0].name, got[0].date, got[1])) == expected
+
+
+def test_naming_keys_and_upload_ids():
+    when = _dt.datetime(2026, 6, 1, 8, 30, 5, tzinfo=_dt.timezone.utc)
+    uid = naming.new_upload_id(when)
+    assert uid.startswith("20260601T083005Z-") and naming.is_upload_id(uid)
+    assert not naming.is_upload_id("../results") and not naming.is_upload_id(uid + "x")
+    day = naming.parse("Nguyen Van A & 2026-06-01")
+    assert naming.result_key(day) == "results/Nguyen Van A & 2026-06-01.xlsx"
+    assert naming.inbox_key(uid, "shot.jpg") == f"inbox/{uid}/shot.jpg"
+    assert naming.work_key(uid, "shot.jpg") == f"work/{uid}/shot.jpg.json"
+
+
+# resync_output.py reads file names through cloud/naming.py since Story 3.3.
+
+_OLD_RESYNC_RE = _re.compile(r"^(?P<name>.+) & (?P<date>\d{4}-\d{2}-\d{2})(?:\((?P<dup>\d+)\))?$")
+
+
+def _old_collect(stems):
+    """resync_output.collect_files before Story 3.3, for comparison."""
+    chosen = {}
+    for stem in sorted(stems):
+        m = _OLD_RESYNC_RE.match(stem)
+        if m:
+            key, rank = (m.group("name"), m.group("date")), int(m.group("dup") or 0)
+            if key not in chosen or rank < chosen[key][0]:
+                chosen[key] = (rank, stem)
+    return {k: v[1] for k, v in chosen.items()}
+
+
+def _resync_collect(stems):
+    with tempfile.TemporaryDirectory() as d:
+        for stem in stems:
+            (Path(d) / f"{stem}.xlsx").write_bytes(b"")
+        with mock.patch.object(resync_output, "log"):
+            return {k: p.stem for k, p in resync_output.collect_files(Path(d)).items()}
+
+
+def test_resync_choice_unchanged_for_correctly_named_files():
+    stems = ["Nguyen Van A & 2026-06-01", "Nguyen Van A & 2026-06-01(1)",
+             "Tran Thi B & 2026-06-02(2)", "Tran Thi B & 2026-06-02(1)",
+             "Le Van C & 2026-06-03(1)"]
+    assert _resync_collect(stems) == _old_collect(stems)
+
+
+def test_resync_reads_unpadded_dates_and_skips_bad_names():
+    got = _resync_collect(["Pham Van D & 2026-6-3", "Nguyen Van A & 2026-02-30",
+                           "Report 2026-06-01 backup", "~$Nguyen Van A & 2026-06-01"])
+    assert got == {("Pham Van D", "2026-06-03"): "Pham Van D & 2026-6-3"}
+
+
+def test_resync_merges_nfc_and_nfd_names_of_one_day():
+    nfc = "Nguyễn Văn E & 2026-06-04"
+    got = _resync_collect([unicodedata.normalize("NFD", nfc) + "(1)", nfc])
+    assert got == {("Nguyễn Văn E", "2026-06-04"): nfc}
+
+
+def test_resync_reads_the_configured_sheet_not_the_active_one():
+    wb = openpyxl.Workbook()
+    other = wb.active
+    other.title = "Notes"
+    other.cell(CONFIG.first_session_row, 2).value = "07:00"
+    other.cell(CONFIG.first_session_row, 3).value = "07:30"
+    ws = wb.create_sheet(CONFIG.sheet_name)
+    ws.cell(CONFIG.first_session_row, 2).value = "08:00"
+    ws.cell(CONFIG.first_session_row, 3).value = "10:01"
+    wb.active = 0   # the "Notes" sheet is the active one
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "Nguyen Van A & 2026-06-01.xlsx"
+        wb.save(path)
+        sessions = resync_output.read_sessions(path)
+    assert [(s.start_time, s.end_time) for s in sessions] == [("08:00", "10:01")]
+
+
+def test_core_modules_never_import_cloud():
+    """AD-1: dependencies point only from cloud/ into the core."""
+    core = ["main", "image_preprocess", "ocr", "parser", "session_builder", "excel_writer",
+            "sheets_sync", "config", "runtime_env", "review_report"]
+    root = Path(__file__).resolve().parent
+    for name in core:
+        text = (root / f"{name}.py").read_text(encoding="utf-8")
+        assert not _re.search(r"^\s*(from|import)\s+cloud\b", text, _re.M), f"{name}.py imports cloud"
+
+
+# ---------------------------------------------------------------------------
+# Run-time settings (cloud/settings.py, AD-9 and AD-10) and config.py's
+# environment path. SSM is faked; every value is fictional.
+# ---------------------------------------------------------------------------
+
+import dataclasses
+import logging
+import sys
+import types
+
+import config as config_module
+import sheets_sync
+from cloud import settings
+
+_ST_SECRET = "s3cr3t-Value-For-Tests"
+_ST_URL = "https://script.google.com/macros/s/FICTIONAL-DEPLOYMENT/exec"
+
+
+class _FakeSsm:
+    def __init__(self, values, switch="false"):
+        self.values, self.switch = values, switch
+        self.batch_calls = self.switch_calls = 0
+
+    def get_parameters(self, Names, WithDecryption):
+        assert WithDecryption is True
+        self.batch_calls += 1
+        found = [{"Name": n, "Value": self.values[n.removeprefix("/calls-log/")]}
+                 for n in Names if n.removeprefix("/calls-log/") in self.values]
+        return {"Parameters": found,
+                "InvalidParameters": [n for n in Names if n.removeprefix("/calls-log/") not in self.values]}
+
+    def get_parameter(self, Name, WithDecryption):
+        assert Name == "/calls-log/sync_enabled" and WithDecryption is True
+        self.switch_calls += 1
+        return {"Parameter": {"Name": Name, "Value": self.switch}}
+
+
+_ST_VALUES = {
+    "webapp_url": _ST_URL, "sync_secret": _ST_SECRET,
+    "name_prefixes": '["nguyen van a", "tran thi b"]',
+    "intake_passphrase_hash": "unset", "alert_email": "owner@example.com",
+}
+_ST_ENV = {"CALLS_LOG_BUCKET": "calls-log-data-123456789012", "CALLS_LOG_TABLE": "calls-log-folders"}
+
+
+def test_settings_are_read_once_per_container():
+    ssm = _FakeSsm(_ST_VALUES)
+    settings.reset_cache()
+    try:
+        first = settings.load(ssm, _ST_ENV)
+        again = settings.load(ssm, {})
+    finally:
+        settings.reset_cache()
+    assert ssm.batch_calls == 1 and again is first
+    assert (first.bucket, first.table, first.queue_url) == ("calls-log-data-123456789012", "calls-log-folders", "")
+    assert first.webapp_url == _ST_URL and first.sync_secret == _ST_SECRET
+    assert first.name_prefixes == ("nguyen van a", "tran thi b")
+    assert first.intake_passphrase_hash == ""   # Terraform's placeholder counts as empty
+
+
+def test_settings_missing_parameters_are_empty():
+    s = settings.read(_FakeSsm({"webapp_url": "unset"}), {})
+    assert (s.webapp_url, s.sync_secret, s.name_prefixes) == ("", "", ())
+
+
+def test_sync_switch_is_read_fresh_each_run():
+    ssm = _FakeSsm(_ST_VALUES, switch="false")
+    assert settings.sync_enabled(ssm) is False
+    ssm.switch = " TRUE "
+    assert settings.sync_enabled(ssm) is True
+    ssm.switch = "yes"   # only "true" turns it on
+    assert settings.sync_enabled(ssm) is False
+    assert ssm.switch_calls == 3
+
+
+def test_config_environment_wins_over_secrets_local():
+    local = types.ModuleType("secrets_local")
+    local.SHEETS_WEBAPP_URL, local.SHEETS_SYNC_SECRET = "https://example.invalid/local", "local-secret"
+    env = {"SHEETS_WEBAPP_URL": "https://example.invalid/env", "SHEETS_SYNC_SECRET": "env-secret"}
+    with mock.patch.dict(sys.modules, {"secrets_local": local}):
+        assert config_module._credentials(env) == ("https://example.invalid/env", "env-secret")
+        assert config_module._credentials({}) == ("https://example.invalid/local", "local-secret")
+    with mock.patch.dict(sys.modules, {"secrets_local": None}):   # no file: import fails
+        assert config_module._credentials({}) == ("", "")
+
+
+def test_sync_with_no_credentials_raises_its_existing_error():
+    target = config_module.Config()
+    target.sheets_webapp_url, target.sheets_sync_secret = "", ""
+    settings.configure_core(settings.Settings(), sync_on=True, config=target)
+    with mock.patch.object(sheets_sync, "CONFIG", target):
+        try:
+            sheets_sync.sync_day("Nguyen Van A", "2026-06-01", [])
+        except sheets_sync.SheetsSyncError as e:
+            assert "sheets_webapp_url is empty" in str(e)
+        else:
+            raise AssertionError("sync_day did not refuse an empty Web App URL")
+
+
+def test_settings_cannot_change_the_load_bearing_flags():
+    env = dict(_ST_ENV, CALLS_LOG_OCR_STRICT_ENGINE="false", CALLS_LOG_PADDLE_ENABLE_MKLDNN="true",
+               CALLS_LOG_POST_9AM_EXCEPTION_LIMIT="99", OCR_STRICT_ENGINE="false",
+               PADDLE_ENABLE_MKLDNN="true", POST_9AM_EXCEPTION_LIMIT="99")
+    before = config_module.Config()
+    target = dataclasses.replace(before)
+    with mock.patch.dict(os.environ, env):
+        s = settings.read(_FakeSsm(_ST_VALUES), env)
+        settings.configure_core(s, sync_on=True, config=target)
+    changed = {f.name for f in dataclasses.fields(before) if getattr(before, f.name) != getattr(target, f.name)}
+    assert changed <= {"sheets_webapp_url", "sheets_sync_secret", "sheets_sync_enabled"}
+    assert (target.ocr_strict_engine, target.paddle_enable_mkldnn, target.post_9am_exception_limit) == (True, False, 4)
+    assert (target.sheets_webapp_url, target.sheets_sync_secret, target.sheets_sync_enabled) == (_ST_URL, _ST_SECRET, True)
+
+
+def test_settings_never_log_secrets_or_names():
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            records.append(self.format(record))
+
+    handler = _Keep(level=logging.DEBUG)
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    settings.reset_cache()
+    try:
+        s = settings.load(_FakeSsm(_ST_VALUES), _ST_ENV)
+        settings.configure_core(s, sync_on=False, config=config_module.Config())
+        text = "\n".join(records) + repr(s) + str(s)
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(old_level)
+        settings.reset_cache()
+    assert "settings loaded" in text
+    for private in (_ST_SECRET, _ST_URL, "nguyen van a", "tran thi b", "owner@example.com"):
+        assert private not in text, f"{private!r} reached a log line or repr"
+
+
+# ---------------------------------------------------------------------------
+# Folder Status (cloud/status.py, AD-4 to AD-6). DynamoDB is faked with a
+# small in-memory table that evaluates the expressions status.py sends and,
+# like DynamoDB, refuses undefined or unused #names and :values.
+# ---------------------------------------------------------------------------
+
+import copy
+import itertools
+
+from cloud import status as fstatus
+
+
+class _CondFailed(Exception):
+    response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
+class _FakeDynamo:
+    def __init__(self):
+        self.items = {}
+        self.writes = 0
+
+    @staticmethod
+    def _k(key):
+        return key["pk"]["S"], key["sk"]["S"]
+
+    @staticmethod
+    def _v(typed):
+        return int(typed["N"]) if "N" in typed else typed["S"]
+
+    @staticmethod
+    def _check_placeholders(exprs, names, values):
+        text = " ".join(e for e in exprs if e)
+        used_n, used_v = set(_re.findall(r"#\w+", text)), set(_re.findall(r":\w+", text))
+        assert used_n == set(names), f"names used {sorted(used_n)} vs given {sorted(names)}"
+        assert used_v == set(values), f"values used {sorted(used_v)} vs given {sorted(values)}"
+
+    def _atom(self, atom, item, names, values):
+        if atom == "attribute_not_exists(pk)":
+            return item is None
+        if item is None:
+            return False
+        m = _re.fullmatch(r"(#\w+) IN \((.*)\)", atom)
+        if m:
+            return item.get(names[m.group(1)]) in [self._v(values[v.strip()]) for v in m.group(2).split(",")]
+        m = _re.fullmatch(r"(#\w+) (<|>=|=) (:\w+)", atom)
+        assert m, f"unsupported condition {atom!r}"
+        have, want = item.get(names[m.group(1)]), self._v(values[m.group(3)])
+        if have is None:
+            return False
+        return {"<": have < want, ">=": have >= want, "=": have == want}[m.group(2)]
+
+    def _holds(self, condition, item, names, values):
+        return any(all(self._atom(a.strip(), item, names, values) for a in alt.split(" AND "))
+                   for alt in condition.split(" OR "))
+
+    def get_item(self, TableName, Key, ConsistentRead=False):
+        item = self.items.get(self._k(Key))
+        if item is None:
+            return {}
+        return {"Item": {k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}}
+
+    def put_item(self, TableName, Item, ConditionExpression):
+        self._check_placeholders([ConditionExpression], {}, {})
+        key = self._k(Item)
+        if not self._holds(ConditionExpression, self.items.get(key), {}, {}):
+            raise _CondFailed()
+        self.writes += 1
+        self.items[key] = {k: self._v(v) for k, v in Item.items()}
+
+    def update_item(self, TableName, Key, UpdateExpression, ConditionExpression,
+                    ExpressionAttributeNames, ExpressionAttributeValues, ReturnValues=None):
+        names, values = ExpressionAttributeNames, ExpressionAttributeValues
+        self._check_placeholders([UpdateExpression, ConditionExpression], names, values)
+        key = self._k(Key)
+        current = self.items.get(key)
+        if not self._holds(ConditionExpression, current, names, values):
+            raise _CondFailed()
+        item = copy.deepcopy(current) if current else {"pk": key[0], "sk": key[1]}
+        set_part, _, remove_part = UpdateExpression.partition(" REMOVE ")
+        for clause in set_part.removeprefix("SET ").split(", "):
+            target, expr = (s.strip() for s in clause.split(" = "))
+            m = _re.fullmatch(r"(#\w+) \+ (:\w+)", expr)
+            item[names[target]] = (item[names[m.group(1)]] + self._v(values[m.group(2)])) if m \
+                else self._v(values[expr])
+        for name in filter(None, (s.strip() for s in remove_part.split(","))):
+            item.pop(names[name], None)
+        self.writes += 1
+        self.items[key] = item
+        return {"Attributes": {k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}}
+
+    def delete_item(self, TableName, Key, ConditionExpression, ExpressionAttributeNames,
+                    ExpressionAttributeValues):
+        self._check_placeholders([ConditionExpression], ExpressionAttributeNames, ExpressionAttributeValues)
+        key = self._k(Key)
+        if not self._holds(ConditionExpression, self.items.get(key), ExpressionAttributeNames,
+                           ExpressionAttributeValues):
+            raise _CondFailed()
+        self.writes += 1
+        del self.items[key]
+
+
+_PD, _UP = "Nguyen Van A & 2026-06-01", "20260601T083005Z-0a1b2c3d"
+
+
+def _store(clock=None):
+    now = [1_780_000_000.0]
+    return fstatus.FolderStatus(_FakeDynamo(), "calls-log-folders", clock or (lambda: now[0])), now
+
+
+def _at(state):
+    """A store holding one upload in the given state (attempts 0)."""
+    store, now = _store()
+    store.create(_PD, _UP, 12)
+    key = ("pd#" + _PD, "up#" + _UP)
+    store.client.items[key]["status"] = state.value
+    return store, now, key
+
+
+_ALLOWED = {   # (operation, from state) pairs the AD-4 diagram allows
+    ("mark_ready", fstatus.Status.UPLOADING),
+    ("begin_run", fstatus.Status.PENDING), ("begin_run", fstatus.Status.FAILED),
+    ("begin_run", fstatus.Status.PROCESSING),   # a Run that timed out, its lease expired
+    ("finish_ok", fstatus.Status.PROCESSING), ("finish_error", fstatus.Status.PROCESSING),
+    ("requeue", fstatus.Status.DONE), ("requeue", fstatus.Status.FAILED), ("requeue", fstatus.Status.PARKED),
+}
+_OPS = {
+    "mark_ready": lambda s: s.mark_ready(_PD, _UP),
+    "begin_run": lambda s: s.begin_run(_PD, _UP, "run-1"),
+    "finish_ok": lambda s: s.finish(_PD, _UP),
+    "finish_error": lambda s: s.finish(_PD, _UP, "zero sessions"),
+    "requeue": lambda s: s.requeue(_PD, _UP),
+}
+
+
+@pytest.mark.parametrize("op,state", list(itertools.product(sorted(_OPS), list(fstatus.Status))))
+def test_status_only_the_ad4_transitions_succeed(op, state):
+    store, _, key = _at(state)
+    before = copy.deepcopy(store.client.items[key])
+    if (op, state) in _ALLOWED:
+        _OPS[op](store)
+        assert store.client.items[key]["status"] != state.value or op == "begin_run"
+    else:
+        try:
+            _OPS[op](store)
+        except fstatus.TransitionRefused:
+            pass
+        else:
+            raise AssertionError(f"{op} from {state.value} was allowed")
+        assert store.client.items[key] == before, "a refused change altered the item"
+        assert ("pd#" + _PD, "lease") not in store.client.items, "a refused start kept the lease"
+
+
+def test_status_create_twice_is_refused():
+    store, _ = _store()
+    store.create(_PD, _UP, 12)
+    try:
+        store.create(_PD, _UP, 3)
+    except fstatus.TransitionRefused:
+        assert store.get(_PD, _UP)["imageCount"] == 12
+    else:
+        raise AssertionError("an existing upload was overwritten")
+
+
+def test_status_second_run_cannot_take_the_lease_or_count_an_attempt():
+    store, now, key = _at(fstatus.Status.PENDING)
+    assert store.begin_run(_PD, _UP, "run-1")["attempts"] == 1
+    try:
+        store.begin_run(_PD, _UP, "run-2")
+    except fstatus.Busy:
+        pass
+    else:
+        raise AssertionError("two Runs held one Person-Day")
+    assert store.get(_PD, _UP)["attempts"] == 1
+    now[0] += fstatus.LEASE_SECONDS + 1   # run-1 timed out; its lease has expired
+    item = store.begin_run(_PD, _UP, "run-2")
+    assert (item["status"], item["attempts"]) == ("Processing", 2)
+
+
+def test_status_counts_attempts_first_and_parks_at_the_fourth_start():
+    store, now, key = _at(fstatus.Status.PENDING)
+    for run in (1, 2, 3):
+        item = store.begin_run(_PD, _UP, f"run-{run}")
+        assert (item["status"], item["attempts"]) == ("Processing", run)   # counted before any work
+        store.finish(_PD, _UP, f"error in run {run}")
+        store.release_lease(_PD, f"run-{run}")
+    item = store.begin_run(_PD, _UP, "run-4")
+    assert (item["status"], item["attempts"]) == ("Parked", 4)
+    assert ("pd#" + _PD, "lease") not in store.client.items   # a parked Run doesn't keep the lease
+    assert store.get(_PD, _UP)["lastError"] == "error in run 3"
+    try:
+        store.begin_run(_PD, _UP, "run-5")
+    except fstatus.TransitionRefused:
+        pass
+    else:
+        raise AssertionError("a Parked Folder ran again")
+    item = store.requeue(_PD, _UP)
+    assert (item["status"], item["attempts"]) == ("Pending", 0) and "lastError" not in item
+
+
+def test_status_lease_is_released_only_by_its_holder():
+    store, now = _store()
+    assert store.take_lease(_PD, "run-1")
+    store.release_lease(_PD, "run-2")   # not the holder: nothing happens
+    assert not store.take_lease(_PD, "run-2")
+    store.release_lease(_PD, "run-1")
+    assert store.take_lease(_PD, "run-2")
+
+
+def test_status_done_clears_the_error_and_records_times():
+    store, now, key = _at(fstatus.Status.PENDING)
+    store.begin_run(_PD, _UP, "run-1")
+    store.finish(_PD, _UP, "Web App timed out")
+    now[0] += 60
+    store.begin_run(_PD, _UP, "run-1")
+    item = store.finish(_PD, _UP)
+    assert item["status"] == "Done" and "lastError" not in item
+    assert item["updatedAt"] == "2026-05-28T20:27:40Z" and item["createdAt"] == "2026-05-28T20:26:40Z"
+
+
+# ---------------------------------------------------------------------------
+# The runner (cloud/runner.py, Stories 3.5 and 3.6). S3, DynamoDB, SSM and
+# SNS are faked; OCR (main.extract_calls) is stubbed per image, and the real
+# dedupe, session rules and xlsx writer run. urlopen fails the test if
+# reached, so nothing can touch a live Sheet. All values are fictional.
+# ---------------------------------------------------------------------------
+
+import io as _io
+
+from cloud import runner, storage as cstorage
+from cloud.status import FolderStatus
+
+
+class _NoKey(Exception):
+    response = {"Error": {"Code": "NoSuchKey"}}
+
+
+class _FakeS3:
+    """A versioned bucket in memory; lists in pages of 2 to exercise paging."""
+
+    def __init__(self):
+        self.objects, self.versions = {}, {}
+
+    def list_objects_v2(self, Bucket, Prefix, ContinuationToken=None):
+        keys = sorted(k for k in self.objects if k.startswith(Prefix))
+        start = int(ContinuationToken or 0)
+        page = keys[start:start + 2]
+        out = {"Contents": [{"Key": k} for k in page], "IsTruncated": start + 2 < len(keys)}
+        if out["IsTruncated"]:
+            out["NextContinuationToken"] = str(start + 2)
+        return out
+
+    def download_file(self, bucket, key, filename):
+        Path(filename).write_bytes(self.objects[key])
+
+    def put_object(self, Bucket, Key, Body, ContentType):
+        data = Body if isinstance(Body, bytes) else Body.read()
+        self.objects[Key] = data
+        self.versions.setdefault(Key, []).append(data)
+        return {"VersionId": str(len(self.versions[Key]))}
+
+    def get_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise _NoKey()
+        return {"Body": _io.BytesIO(self.objects[Key])}
+
+
+class _FakeSns:
+    def __init__(self):
+        self.sent = []
+
+    def publish(self, **kwargs):
+        self.sent.append(kwargs)
+
+
+_RUN_PD = "Nguyen Van A & 2026-06-01"
+_RUN_UP = "20260601T083005Z-0a1b2c3d"
+_PHONE = "090-1234-5678"   # fictional; OCR text must never reach a log line
+_BY_IMAGE = {
+    "Shot_01.jpg": [_sess("08:00", "08:20", "Shot_01.jpg"), _sess("08:23", "09:00", "Shot_01.jpg")],
+    "shot_02.jpg": [_sess("10:00", "10:30", "shot_02.jpg")],
+    "shot_03.png": [_sess("10:33", "11:00", "shot_03.png")],
+}
+for _recs in _BY_IMAGE.values():
+    for _r in _recs:
+        _r.raw_text = f"{_PHONE} 発信 {_r.start_time}"
+
+
+class _Rig:
+    """Everything one Run touches, faked, with the upload Pending."""
+
+    def __init__(self, by_image=None, switch="false"):
+        self.by_image = dict(_BY_IMAGE if by_image is None else by_image)
+        self.s3, self.sns = _FakeS3(), _FakeSns()
+        self.ssm = _FakeSsm({}, switch=switch)
+        self.status = FolderStatus(_FakeDynamo(), "calls-log-folders", lambda: 1_780_000_000.0)
+        self.status.create(_RUN_PD, _RUN_UP, len(self.by_image))
+        self.status.mark_ready(_RUN_PD, _RUN_UP)
+        for name in list(self.by_image) + ["notes.txt"]:
+            self.s3.objects[f"inbox/{_RUN_UP}/{name}"] = b"placeholder, never decoded"
+        self.settings = settings.Settings(
+            bucket="calls-log-data-123456789012", table="calls-log-folders",
+            alerts_topic_arn="arn:aws:sns:ap-southeast-2:123456789012:calls-log-alerts",
+            webapp_url=_ST_URL, sync_secret=_ST_SECRET)
+        self.ocr_calls, self.written, self.fail_on = [], [], None
+
+    def extract_calls(self, files):
+        assert len(files) == 1, "the runner OCRs one image at a time"
+        name = files[0].name
+        self.ocr_calls.append(name)
+        if name == self.fail_on:
+            raise TimeoutError("simulated cut-off")
+        return [copy.deepcopy(r) for r in self.by_image[name]], [], {"ocr_failures": 0, "ocr_empty": 0}
+
+    def run(self, sync_effect=None, holder="run-1"):
+        logs = []
+
+        class _Keep(logging.Handler):
+            def emit(self, record):
+                logs.append(record.getMessage())
+
+        keep = _Keep()
+        runner.log.addHandler(keep)
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as st:
+            for k in ("sheets_webapp_url", "sheets_sync_secret", "sheets_sync_enabled"):
+                st.enter_context(mock.patch.object(CONFIG, k, getattr(CONFIG, k)))
+            st.enter_context(mock.patch.object(runner.pipeline, "extract_calls", self.extract_calls))
+            self.sync = st.enter_context(mock.patch.object(runner, "sync_day", side_effect=sync_effect))
+            real_write = runner.write_sessions
+
+            def write(template, path, sessions):
+                self.written.append([(s.start_time, s.end_time) for s in sessions])
+                return real_write(template, path, sessions)
+
+            st.enter_context(mock.patch.object(runner, "write_sessions", write))
+            st.enter_context(mock.patch.object(
+                sheets_sync.urllib.request, "urlopen",
+                side_effect=AssertionError("a test reached the network")))
+            st.enter_context(mock.patch.object(excel_writer, "log"))
+            self.workdir = Path(tmp)
+            try:
+                return runner.run_folder(
+                    _RUN_UP, _RUN_PD, status=self.status, storage=cstorage.S3Storage(self.s3, "b"),
+                    settings=self.settings, ssm=self.ssm, sns=self.sns, holder=holder,
+                    workdir=Path(tmp))
+            finally:
+                runner.log.removeHandler(keep)
+                self.logs = logs
+                self.left_over = list(Path(tmp).iterdir())
+
+    def item(self):
+        return self.status.get(_RUN_PD, _RUN_UP)
+
+    def events(self):
+        return [json.loads(line) for line in self.logs if line.startswith("{")]
+
+
+def test_pc_order_matches_windows_path_sorting():
+    assert cstorage.pc_order(["b.jpg", "A.jpg", "a2.JPG", "a10.jpg"]) == ["A.jpg", "a10.jpg", "a2.JPG", "b.jpg"]
+
+
+def test_runner_processes_a_folder_and_stores_the_day_sheet():
+    rig = _Rig()
+    outcome = rig.run()
+    assert (outcome.status, outcome.images, outcome.sessions) == ("Done", 3, 2)
+    assert rig.ocr_calls == ["Shot_01.jpg", "shot_02.jpg", "shot_03.png"]   # the PC's order, images only
+    assert rig.written == [[("08:00", "09:00"), ("10:00", "11:00")]]
+    assert len(rig.s3.versions["results/Nguyen Van A & 2026-06-01.xlsx"]) == 1
+    assert rig.item()["status"] == "Done" and rig.item()["attempts"] == 1
+    assert not rig.sync.called   # the AWS Sync Switch is off
+    assert ("pd#" + _RUN_PD, "lease") not in rig.status.client.items and rig.left_over == []
+    assert [e["status"] for e in rig.events()] == ["Processing", "Done"]
+
+
+def test_runner_syncs_only_when_the_switch_is_on_and_then_is_done():
+    rig = _Rig(switch="true")
+    assert rig.run().status == "Done"
+    assert rig.sync.call_count == 1
+    name, date, sessions = rig.sync.call_args.args
+    assert (name, date, [(s.start_time, s.end_time) for s in sessions]) == (
+        "Nguyen Van A", "2026-06-01", [("08:00", "09:00"), ("10:00", "11:00")])
+    assert CONFIG.sheets_sync_enabled is not None   # restored by the rig
+
+
+def test_runner_sync_failure_keeps_the_day_sheet_and_fails():
+    rig = _Rig(switch="true")
+    try:
+        rig.run(sync_effect=sheets_sync.SheetsSyncError("Web App timed out"))
+    except runner.RunFailed:
+        pass
+    else:
+        raise AssertionError("a failed sync counted as Done")
+    item = rig.item()
+    assert item["status"] == "Failed" and "Web App timed out" in item["lastError"]
+    assert len(rig.s3.versions["results/Nguyen Van A & 2026-06-01.xlsx"]) == 1   # stored before the sync
+    assert rig.events()[-1]["dayStored"] is True
+    assert ("pd#" + _RUN_PD, "lease") not in rig.status.client.items
+
+
+def test_runner_zero_sessions_fails_without_a_day_sheet():
+    rig = _Rig(by_image={"Shot_01.jpg": [], "shot_02.jpg": []})
+    try:
+        rig.run()
+    except runner.RunFailed as e:
+        assert "no sessions extracted from 2 image(s)" in str(e)
+    else:
+        raise AssertionError("zero sessions counted as Done")
+    assert rig.item()["status"] == "Failed"
+    assert not any(k.startswith("results/") for k in rig.s3.objects)
+
+
+def test_runner_waits_when_another_run_holds_the_person_day():
+    rig = _Rig()
+    assert rig.status.take_lease(_RUN_PD, "someone-else")
+    assert rig.run().status == "Busy"
+    assert rig.item()["attempts"] == 0 and rig.ocr_calls == []
+
+
+def test_runner_parks_at_the_fourth_start_and_alerts():
+    rig = _Rig()
+    key = ("pd#" + _RUN_PD, "up#" + _RUN_UP)
+    rig.status.client.items[key].update(status="Failed", attempts=3, lastError="RuntimeError: boom")
+    assert rig.run().status == "Parked"
+    assert rig.item()["status"] == "Parked" and rig.ocr_calls == []
+    (alert,) = rig.sns.sent
+    assert alert["TopicArn"].endswith(":calls-log-alerts")
+    assert _RUN_PD in alert["Message"] and "RuntimeError: boom" in alert["Message"]
+
+
+def test_runner_skips_a_duplicate_message_after_done():
+    rig = _Rig()
+    rig.run()
+    assert rig.run(holder="run-2").status == "Skipped"
+    assert rig.ocr_calls == ["Shot_01.jpg", "shot_02.jpg", "shot_03.png"]   # nothing OCR'd twice
+
+
+def test_runner_resumes_from_checkpoints_with_the_same_sessions():
+    whole = _Rig()
+    whole.run()
+    cut = _Rig()
+    cut.fail_on = "shot_03.png"   # the Run is cut off at the third image
+    try:
+        cut.run()
+    except runner.RunFailed:
+        pass
+    assert sorted(k for k in cut.s3.objects if k.startswith("work/")) == [
+        f"work/{_RUN_UP}/Shot_01.jpg.json", f"work/{_RUN_UP}/shot_02.jpg.json"]
+    cut.fail_on, cut.ocr_calls = None, []
+    assert cut.run(holder="run-2").status == "Done"
+    assert cut.ocr_calls == ["shot_03.png"]   # only the image without a checkpoint
+    assert cut.written == whole.written and cut.item()["attempts"] == 2
+
+
+def test_runner_logs_json_without_ocr_text_or_secrets():
+    rig = _Rig(switch="true")
+    try:
+        rig.run(sync_effect=sheets_sync.SheetsSyncError(f"bad secret {_ST_SECRET} at {_ST_URL}"))
+    except runner.RunFailed as e:
+        assert _ST_SECRET not in str(e)
+    text = "\n".join(rig.logs)
+    assert _PHONE not in text and _ST_SECRET not in text and _ST_URL not in text
+    failed = rig.events()[-1]
+    assert set(failed) >= {"uploadId", "personDay", "status", "attempt", "durationMs", "images", "error"}
+    assert "***" in failed["error"] and "***" in rig.item()["lastError"]
+
+
+def test_runner_handler_returns_busy_and_failed_messages():
+    rig = _Rig()
+    calls = []
+
+    def fake_run(upload_id, person_day, **kw):
+        calls.append(upload_id)
+        if upload_id.endswith("busy0000"):
+            return runner.Outcome("Busy")
+        if upload_id.endswith("fail0000"):
+            raise runner.RunFailed("boom")
+        return runner.Outcome("Done")
+
+    records = [
+        {"messageId": "m1", "body": json.dumps({"uploadId": "20260601T083005Z-done0000", "personDay": _RUN_PD})},
+        {"messageId": "m2", "body": json.dumps({"uploadId": "20260601T083005Z-busy0000", "personDay": _RUN_PD})},
+        {"messageId": "m3", "body": json.dumps({"uploadId": "20260601T083005Z-fail0000", "personDay": _RUN_PD})},
+        {"messageId": "m4", "body": "not json"},
+        {"messageId": "m5", "body": json.dumps({"uploadId": "x", "personDay": _RUN_PD, "mode": "resync"})},
+    ]
+    with mock.patch.dict(runner._aws, {"settings": rig.settings, "status": rig.status, "storage": None,
+                                       "ssm": None, "sns": None}), \
+            mock.patch.object(runner, "run_folder", fake_run), mock.patch.object(runner, "log"):
+        out = runner.handler({"Records": records}, types.SimpleNamespace(aws_request_id="req-1"))
+    assert out == {"batchItemFailures": [{"itemIdentifier": m} for m in ("m2", "m3", "m4", "m5")]}
+    assert len(calls) == 3
+
+
+def test_runner_local_mode_reports_sessions_like_parity_check():
+    rig = _Rig()
+    with tempfile.TemporaryDirectory() as d, \
+            mock.patch.object(runner.pipeline, "extract_calls", rig.extract_calls):
+        folder = Path(d) / _RUN_PD
+        folder.mkdir()
+        for name in list(_BY_IMAGE) + ["correct output.png", "notes.txt"]:
+            (folder / name).write_bytes(b"x")
+        rig.by_image["correct output.png"] = []
+        got = runner.run_local(folder, ["correct output.png"], None)
+    assert got == {"images": 3, "records": 4, "countable": 4,
+                   "sessions": [["08:00", "09:00"], ["10:00", "11:00"]]}

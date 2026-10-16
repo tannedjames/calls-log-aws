@@ -12,7 +12,10 @@ outside the repo; this tool refuses paths inside it.
 
 Usage:
     python tools/parity_check.py --image calls-log-runner:local --ref <dir>
-                                 [--expect FILE] [--docker PATH]
+                                 [--expect FILE] [--docker PATH] [--via-runner]
+
+--via-runner reads each folder through the AWS runner's entrypoint
+(python3 -m cloud.runner --local) instead of main.py's functions sent inline.
 
 --expect defaults to <dir>/parity-expected.json:
     {"folders": [{"name": "<folder in <dir>>",
@@ -93,12 +96,18 @@ def find_docker(explicit: str | None) -> str | None:
     return shutil.which("docker") or (str(DOCKER_DESKTOP) if DOCKER_DESKTOP.is_file() else None)
 
 
-def run_folder(docker: str, image: str, folder: Path, label: str, ignore: list) -> dict:
+def run_folder(docker: str, image: str, folder: Path, label: str, ignore: list,
+               via_runner: bool = False) -> dict:
     target = f"/ref/{label}"
     cmd = [docker, "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp",
            "--user", "1000:1000",
-           "--mount", f"type=bind,source={folder},target={target},readonly",
-           image, "python3", "-c", INSIDE, target, json.dumps(ignore)]
+           "--mount", f"type=bind,source={folder},target={target},readonly", image]
+    if via_runner:   # the AWS runner's own entrypoint (Story 3.5), same PARITY_RESULT line
+        cmd += ["python3", "-m", "cloud.runner", "--local", target]
+        for name in ignore:
+            cmd += ["--ignore", name]
+    else:
+        cmd += ["python3", "-c", INSIDE, target, json.dumps(ignore)]
     out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     for line in reversed(out.stdout.splitlines()):
         if line.startswith(MARK):
@@ -114,6 +123,9 @@ def main(argv=None) -> int:
     ap.add_argument("--ref", type=Path, required=True, help="folder that holds the reference folders")
     ap.add_argument("--expect", type=Path, help="expectations (default: <ref>/parity-expected.json)")
     ap.add_argument("--docker", help="docker executable (default: PATH, then Docker Desktop's)")
+    ap.add_argument("--via-runner", action="store_true",
+                    help="read each folder through the AWS runner (python3 -m cloud.runner --local), "
+                         "not main.py's functions")
     args = ap.parse_args(argv)
 
     expect = args.expect or args.ref / "parity-expected.json"
@@ -151,7 +163,7 @@ def main(argv=None) -> int:
             continue
         before = fingerprint(folder)
         try:
-            got = run_folder(docker, args.image, folder, label, f.get("ignore", []))
+            got = run_folder(docker, args.image, folder, label, f.get("ignore", []), args.via_runner)
         except RuntimeError as exc:
             print(f"{label}: {exc} -> DIFFERENT")
             failed += 1
