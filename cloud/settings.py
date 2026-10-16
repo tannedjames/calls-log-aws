@@ -41,6 +41,7 @@ ENVIRONMENT = {
     "queue_url": "CALLS_LOG_QUEUE_URL",
     "alerts_topic_arn": "CALLS_LOG_ALERTS_TOPIC_ARN",
     "runner_function": "CALLS_LOG_RUNNER_FUNCTION",   # the kill switch's only
+    "intake_function": "CALLS_LOG_INTAKE_FUNCTION",   # the kill switch's only
 }
 
 
@@ -51,6 +52,7 @@ class Settings:
     queue_url: str = ""
     alerts_topic_arn: str = ""
     runner_function: str = ""
+    intake_function: str = ""
     # Private: kept out of repr, so a log line can't show them.
     webapp_url: str = field(default="", repr=False)
     sync_secret: str = field(default="", repr=False)

@@ -41,3 +41,8 @@ output "bench_functions" {
   description = "Story 3.1's benchmark functions, by memory size (empty once enable_bench is false)."
   value       = { for k, f in aws_lambda_function.bench : k => f.function_name }
 }
+
+output "intake_url" {
+  description = "The upload and status page (Epic 4). Share it with the Operator, with the passphrase."
+  value       = aws_lambda_function_url.intake.function_url
+}

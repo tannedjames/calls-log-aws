@@ -136,3 +136,16 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
 
   depends_on = [aws_s3_bucket_versioning.data]
 }
+
+# The upload page (intake.tf) posts images straight to the bucket from the
+# browser: CORS allows exactly that, from the page's own origin only. Day
+# Sheet downloads are plain links and need no CORS.
+resource "aws_s3_bucket_cors_configuration" "data" {
+  bucket = aws_s3_bucket.data.id
+
+  cors_rule {
+    allowed_methods = ["POST"]
+    allowed_origins = [trimsuffix(aws_lambda_function_url.intake.function_url, "/")]
+    max_age_seconds = 3000
+  }
+}
