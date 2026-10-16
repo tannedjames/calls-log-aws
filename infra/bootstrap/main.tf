@@ -240,6 +240,9 @@ data "aws_iam_policy_document" "deploy_ecr" {
       "ecr:PutLifecyclePolicy",
       "ecr:GetLifecyclePolicy",
       "ecr:DeleteLifecyclePolicy",
+      "ecr:GetRepositoryPolicy", # the policy that lets Lambda pull (infra/ecr.tf)
+      "ecr:SetRepositoryPolicy",
+      "ecr:DeleteRepositoryPolicy",
       "ecr:TagResource",
       "ecr:UntagResource",
       "ecr:ListTagsForResource",
@@ -408,9 +411,19 @@ data "aws_iam_policy_document" "plan_read" {
     actions = [
       "ecr:DescribeRepositories",
       "ecr:GetLifecyclePolicy",
+      "ecr:GetRepositoryPolicy",
       "ecr:ListTagsForResource",
     ]
     resources = [local.ecr_repositories]
+  }
+
+  # Even an unrefreshed plan describes a DynamoDB table already in the state
+  # (the provider checks it while diffing): without this, every pull-request
+  # plan failed once calls-log-folders existed. Table metadata only, no items.
+  statement {
+    sid       = "DescribeTables"
+    actions   = ["dynamodb:DescribeTable"]
+    resources = [local.tables]
   }
 }
 
