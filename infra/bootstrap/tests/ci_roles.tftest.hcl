@@ -274,4 +274,21 @@ run "the_boundary_reaches_only_this_project" {
     ]) == { ArnLike = { "lambda:FunctionArn" = "arn:aws:lambda:ap-southeast-2:123456789012:function:calls-log-*" } }
     error_message = "The kill switch may change only calls-log functions' queue triggers."
   }
+
+  # Epic 4: setting reserved concurrency could also starve or unthrottle the
+  # runner, so the boundary allows it on the upload page alone.
+  assert {
+    condition = toset(flatten([
+      for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement : s.Resource
+      if contains(flatten([s.Action]), "lambda:PutFunctionConcurrency")
+    ])) == toset(["arn:aws:lambda:ap-southeast-2:123456789012:function:calls-log-intake"])
+    error_message = "Only calls-log-intake's reserved concurrency may be set by a function (the kill switch)."
+  }
+
+  assert {
+    condition = contains(flatten([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_data_bucket.json).Statement : s.Action
+    ]), "s3:PutBucketCORS")
+    error_message = "The deploy role sets the data bucket's CORS for the upload page (infra/data.tf)."
+  }
 }

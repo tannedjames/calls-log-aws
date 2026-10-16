@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>calls-log uploads</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #5d6677; --line: #dde1e8;
+  --accent: #1f5fbf; --ok: #1d7a46; --bad: #b3261e; --warn: #9a6200;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171c; --card: #1c2027; --text: #e7eaf0; --muted: #9aa3b2; --line: #2e3440;
+          --accent: #6ea0f0; --ok: #5cc28a; --bad: #f08a80; --warn: #e0b45a; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 20px; margin: 8px 0 16px; }
+h2 { font-size: 16px; margin: 0 0 12px; }
+section { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+          padding: 16px; margin-bottom: 16px; }
+label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+input[type=password], input[type=text], input[type=date] {
+  font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--text); width: 100%; max-width: 320px; }
+button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent);
+         background: var(--accent); color: #fff; cursor: pointer; }
+button.plain { background: transparent; color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 12px; }
+.muted { color: var(--muted); font-size: 13px; }
+.msg { margin: 8px 0 0; min-height: 1.2em; }
+.bad { color: var(--bad); } .ok { color: var(--ok); } .warn { color: var(--warn); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
+         border: 1px solid currentColor; white-space: nowrap; }
+.hidden { display: none; }
+.gap { margin-top: 12px; }
+.head { justify-content: space-between; align-items: center; }
+.head h2 { margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>calls-log uploads</h1>
+
+  <section id="login">
+    <h2>Passphrase</h2>
+    <form id="login-form" class="row">
+      <div><label for="pass">Passphrase</label>
+        <input id="pass" type="password" autocomplete="current-password" required></div>
+      <button type="submit">Open</button>
+    </form>
+    <p id="login-msg" class="msg" role="status"></p>
+  </section>
+
+  <div id="app" class="hidden">
+    <section>
+      <h2>Upload folders</h2>
+      <p class="muted">Choose one day folder ("Nguyen Van A &amp; 2026-06-01"), or a folder that holds
+        several day folders. Up to <span id="max-images">40</span> images each, .jpg .jpeg .png .webp or
+        .bmp, at most <span id="max-mb">15</span> MB each. Nothing is processed until you click Ready.</p>
+      <div class="row">
+        <div><label for="picker">Folder</label><input id="picker" type="file" webkitdirectory multiple></div>
+      </div>
+      <div class="scroll"><table id="batch" class="hidden">
+        <thead><tr><th>Folder</th><th>Images</th><th>State</th></tr></thead><tbody></tbody>
+      </table></div>
+      <div class="row gap">
+        <button id="upload" disabled>Upload</button>
+        <button id="ready" disabled>Mark uploaded folders Ready</button>
+      </div>
+      <p id="batch-msg" class="msg" role="status"></p>
+    </section>
+
+    <section>
+      <div class="row head">
+        <h2>Folder status, last 7 days</h2>
+        <span class="muted">AWS Sync: <strong id="sync">?</strong> (set by the Owner)</span>
+      </div>
+      <div class="scroll"><table id="status">
+        <thead><tr><th>Person-Day</th><th>Status</th><th>Images</th><th>Last Run</th><th>Last error</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="row gap">
+        <button id="refresh" class="plain">Refresh</button>
+        <span id="status-msg" class="muted" role="status"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Day Sheets</h2>
+      <form id="search" class="row">
+        <div><label for="s-name">Employee</label><input id="s-name" type="text" autocomplete="off"></div>
+        <div><label for="s-date">Date</label><input id="s-date" type="date"></div>
+        <button type="submit">Search</button>
+      </form>
+      <div class="scroll"><table id="sheets" class="hidden">
+        <thead><tr><th>Person-Day</th><th>Saved</th><th></th></tr></thead><tbody></tbody>
+      </table></div>
+      <p id="sheets-msg" class="msg" role="status"></p>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+(function () {
+  const IMAGE = [".jpg", ".jpeg", ".png", ".webp", ".bmp"];
+  const HEIC = [".heic", ".heif"];
+  const DAY = /\d{4}-\d{1,2}-\d{1,2}\s*$/;
+  const PARALLEL = 4;
+  let passphrase = "";            // kept in memory only, never stored
+  let limits = {maxImages: 40, maxImageMb: 15};
+  let batch = [];                 // {folder, files, images, state, reason, ignored, upload, failed}
+
+  const $ = (id) => document.getElementById(id);
+  function cell(tr, text, cls) {
+    const td = document.createElement("td");
+    td.textContent = text == null ? "" : String(text);
+    if (cls) td.className = cls;
+    tr.appendChild(td);
+    return td;
+  }
+  function say(id, text, cls) { const el = $(id); el.textContent = text || ""; el.className = "msg " + (cls || ""); }
+  function suffix(name) { const i = name.lastIndexOf("."); return i > 0 ? name.slice(i).toLowerCase() : ""; }
+  function when(iso) { return iso ? new Date(iso).toLocaleString() : ""; }
+
+  async function api(path, body) {
+    let res;
+    try {
+      res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json",
+        "x-calls-log-passphrase": passphrase}, body: JSON.stringify(body || {})});
+    } catch (e) {
+      throw new Error("The page can't reach the server. Check the internet connection.");
+    }
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* not JSON */ }
+    if (!res.ok || !data.ok) {
+      const err = new Error(data.error || ("The server answered " + res.status + "."));
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  // ----- passphrase -----
+  $("login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    passphrase = $("pass").value;
+    say("login-msg", "Checking...");
+    try {
+      const hello = await api("/api/hello");
+      limits = hello;
+      $("max-images").textContent = hello.maxImages;
+      $("max-mb").textContent = hello.maxImageMb;
+      showSync(hello.syncEnabled);
+      $("pass").value = "";
+      $("login").classList.add("hidden");
+      $("app").classList.remove("hidden");
+      refresh();
+    } catch (e) {
+      passphrase = "";
+      say("login-msg", e.message, "bad");
+    }
+  });
+
+  function lockedOut(e) {
+    if (e.status === 401) {
+      passphrase = "";
+      $("app").classList.add("hidden");
+      $("login").classList.remove("hidden");
+      say("login-msg", "The passphrase no longer works. Enter it again.", "bad");
+      return true;
+    }
+    return false;
+  }
+
+  function showSync(on) {
+    const el = $("sync");
+    el.textContent = on === true ? "on" : on === false ? "off" : "unknown";
+    el.className = on === true ? "ok" : on === false ? "warn" : "";
+  }
+
+  // ----- choosing folders: the page's own check, before the server's -----
+  function group(files) {
+    const roots = {};
+    for (const f of files) {
+      const parts = (f.webkitRelativePath || f.name).split("/");
+      (roots[parts[0]] = roots[parts[0]] || []).push({file: f, parts: parts});
+    }
+    const folders = [];
+    for (const root of Object.keys(roots)) {
+      if (DAY.test(root)) {             // a day folder: its own files only, as on the PC
+        folders.push({folder: root, files: roots[root].filter(x => x.parts.length === 2).map(x => x.file)});
+      } else {                          // a folder of day folders
+        const days = {};
+        for (const x of roots[root]) {
+          if (x.parts.length === 3) (days[x.parts[1]] = days[x.parts[1]] || []).push(x.file);
+        }
+        for (const d of Object.keys(days).sort()) folders.push({folder: d, files: days[d]});
+      }
+    }
+    return folders;
+  }
+
+  function localCheck(f) {
+    const images = f.files.filter(x => IMAGE.includes(suffix(x.name)));
+    if (!DAY.test(f.folder)) return 'its name isn\'t "<Name> & <yyyy-mm-dd>"';
+    if (!images.length) {
+      return f.files.some(x => HEIC.includes(suffix(x.name)))
+        ? "it has only HEIC photos: save the screenshots as JPEG or PNG"
+        : "it has no images (.jpg, .jpeg, .png, .webp or .bmp)";
+    }
+    if (images.length > limits.maxImages) return "it has " + images.length + " images, more than " + limits.maxImages;
+    const big = images.find(x => x.size > limits.maxImageMb * 1024 * 1024);
+    if (big) return big.name + " is over " + limits.maxImageMb + " MB";
+    return "";
+  }
+
+  function draw() {
+    const body = $("batch").querySelector("tbody");
+    body.textContent = "";
+    for (const b of batch) {
+      const tr = document.createElement("tr");
+      cell(tr, b.folder);
+      cell(tr, b.images == null ? "" : b.images);
+      const note = b.state === "Accepted" && b.ignored && b.ignored.length
+        ? " (not images, left out: " + b.ignored.join(", ") + ")" : "";
+      cell(tr, b.reason ? "Refused: " + b.reason : b.state + note,
+           b.reason || b.failed ? "bad" : b.state === "Pending" ? "ok" : "");
+      body.appendChild(tr);
+    }
+    $("batch").classList.toggle("hidden", !batch.length);
+    $("upload").disabled = !batch.some(b => b.state === "Accepted");
+    $("ready").disabled = !batch.some(b => b.state === "Uploaded");
+  }
+
+  $("picker").addEventListener("change", async () => {
+    const folders = group(Array.from($("picker").files));
+    batch = folders.map(f => {
+      const reason = localCheck(f);
+      return {folder: f.folder, files: f.files, reason: reason, state: reason ? "" : "Checking...",
+              images: f.files.filter(x => IMAGE.includes(suffix(x.name))).length};
+    });
+    say("batch-msg", folders.length ? "" : "No folder with files was chosen.", "bad");
+    draw();
+    const asked = batch.filter(b => !b.reason);
+    if (!asked.length) return;
+    try {
+      const res = await api("/api/check", {folders: asked.map(b => ({folder: b.folder,
+        files: b.files.map(x => ({name: x.name, size: x.size}))}))});
+      res.folders.forEach((r, i) => {
+        const b = asked[i];
+        if (r.ok) { b.state = "Accepted"; b.images = r.images; b.ignored = r.ignored; }
+        else { b.reason = r.error; b.state = ""; }
+      });
+      const good = batch.filter(b => b.state === "Accepted").length;
+      say("batch-msg", good + " of " + batch.length + " folder(s) can be uploaded." +
+          (good < batch.length ? " Refused folders are not uploaded." : ""), good ? "" : "bad");
+    } catch (e) {
+      if (lockedOut(e)) return;
+      asked.forEach(b => { b.state = ""; b.reason = e.message; });
+      say("batch-msg", e.message, "bad");
+    }
+    draw();
+  });
+
+  // ----- uploading straight to S3 through presigned forms -----
+  async function sendFile(form, file) {
+    for (let attempt = 1; ; attempt++) {
+      const data = new FormData();
+      for (const [k, v] of Object.entries(form.fields)) data.append(k, v);
+      data.append("file", file);       // must come last
+      try {
+        const res = await fetch(form.url, {method: "POST", body: data});
+        if (res.ok) return;
+        if (res.status < 500 || attempt >= 3) throw new Error("S3 refused " + file.name + " (" + res.status + ")");
+      } catch (e) {
+        if (attempt >= 3) throw e;
+      }
+      await new Promise(r => setTimeout(r, attempt * 1500));
+    }
+  }
+
+  async function uploadOne(b) {
+    b.state = "Starting..."; draw();
+    const up = await api("/api/uploads", {folder: b.folder,
+      files: b.files.map(x => ({name: x.name, size: x.size}))});
+    b.upload = {personDay: up.personDay, uploadId: up.uploadId};
+    const byName = new Map(b.files.map(x => [x.name.normalize("NFC"), x]));
+    const queue = up.forms.slice();
+    let done = 0;
+    b.state = "Uploading 0/" + up.forms.length; draw();
+    async function worker() {
+      while (queue.length) {
+        const form = queue.shift();
+        await sendFile(form, byName.get(form.name));
+        done++;
+        b.state = "Uploading " + done + "/" + up.forms.length; draw();
+      }
+    }
+    await Promise.all(Array.from({length: Math.min(PARALLEL, queue.length)}, worker));
+    b.state = "Uploaded"; draw();
+  }
+
+  $("upload").addEventListener("click", async () => {
+    $("upload").disabled = true; $("picker").disabled = true;
+    say("batch-msg", "Uploading. Keep this page open.");
+    let failed = 0;
+    for (const b of batch.filter(x => x.state === "Accepted")) {
+      try { await uploadOne(b); }
+      catch (e) {
+        if (lockedOut(e)) return;
+        failed++; b.failed = true; b.state = "Upload failed: " + e.message + " Choose the folder again.";
+        draw();
+      }
+    }
+    $("picker").disabled = false;
+    say("batch-msg", failed ? failed + " folder(s) failed to upload; the rest can be marked Ready."
+                            : "Uploaded. Click Ready to start processing.", failed ? "bad" : "ok");
+    draw();
+  });
+
+  $("ready").addEventListener("click", async () => {
+    $("ready").disabled = true;
+    let refused = 0;
+    for (const b of batch.filter(x => x.state === "Uploaded" && x.upload)) {
+      try { await api("/api/ready", b.upload); b.state = "Pending"; }
+      catch (e) {
+        if (lockedOut(e)) return;
+        refused++; b.failed = true; b.state = "Not Ready: " + e.message;
+      }
+      draw();
+    }
+    say("batch-msg", refused ? refused + " folder(s) could not be made Ready." : "Queued. Watch the status below.",
+        refused ? "bad" : "ok");
+    refresh();
+  });
+
+  // ----- status -----
+  const COLOURS = {Done: "ok", Pending: "", Processing: "", Uploading: "warn", Failed: "bad", Parked: "bad"};
+  async function refresh() {
+    if (!passphrase) return;
+    try {
+      const res = await api("/api/status");
+      showSync(res.syncEnabled);
+      const body = $("status").querySelector("tbody");
+      body.textContent = "";
+      for (const f of res.folders) {
+        const tr = document.createElement("tr");
+        cell(tr, f.personDay);
+        const td = cell(tr, "");
+        const badge = document.createElement("span");
+        badge.className = "badge " + (COLOURS[f.status] || "");
+        badge.textContent = f.status === "Uploading" ? "Upload not finished" : f.status;
+        td.appendChild(badge);
+        if (f.uploads > 1) td.appendChild(document.createTextNode(" (" + f.uploads + " uploads)"));
+        cell(tr, f.imageCount);
+        cell(tr, when(f.lastRunAt));
+        cell(tr, f.lastError, f.lastError ? "bad" : "");
+        body.appendChild(tr);
+      }
+      if (!res.folders.length) {
+        const tr = document.createElement("tr");
+        cell(tr, "No uploads in the last 7 days.", "muted").colSpan = 5;
+        body.appendChild(tr);
+      }
+      $("status-msg").textContent = "Updated " + new Date().toLocaleTimeString();
+    } catch (e) {
+      if (!lockedOut(e)) $("status-msg").textContent = e.message;
+    }
+  }
+  $("refresh").addEventListener("click", refresh);
+  setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 60000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
+
+  // ----- Day Sheets -----
+  $("search").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    say("sheets-msg", "Searching...");
+    try {
+      const res = await api("/api/sheets", {name: $("s-name").value, date: $("s-date").value});
+      const body = $("sheets").querySelector("tbody");
+      body.textContent = "";
+      for (const s of res.sheets) {
+        const tr = document.createElement("tr");
+        cell(tr, s.personDay);
+        cell(tr, when(s.updatedAt));
+        const a = document.createElement("a");
+        a.href = s.url; a.textContent = "Download"; a.rel = "noreferrer";
+        cell(tr, "").appendChild(a);
+        body.appendChild(tr);
+      }
+      $("sheets").classList.toggle("hidden", !res.sheets.length);
+      say("sheets-msg", res.sheets.length ? (res.more ? "Showing the newest 50; narrow the search." :
+          "Links work for 5 minutes; search again after that.") : "No Day Sheet matches.", res.sheets.length ? "" : "warn");
+    } catch (e) {
+      if (!lockedOut(e)) say("sheets-msg", e.message, "bad");
+    }
+  });
+})();
+</script>
+</body>
+</html>

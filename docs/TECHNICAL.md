@@ -38,11 +38,13 @@ above never import it.
 | `cloud/runner.py` | One Run: a queued Folder through the unchanged pipeline, its Day Sheet to `results/`, then the Sheet if the AWS Sync Switch is on. The Lambda handler, and a CLI for parity. |
 | `cloud/status.py` | Folder Status: the only writer of the `calls-log-folders` table (states, lease, attempts). |
 | `cloud/storage.py`, `cloud/naming.py`, `cloud/settings.py` | The data bucket, the one folder-name parser, and run-time settings and secrets. |
-| `cloud/killswitch.py` | Called by a guardrail alarm: turns the runner's queue trigger off and emails the Owner (§11). |
+| `cloud/intake.py`, `cloud/static/upload.html` | The upload and status page behind a public URL: checks folders, hands out presigned uploads, marks them Ready, shows Folder Status and finds Day Sheets (§11). |
+| `cloud/passphrase.py` | The page's passphrase: PBKDF2 hashing and the constant-time check. |
+| `cloud/killswitch.py` | Called by a guardrail alarm: turns the runner's queue trigger off, or the upload page off for its own alarm, and emails the Owner (§11). |
 | `cloud/bench.py` | Story 3.1's benchmark function (only while `enable_bench` is on). |
 | `tools/enqueue.py` | From the PC: sends Folders to the AWS runner, or re-queues a stored one (§11). |
 | `tools/resync.py` | From the PC: re-sends stored Day Sheets to the Sheets, the AWS `resync_output.py` (§11). |
-| `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
+| `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters and the page's passphrase, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
 | `infra/`, `infra/bootstrap/` | Terraform: everything in AWS. `docs/AWS_SETUP.md` has the manual steps. |
 
 ---
@@ -728,6 +730,41 @@ The PC keeps working as before; these steps are for the AWS side. Run them on
 the Owner's PC after `aws login`. Every alert below arrives by email through
 the `calls-log-alerts` topic (docs/AWS_SETUP.md §5).
 
+### The upload page
+
+The Operator's way in (Epic 4): a web page that needs no AWS account, only a
+passphrase. Set the passphrase once from the PC (it asks twice and stores only
+a hash), then find the page's address:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 tools\put_parameters.py --passphrase
+aws lambda get-function-url-config --function-name calls-log-intake --query FunctionUrl --output text --region ap-southeast-2
+```
+
+Give the address and the passphrase to the Operator. On the page:
+
+1. **Choose a folder**: one day folder, or a folder holding several. Each
+   folder is checked twice, by the page and then by the server, against the
+   same rules as `enqueue.py`, plus the employee list (`name_prefixes`): a
+   name nobody is registered under is refused. Files that aren't images are
+   left out and named; only-HEIC folders, more than `max_images` images or an
+   image over 15 MB are refused, with the reason.
+2. **Upload**: the images go straight from the browser to `inbox/<uploadId>/`
+   through links that work 15 minutes and only for those exact files. Keep
+   the page open until every folder says Uploaded.
+3. **Mark Ready**: the server counts the images that arrived. All of them:
+   the folder becomes Pending and is queued. Fewer (the upload broke): it is
+   refused; choose the folder and upload it again. Clicking Ready on a folder
+   that is already Pending queues it again, which is harmless.
+
+The status table shows the newest upload of each Person-Day of the last 7
+days and refreshes every minute; "Upload not finished" means its images never
+all arrived. The Day Sheets search finds stored sheets by part of a name
+(accents and case don't matter) and/or a date; each Download link works for
+5 minutes. The AWS Sync Switch is shown, never changed, here.
+
+A new passphrase or employee list reaches the page within 5 minutes.
+
 ### Sending Folders to AWS
 
 ```powershell
@@ -803,6 +840,12 @@ the queue for up to 14 days. The alarms:
 | `calls-log-runner-errors` | 6 or more runner crashes in 15 minutes (a failed Run is not a crash) |
 | `calls-log-runner-runaway` | both Run slots busy for N quarter-hours in a row; the alarm's description gives N (7 at 2,048 MB). N is set from the memory size so that, past the free tier, a runaway costs at most $0.50 before the stop ($0.48 at 2,048 MB) |
 
+The upload page's own alarms don't stop the runner; they turn the page off
+instead (below): `calls-log-intake-runaway` (600 or more page requests in 15
+minutes, against fewer than 100 in normal use) and `calls-log-intake-busy`
+(60 s or more of page compute in 15 minutes, against under 20 s; a wrong
+passphrase costs about 1.4 s, so this one catches slow guessing).
+
 Find the cause first, with the logs above, and in the dead-letter queue:
 
 ```powershell
@@ -834,4 +877,39 @@ on purpose:
 ```powershell
 $uuid = aws lambda list-event-source-mappings --function-name calls-log-runner --query "EventSourceMappings[0].UUID" --output text --region ap-southeast-2
 aws lambda update-event-source-mapping --uuid $uuid --no-enabled --region ap-southeast-2
+```
+
+### "The upload page is off (kill switch)"
+
+`calls-log-intake-runaway` or `calls-log-intake-busy` fired: something sent
+the page far more requests, or work, than people do: a script, or someone
+with the link guessing passphrases. The
+kill switch set the page's reserved concurrency to 0, so the address answers
+429 and costs nothing. Uploads already made and queued Folders carry on, and
+`enqueue.py` still works. See who called (the log has the routes and results,
+never a passphrase):
+
+```powershell
+aws logs tail /aws/lambda/calls-log-intake --since 1h --region ap-southeast-2
+```
+
+If passphrases were being guessed (many `"result": "401"` lines), set a new
+one (`put_parameters.py --passphrase`) before turning the page back on.
+
+### Turning the upload page back on
+
+A deploy never does it: Terraform ignores the page's reserved concurrency
+after creating it.
+
+```powershell
+aws lambda put-function-concurrency --function-name calls-log-intake --reserved-concurrent-executions 2 --region ap-southeast-2
+```
+
+### Stopping the upload page by hand
+
+If the kill switch emailed that it could NOT stop the page, or to close it on
+purpose:
+
+```powershell
+aws lambda put-function-concurrency --function-name calls-log-intake --reserved-concurrent-executions 0 --region ap-southeast-2
 ```
