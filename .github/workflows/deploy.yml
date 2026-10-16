@@ -86,11 +86,15 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # Read-only role: no lock file, so the plan can't block a deploy.
+          # No refresh either: refreshing reads every /calls-log/ parameter
+          # with decryption, and this role must never read the secret. The
+          # plan compares the code with the state the last deploy left; the
+          # deploy itself refreshes and checks for drift.
           # An init error is captured too, so every failure reaches the PR.
           set +e
           {
             terraform -chdir=infra init -no-color &&
-            terraform -chdir=infra plan -lock=false -no-color -detailed-exitcode
+            terraform -chdir=infra plan -lock=false -refresh=false -no-color -detailed-exitcode
           } > plan.txt 2>&1
           code=$?
           set -e
@@ -103,7 +107,7 @@ jobs:
           {
             echo "### Terraform plan for \`infra/\`: $result"
             echo
-            echo "Commit $HEAD_SHA. Nothing is applied until this is merged and CI is green on main."
+            echo "Commit $HEAD_SHA, compared with the state after the last deploy (not refreshed). Nothing is applied until this is merged and CI is green on main."
             echo
             echo "<details><summary>Plan output</summary>"
             echo
