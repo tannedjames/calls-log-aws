@@ -736,6 +736,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   let batch = [];                 // {folder, files, images, state:{k,a}|null, reason, ignored, upload, failed}
   let statusData = null, sheetsData = null, ownerData = null, timingsData = null;
   let ownerSettings = null;        // {employees, alerts} for the Owner tab's settings cards
+  let settingsFailed = false;      // the last load of them failed
   let busy = false;                // an Upload or Ready loop is running: both buttons stay off
   let session = 0;                 // bumped at sign-out, so a running loop stops
   let ownerGen = 0;                // bumped at sign-out and Lock, so a late owner answer is dropped
@@ -1331,7 +1332,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
 
   // ----- the Owner tab's settings: sync, passwords, alert emails, employees -----
   function forgetSettings() {
-    ownerSettings = null;
+    ownerSettings = null; settingsFailed = false;
     $("em-list").value = ""; $("pw-new").value = ""; $("pw-again").value = ""; $("al-new").value = "";
     ["sync-msg", "pw-msg", "al-msg", "em-msg"].forEach(id => say(id, ""));
     renderSettings();
@@ -1340,9 +1341,11 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     const list = $("al-list");
     list.textContent = "";
     $("em-count").textContent = ownerSettings ? t("em_count", {n: ownerSettings.employees.length}) : "";
-    if (!ownerSettings) return;
-    const alerts = ownerSettings.alerts;
+    // Never save a list that wasn't loaded: one typed name would replace everyone.
+    $("em-save").disabled = !ownerSettings; $("em-list").readOnly = !ownerSettings;
     const note = (k) => { const li = document.createElement("li"); li.className = "muted"; li.textContent = t(k); list.appendChild(li); };
+    if (!ownerSettings) { if (settingsFailed) note("al_unknown"); return; }
+    const alerts = ownerSettings.alerts;
     if (alerts == null) { note("al_unknown"); return; }
     if (!alerts.length) { note("al_none"); return; }
     for (const a of alerts) {
@@ -1359,24 +1362,28 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     try {
       const got = await ownerApi("/api/owner/settings");
       if (mine !== ownerGen) return;
-      ownerSettings = {employees: got.employees, alerts: got.alerts};
+      ownerSettings = {employees: got.employees, alerts: got.alerts}; settingsFailed = false;
       $("em-list").value = got.employees.join("\n");
       if (statusData) statusData.syncEnabled = got.syncEnabled;
       renderStatus(); renderSettings();
     } catch (e) {
-      if (mine === ownerGen && !ownerLockedOut(e)) say("em-msg", e, "bad");
+      if (mine === ownerGen && !ownerLockedOut(e)) { settingsFailed = true; renderSettings(); say("em-msg", e, "bad"); }
     }
   }
   // One owner write: drop the answer if the tab was locked or signed out meanwhile.
-  async function ownerWrite(path, body, where, done) {
+  // The button stays off meanwhile, so a double click can't send it twice.
+  async function ownerWrite(path, body, where, done, button) {
     const mine = ownerGen;
     say(where, {k: "saving"});
+    if (button) button.disabled = true;
     try {
       const got = await ownerApi(path, body);
       if (mine !== ownerGen) return;
       done(got);
     } catch (e) {
       if (mine === ownerGen && !ownerLockedOut(e)) say(where, e, "bad");
+    } finally {
+      if (button && mine === ownerGen) { button.disabled = false; renderSettings(); }
     }
   }
 
@@ -1385,7 +1392,8 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     ownerWrite("/api/owner/sync", {on: on}, "sync-msg", (got) => {
       if (statusData) statusData.syncEnabled = got.syncEnabled;
       renderStatus();
-      say("sync-msg", {k: got.syncEnabled ? "sync_now_on" : "sync_now_off"}, "ok");
+      const now = got.syncEnabled == null ? on : got.syncEnabled;   // saved, but not read back: say what was asked
+      say("sync-msg", {k: now ? "sync_now_on" : "sync_now_off"}, "ok");
     });
   }
   $("sync-on").addEventListener("click", () => setSync(true));
@@ -1396,12 +1404,27 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     const which = $("pw-which").value, fresh = $("pw-new").value;
     if (fresh !== $("pw-again").value) { say("pw-msg", {k: "pw_mismatch"}, "bad"); return; }
     if (!window.confirm(t(which === "upload" ? "confirm_pw_upload" : "confirm_pw_owner"))) return;
-    ownerWrite("/api/owner/password", {which: which, new: fresh}, "pw-msg", () => {
-      if (which === "upload") passphrase = fresh; else ownerPass = fresh;   // this page keeps working
+    passwordChange(which, fresh, $("pw-form").querySelector("button[type=submit]"));
+  });
+  // Like ownerWrite, but a new upload passphrase is kept even if the Owner tab was locked meanwhile:
+  // the server has it, and the upload session would otherwise be signed out a minute later.
+  async function passwordChange(which, fresh, button) {
+    const mine = ownerGen, s = session;
+    say("pw-msg", {k: "saving"});
+    button.disabled = true;
+    try {
+      await ownerApi("/api/owner/password", {which: which, new: fresh});
+      if (which === "upload" && s === session) passphrase = fresh;
+      if (mine !== ownerGen) return;
+      if (which === "owner") ownerPass = fresh;   // this page keeps working
       $("pw-new").value = ""; $("pw-again").value = "";
       say("pw-msg", {k: which === "upload" ? "pw_upload_done" : "pw_owner_done"}, "ok");
-    });
-  });
+    } catch (e) {
+      if (mine === ownerGen && !ownerLockedOut(e)) say("pw-msg", e, "bad");
+    } finally {
+      if (mine === ownerGen) button.disabled = false;
+    }
+  }
 
   $("al-form").addEventListener("submit", (ev) => {
     ev.preventDefault();
@@ -1410,7 +1433,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       $("al-new").value = "";
       renderSettings();
       say("al-msg", {k: "al_added"}, "ok");
-    });
+    }, $("al-form").querySelector("button[type=submit]"));
   });
   function removeAlert(a) {
     if (!window.confirm(t("confirm_al_remove", {address: a.address}))) return;
@@ -1422,14 +1445,15 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   }
 
   $("em-save").addEventListener("click", () => {
-    const names = $("em-list").value.split("\n").map(x => x.trim()).filter(x => x);   // blank lines dropped
-    if (!window.confirm(t("confirm_em", {n: names.length}))) return;
+    // Only trailing blank lines go, so the server's "line N" is the textarea's line N.
+    const names = $("em-list").value.replace(/\s+$/, "").split("\n");
+    if (!window.confirm(t("confirm_em", {n: names.filter(x => x.trim()).length}))) return;
     ownerWrite("/api/owner/employees", {names: names}, "em-msg", (got) => {
       if (ownerSettings) ownerSettings.employees = got.employees;
       $("em-list").value = got.employees.join("\n");   // as saved: lower case, no accents
       renderSettings();
       say("em-msg", {k: "em_saved", a: {n: got.employees.length}}, "ok");
-    });
+    }, $("em-save"));
   });
 
   // ----- start: the language remembered, else the browser's -----
