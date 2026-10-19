@@ -42,14 +42,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from cloud import naming  # noqa: E402
-from cloud.status import FolderStatus, Status, TransitionRefused  # noqa: E402
+from cloud import naming, requeue as shared_requeue  # noqa: E402
+from cloud.status import FolderStatus  # noqa: E402
 from cloud.storage import IMAGE_SUFFIXES, pc_order  # noqa: E402
 from tools.aws_cli import REGION, AwsError, Client, account_id, call, run_cli  # noqa: E402
 
 TABLE = "calls-log-folders"
 QUEUE = "calls-log-runs"
-REQUEUEABLE = (Status.DONE.value, Status.FAILED.value, Status.PARKED.value)
+REQUEUEABLE = shared_requeue.REQUEUEABLE
 
 
 class Refused(Exception):
@@ -101,28 +101,21 @@ def _queue(upload_id: str, day: naming.PersonDay, queue_url: str, run) -> None:
 def requeue(day: naming.PersonDay, upload_id: Optional[str], *, bucket: str, queue_url: str,
             status: FolderStatus, run=subprocess.run) -> tuple[str, int]:
     """Re-queue a stored upload of this Person-Day; returns (uploadId, images). Raises Refused."""
-    uploads = status.uploads(day.key)
-    found = [u for u in uploads if u.get("uploadId") == upload_id] if upload_id else uploads[-1:]
-    if not found:
-        raise Refused(f"{day.key}: no stored upload" + (f" {upload_id}" if upload_id else ""))
-    item = found[0]
-    upload_id = item["uploadId"]
-    if item.get("status") not in REQUEUEABLE:
-        raise Refused(f"{day.key}: upload {upload_id} is {item.get('status')}; "
-                      "only a Done, Failed or Parked Folder can be re-queued")
-    prefix = naming.inbox_key(upload_id, "")
-    listing = call("s3api", "list-objects-v2", {"Bucket": bucket, "Prefix": prefix}, run=run)
-    images = [o["Key"] for o in listing.get("Contents", [])
-              if "/" not in o["Key"][len(prefix):] and o["Key"].lower().endswith(IMAGE_SUFFIXES)]
-    if len(images) < int(item.get("imageCount") or 0):
-        raise Refused(f"{day.key}: {len(images)} of its {item.get('imageCount')} images are still in inbox/ "
-                      "(kept 30 days); send the folder again instead")
+
+    def list_images(uid: str) -> List[str]:
+        prefix = naming.inbox_key(uid, "")
+        listing = call("s3api", "list-objects-v2", {"Bucket": bucket, "Prefix": prefix}, run=run)
+        return [o["Key"][len(prefix):] for o in listing.get("Contents", [])
+                if "/" not in o["Key"][len(prefix):] and o["Key"].lower().endswith(IMAGE_SUFFIXES)]
+
+    def send(body: dict) -> None:
+        call("sqs", "send-message", {"QueueUrl": queue_url, "MessageBody": json.dumps(body, ensure_ascii=False)},
+             run=run)
+
     try:
-        status.requeue(day.key, upload_id)
-    except TransitionRefused:
-        raise Refused(f"{day.key}: upload {upload_id} changed state meanwhile; nothing re-queued") from None
-    _queue(upload_id, day, queue_url, run)
-    return upload_id, len(images)
+        return shared_requeue.requeue(day, upload_id, status=status, list_images=list_images, send=send)
+    except shared_requeue.Refused as e:
+        raise Refused(str(e)) from None
 
 
 def _aws(run) -> tuple[str, str, FolderStatus]:

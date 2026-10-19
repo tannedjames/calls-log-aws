@@ -79,6 +79,26 @@ data "aws_iam_policy_document" "intake" {
     resources = [local.arns.runs]
   }
 
+  # The Owner tab (owner password): stop or start the runner's queue trigger,
+  # as the kill switch and the runbook do. Only the runner's trigger.
+  statement {
+    sid       = "OwnerStopsOrStartsTheRunner"
+    actions   = ["lambda:UpdateEventSourceMapping", "lambda:GetEventSourceMapping"]
+    resources = ["*"] # mappings are named by UUID; the condition pins the runner
+
+    condition {
+      test     = "ArnLike"
+      variable = "lambda:FunctionArn"
+      values   = [local.arns.runner]
+    }
+  }
+
+  statement {
+    sid       = "FindTheRunnerTrigger"
+    actions   = ["lambda:ListEventSourceMappings"]
+    resources = ["*"] # no resource-level form
+  }
+
   statement {
     sid       = "Image"
     actions   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
@@ -117,7 +137,9 @@ resource "aws_lambda_function" "intake" {
   reserved_concurrent_executions = 2
 
   environment {
-    variables = local.calls_log_env
+    variables = merge(local.calls_log_env, {
+      CALLS_LOG_RUNNER_FUNCTION = aws_lambda_function.runner.function_name # the Owner tab's stop/start
+    })
   }
 
   lifecycle {

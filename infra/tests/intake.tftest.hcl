@@ -105,6 +105,23 @@ run "the_intake_role_is_fenced" {
     ])) == toset(["arn:aws:dynamodb:ap-southeast-2:333596351215:table/calls-log-folders/index/uploads-by-day"])
     error_message = "The status view queries the uploads-by-day index, nothing wider."
   }
+
+  assert {
+    condition = one([
+      for s in jsondecode(data.aws_iam_policy_document.intake.json).Statement : s.Condition
+      if contains(flatten([s.Action]), "lambda:UpdateEventSourceMapping")
+    ]) == { ArnLike = { "lambda:FunctionArn" = "arn:aws:lambda:ap-southeast-2:333596351215:function:calls-log-runner" } }
+    error_message = "The Owner tab may stop or start the runner's queue trigger, and no other function's."
+  }
+
+  assert {
+    condition = length([
+      for a in flatten([for s in jsondecode(data.aws_iam_policy_document.intake.json).Statement : s.Action]) :
+      a if startswith(a, "lambda:") && !contains(["lambda:UpdateEventSourceMapping", "lambda:GetEventSourceMapping",
+      "lambda:ListEventSourceMappings"], a)
+    ]) == 0
+    error_message = "The page may not change any function: no concurrency, code or configuration rights."
+  }
 }
 
 run "only_the_page_may_post_to_the_bucket" {

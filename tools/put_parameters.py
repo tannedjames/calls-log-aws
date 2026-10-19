@@ -17,6 +17,9 @@ Owner's PC after `aws login`:
     python tools/put_parameters.py --passphrase
         asks twice for the upload page's passphrase and stores only its
         PBKDF2 hash in intake_passphrase_hash (cloud/passphrase.py, AD-17)
+    python tools/put_parameters.py --owner-passphrase
+        the same for the page's owner password (owner_passphrase_hash), which
+        opens its Owner tab; keep it different from the upload passphrase
 
 Values go to the AWS CLI through a temporary file, never the command line,
 and are never printed: the output names the parameters only.
@@ -116,9 +119,9 @@ def subscribe(email: str, *, run=subprocess.run) -> None:
     print(f"subscribed the alert address to {TOPIC}: confirm it from the email AWS sends")
 
 
-def ask_passphrase(ask=getpass.getpass) -> str:
+def ask_passphrase(ask=getpass.getpass, what: str = "upload-page passphrase") -> str:
     """The new passphrase, typed twice and never echoed; raises ValueError with the reason."""
-    first = ask("New upload-page passphrase: ")
+    first = ask(f"New {what}: ")
     why = passphrase_mod.weak(first)
     if why:
         raise ValueError(f"passphrase refused: {why}")
@@ -136,12 +139,15 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, ask=getpass.getpa
     ap.add_argument("--alert-email", metavar="ADDRESS")
     ap.add_argument("--sync-enabled", choices=["true", "false"])
     ap.add_argument("--passphrase", action="store_true", help="set the upload page's passphrase (asked, not echoed)")
+    ap.add_argument("--owner-passphrase", action="store_true",
+                    help="set the page's owner password, for its Owner tab (asked, not echoed)")
     args = ap.parse_args(argv)
 
-    if not (args.from_private_files or args.alert_email or args.sync_enabled or args.passphrase):
+    if not (args.from_private_files or args.alert_email or args.sync_enabled or args.passphrase
+            or args.owner_passphrase):
         ap.print_usage(sys.stderr)
-        print("nothing to set: give --from-private-files, --alert-email, --sync-enabled or --passphrase",
-              file=sys.stderr)
+        print("nothing to set: give --from-private-files, --alert-email, --sync-enabled, --passphrase "
+              "or --owner-passphrase", file=sys.stderr)
         return 2
     if args.alert_email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", args.alert_email):
         print("--alert-email doesn't look like an email address", file=sys.stderr)
@@ -164,6 +170,13 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, ask=getpass.getpa
     if args.passphrase:
         try:
             updates["intake_passphrase_hash"] = passphrase_mod.hash_passphrase(ask_passphrase(ask))
+        except ValueError as e:
+            print(f"{e}; nothing written", file=sys.stderr)
+            return 2
+    if args.owner_passphrase:
+        try:
+            updates["owner_passphrase_hash"] = passphrase_mod.hash_passphrase(
+                ask_passphrase(ask, "owner password (for the page's Owner tab)"))
         except ValueError as e:
             print(f"{e}; nothing written", file=sys.stderr)
             return 2

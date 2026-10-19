@@ -38,9 +38,10 @@ above never import it.
 | `cloud/runner.py` | One Run: a queued Folder through the unchanged pipeline, its Day Sheet to `results/`, then the Sheet if the AWS Sync Switch is on. The Lambda handler, and a CLI for parity. |
 | `cloud/status.py` | Folder Status: the only writer of the `calls-log-folders` table (states, lease, attempts). |
 | `cloud/storage.py`, `cloud/naming.py`, `cloud/settings.py` | The data bucket, the one folder-name parser, and run-time settings and secrets. |
-| `cloud/intake.py`, `cloud/static/upload.html` | The upload and status page behind a public URL: checks folders, hands out presigned uploads, marks them Ready, shows Folder Status and finds Day Sheets (§11). |
-| `cloud/passphrase.py` | The page's passphrase: PBKDF2 hashing and the constant-time check. |
-| `cloud/killswitch.py` | Called by a guardrail alarm: turns the runner's queue trigger off, or the upload page off for its own alarm, and emails the Owner (§11). |
+| `cloud/intake.py`, `cloud/static/upload.html` | The upload and status page behind a public URL: checks folders, hands out presigned uploads, marks them Ready, shows Folder Status and finds Day Sheets; its Owner tab re-runs and re-sends days, stops and starts the runner and shows timings (§11). English and Vietnamese. |
+| `cloud/passphrase.py` | The page's passphrase and owner password: PBKDF2 hashing and the constant-time check. |
+| `cloud/requeue.py`, `cloud/timing.py` | Shared by the PC tools and the Owner tab: the re-queue rule (`enqueue.py --requeue`) and the Ready→Done percentiles (`turnaround.py`). |
+| `cloud/killswitch.py` | Called by a guardrail alarm: turns the runner's queue trigger off, or the upload page off for its own alarm, and emails the Owner (§11). Also the runner's state and start, for the Owner tab. |
 | `cloud/bench.py` | Story 3.1's benchmark function (only while `enable_bench` is on). |
 | `tools/enqueue.py` | From the PC: sends Folders to the AWS runner, or re-queues a stored one (§11). |
 | `tools/resync.py` | From the PC: re-sends stored Day Sheets to the Sheets, the AWS `resync_output.py` (§11). |
@@ -759,13 +760,47 @@ Give the address and the passphrase to the Operator. On the page:
    refused; choose the folder and upload it again. Clicking Ready on a folder
    that is already Pending queues it again, which is harmless.
 
-The status table shows the newest upload of each Person-Day of the last 7
+The Status tab shows the newest upload of each Person-Day of the last 7
 days and refreshes every minute; "Upload not finished" means its images never
-all arrived. The Day Sheets search finds stored sheets by part of a name
+all arrived. The Day Sheets tab finds stored sheets by part of a name
 (accents and case don't matter) and/or a date; each Download link works for
-5 minutes. The AWS Sync Switch is shown, never changed, here.
+5 minutes. The **EN / VI** switch in the header translates the whole page,
+the server's refusals included (each carries a `code` the page looks up); the
+browser remembers the choice (`localStorage` key `calls-log-lang`, nothing
+else is stored).
 
-A new passphrase or employee list reaches the page within 5 minutes.
+A new passphrase, owner password or employee list reaches the page within
+5 minutes.
+
+### The Owner tab
+
+The page's fourth tab, for the Owner only. It opens with a separate **owner
+password**, never with the upload passphrase (and the owner password never
+opens the upload routes). Set it once, like the passphrase; it asks twice and
+stores only a hash in `/calls-log/owner_passphrase_hash`:
+
+```bash
+python3 tools/put_parameters.py --owner-passphrase
+```
+
+Until then the tab says the owner password isn't set. Once unlocked (the
+password stays in the open page only; Lock or reloading forgets it):
+
+| Control | What it does | Same as |
+|---|---|---|
+| **Re-run** (Status tab, per row) | Runs the newest stored upload of that day again, if it is Done, Failed or Parked and all its images are still in `inbox/`; a Waiting upload is just queued again | `enqueue.py --requeue` (both call `cloud/requeue.py`) |
+| **Re-send to Sheet** (Day Sheets tab, per row) | Queues one re-send of that stored Day Sheet, **whatever the AWS Sync Switch says**, and overwrites the day's tab | `resync.py --name … --date …` for one day |
+| **AWS processing: Stop / Start** | Turns the runner's queue trigger off or on. Stopped: no new Run starts, queued Folders wait up to 14 days | "Stopping the runner by hand" and "Turning the runner back on" below |
+| **Sync to Google Sheets** | Shows the AWS Sync Switch; changing it is still `put_parameters.py --sync-enabled` | — |
+| **Timings** | Ready→Done median and 95th percentile over 1, 7 or 28 days, and the uploads per status | `turnaround.py --days N` (both use `cloud/timing.py`) |
+
+The intake role may change only the runner's trigger
+(`lambda:UpdateEventSourceMapping` conditioned on the runner's ARN); it can't
+change any function, and the kill switch's alarms still stop the runner on
+their own. A wrong owner password answers 403, so the upload session stays
+signed in; guessing costs page compute like a wrong passphrase, so
+`calls-log-intake-busy` catches it the same way. The Web App URL and its
+secret are never shown or changed on the page.
 
 ### Sending Folders to AWS
 
@@ -1065,9 +1100,11 @@ Switch off and is checked by hand before AWS writes anything.
 
 `tools/resync.py` and `tools/enqueue.py --requeue` don't run in CloudShell:
 they read folder names with `main.py`'s parser, which loads the OCR libraries.
-To redo a day without the PC, upload its folder again.
+Use the page's Owner tab instead (above): **Re-run** and **Re-send to Sheet**
+do the same, and **AWS processing** stops and starts the runner. Set its
+password once with `python3 tools/put_parameters.py --owner-passphrase`.
 
-To stop or restart AWS from CloudShell, the commands above in bash form:
+The same from CloudShell, the commands above in bash form:
 
 ```bash
 uuid=$(aws lambda list-event-source-mappings --function-name calls-log-runner --query "EventSourceMappings[0].UUID" --output text --region ap-southeast-2)

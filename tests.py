@@ -2718,14 +2718,20 @@ def _intake(values=None, sqs=None, switch="false"):
     return svc, dynamo, s3
 
 
-def _call(svc, path, body=None, passphrase=_PASS, method="POST", raw=None):
+def _call(svc, path, body=None, passphrase=_PASS, method="POST", raw=None, owner=None):
     headers = {"content-type": "application/json"}
     if passphrase is not None:
         headers["x-calls-log-passphrase"] = passphrase
+    if owner is not None:
+        headers["x-calls-log-owner"] = owner
     event = {"rawPath": path, "requestContext": {"http": {"method": method}}, "headers": headers,
              "body": raw if raw is not None else json.dumps(body or {}), "isBase64Encoded": False}
     res = intake.handle(event, lambda: svc)
-    return res["statusCode"], json.loads(res["body"]) if res["body"] else None
+    out = json.loads(res["body"]) if res["body"] else None
+    for refusal in [out] + ((out or {}).get("folders") or []):   # every code has a string on the page
+        if isinstance(refusal, dict) and refusal.get("ok") is False and "code" in refusal:
+            assert refusal["code"] in intake.CODES, refusal["code"]
+    return res["statusCode"], out
 
 
 def _files(*names, size=1000):
@@ -2748,7 +2754,10 @@ def test_intake_serves_the_page_with_a_csp_that_allows_only_its_own_blocks():
     assert "unsafe-inline" not in csp and "frame-ancestors 'none'" in csp
     assert f"connect-src 'self' https://{_IN_BUCKET}.s3.ap-southeast-2.amazonaws.com" in csp
     assert 'style="' not in html and " on" + "click=" not in html   # inline attributes would be blocked
-    assert "localStorage" not in html and "sessionStorage" not in html   # the passphrase stays in memory
+    # The passphrases stay in memory: the browser stores only the chosen language.
+    stored = _re.findall(r'localStorage\.(\w+)\("([^"]+)"', html)
+    assert {key for _, key in stored} == {"calls-log-lang"} and html.count("localStorage") == len(stored)
+    assert "sessionStorage" not in html and "indexedDB" not in html and "document.cookie" not in html
 
 
 def test_intake_checks_the_passphrase_before_touching_any_data():
@@ -2756,7 +2765,8 @@ def test_intake_checks_the_passphrase_before_touching_any_data():
     svc.status, svc.storage, svc.s3, svc.sqs = _Tripwire(), _Tripwire(), _Tripwire(), _Tripwire()
     for given in (None, "", "wrong passphrase", _PASS.upper()):
         code, body = _call(svc, "/api/status", passphrase=given)
-        assert code == 401 and body == {"ok": False, "error": "Wrong passphrase."}
+        assert code == 401 and body == {"ok": False, "error": "Wrong passphrase.", "code": "wrong_passphrase",
+                                        "args": {}}
 
 
 def test_intake_says_so_when_no_passphrase_is_set():
@@ -3393,3 +3403,232 @@ def test_check_secret_probes_without_reaching_a_sheet_and_never_prints_it():
     assert "ACCEPTED (expected ACCEPTED)" in said and "REFUSED (expected REFUSED)" in said
     assert all(b["name"] == "zz-secret-check" and b["sessions"] == [] for b in app.bodies)
     assert "the-new-secret" not in said and "the-old-secret" not in said
+
+
+# ---------------------------------------------------------------------------
+# The Owner tab (spec-4-5): routes under /api/owner/ open with the owner
+# password only (owner_passphrase_hash, x-calls-log-owner); re-run, re-send,
+# runner stop/start and timings reuse cloud/requeue.py, the resync message,
+# cloud/killswitch.py and cloud/timing.py.
+# ---------------------------------------------------------------------------
+
+from cloud import requeue as crequeue, timing as ctiming, killswitch as ckill
+
+_OWNER = "owner password, quite long"
+_OWNER_HASH = cpass.hash_passphrase(_OWNER, iterations=1000)
+
+
+class _EsmLambda:
+    """The runner's queue trigger(s); an update takes effect at once."""
+
+    def __init__(self, states=("Enabled",), fail=False):
+        self.mappings = [{"UUID": f"u{i}", "State": s} for i, s in enumerate(states)]
+        self.fail, self.updates, self.functions = fail, [], []
+
+    def list_event_source_mappings(self, FunctionName, Marker=None):
+        if self.fail:
+            raise TimeoutError("simulated")
+        self.functions.append(FunctionName)
+        return {"EventSourceMappings": [dict(m) for m in self.mappings]}
+
+    def update_event_source_mapping(self, UUID, Enabled):
+        self.updates.append((UUID, Enabled))
+        for m in self.mappings:
+            if m["UUID"] == UUID:
+                m["State"] = "Enabled" if Enabled else "Disabled"
+
+
+def _owner_intake(owner_hash=_OWNER_HASH, lam=None, runner="calls-log-runner", sqs=None):
+    svc, dynamo, s3 = _intake(values=dict(_IN_VALUES, owner_passphrase_hash=owner_hash), sqs=sqs)
+    svc.settings = dataclasses.replace(svc.settings, runner_function=runner)
+    svc.lambda_client = lam if lam is not None else _EsmLambda()
+    return svc, dynamo, s3
+
+
+def _owner(svc, path, body=None, owner=_OWNER, passphrase=None):
+    return _call(svc, path, body, passphrase=passphrase, owner=owner)
+
+
+def test_owner_routes_open_with_the_owner_password_only():
+    svc, _, _ = _owner_intake()
+    svc.status = svc.storage = svc.s3 = svc.sqs = svc.lambda_client = _Tripwire()
+    for path in intake.OWNER_ROUTES:
+        for given, upload in ((None, None), ("", _PASS), (_PASS, None), (_PASS, _PASS), (_OWNER.upper(), None)):
+            code, body = _owner(svc, path, owner=given, passphrase=upload)
+            assert code == 403 and body["code"] == "wrong_owner", (path, given)
+    # and the owner password never opens the upload routes
+    code, body = _call(svc, "/api/status", passphrase=_OWNER)
+    assert code == 401 and body["code"] == "wrong_passphrase"
+
+
+def test_owner_tab_says_so_until_its_password_is_set():
+    svc, _, _ = _owner_intake(owner_hash="unset")
+    code, body = _owner(svc, "/api/owner/hello")
+    assert code == 503 and body["code"] == "owner_not_set" and "--owner-passphrase" in body["error"]
+
+
+def test_both_passwords_stay_remembered_side_by_side():
+    svc, _, _ = _owner_intake()
+    intake._verified.clear()
+    with mock.patch.object(intake.passphrase_mod, "verify", wraps=cpass.verify) as verify:
+        for _ in range(3):
+            assert _call(svc, "/api/hello")[0] == 200
+            assert _owner(svc, "/api/owner/hello")[0] == 200
+        assert verify.call_count == 2   # one PBKDF2 each; alternating doesn't evict the other
+
+
+def test_owner_hello_shows_the_switch_and_the_runner():
+    svc, _, _ = _owner_intake(lam=_EsmLambda(("Disabled",)))
+    code, body = _owner(svc, "/api/owner/hello")
+    assert code == 200 and body == {"ok": True, "syncEnabled": False, "runner": "stopped"}
+    svc.lambda_client = _EsmLambda(fail=True)
+    assert _owner(svc, "/api/owner/hello")[1]["runner"] is None   # unreadable: shown as unknown, the tab opens
+
+
+def _inbox(s3, upload_id, n):
+    for i in range(n):
+        s3.objects[f"inbox/{upload_id}/shot_{i}.jpg"] = b"x"
+
+
+def test_owner_requeue_runs_a_stored_folder_again():
+    sqs = _FakeSqs()
+    svc, _, s3 = _owner_intake(sqs=sqs)
+    _stored_upload(svc.status, _RQ_OLD, "Done")
+    _stored_upload(svc.status, _RQ_NEW, "Failed")
+    _inbox(s3, _RQ_OLD, 2)
+    _inbox(s3, _RQ_NEW, 2)
+    code, body = _owner(svc, "/api/owner/requeue", {"personDay": _RUN_PD})      # the newest by default
+    assert code == 200 and body == {"ok": True, "uploadId": _RQ_NEW, "images": 2, "status": "Pending"}
+    item = svc.status.get(_RUN_PD, _RQ_NEW)
+    assert item["status"] == "Pending" and item["attempts"] == 0 and "lastError" not in item
+    assert sqs.sent[-1]["body"] == {"uploadId": _RQ_NEW, "personDay": _RUN_PD, "mode": "process"}
+    code, body = _owner(svc, "/api/owner/requeue", {"personDay": _RUN_PD, "uploadId": _RQ_OLD})
+    assert code == 200 and body["uploadId"] == _RQ_OLD and len(sqs.sent) == 2
+    code, body = _owner(svc, "/api/owner/requeue", {"personDay": _RUN_PD})      # Pending: queued again
+    assert code == 200 and body["queuedAgain"] and len(sqs.sent) == 3
+
+
+def test_owner_requeue_refuses_and_changes_nothing():
+    sqs = _FakeSqs()
+    svc, _, s3 = _owner_intake(sqs=sqs)
+    _stored_upload(svc.status, _RQ_NEW, "Processing")
+    _inbox(s3, _RQ_NEW, 2)
+    code, body = _owner(svc, "/api/owner/requeue", {"personDay": _RUN_PD})
+    assert code == 409 and body["code"] == "not_requeueable" and body["args"]["status"] == "Processing"
+    svc2, _, s3b = _owner_intake(sqs=sqs)
+    _stored_upload(svc2.status, _RQ_NEW, "Done")
+    _inbox(s3b, _RQ_NEW, 1)                                                    # one of two images left
+    code, body = _owner(svc2, "/api/owner/requeue", {"personDay": _RUN_PD})
+    assert code == 409 and body["code"] == "images_gone" and body["args"] == {"arrived": 1, "declared": 2}
+    assert svc2.status.get(_RUN_PD, _RQ_NEW)["status"] == "Done"
+    assert _owner(svc2, "/api/owner/requeue", {"personDay": "Tran Thi B & 2026-06-01"})[1]["code"] == "no_upload"
+    assert _owner(svc2, "/api/owner/requeue", {"personDay": "holiday photos"})[1]["code"] == "bad_day"
+    assert _owner(svc2, "/api/owner/requeue", {"personDay": _RUN_PD, "uploadId": "../x"})[0] == 400
+    assert sqs.sent == []
+
+
+def test_owner_requeue_and_the_pc_tool_share_one_rule():
+    assert enqueue.REQUEUEABLE == crequeue.REQUEUEABLE == ("Done", "Failed", "Parked")
+
+
+def test_owner_resend_queues_only_a_stored_day_sheet():
+    sqs = _FakeSqs()
+    svc, _, s3 = _owner_intake(sqs=sqs)
+    s3.objects[naming.result_key(naming.parse(_RUN_PD))] = b"xlsx"
+    s3.objects["results/Nguyen Van A & 2026-06-01 (1).xlsx"] = b"not the current one"
+    code, body = _owner(svc, "/api/owner/resend", {"personDay": _RUN_PD})
+    assert code == 200 and sqs.sent == [{"QueueUrl": "https://sqs/calls-log-runs",
+                                         "body": {"personDay": _RUN_PD, "mode": "resync"}}]
+    code, body = _owner(svc, "/api/owner/resend", {"personDay": "Nguyen Van A & 2026-06-02"})
+    assert code == 404 and body["code"] == "no_sheet" and len(sqs.sent) == 1
+
+
+def test_owner_stops_and_starts_only_the_runner_trigger():
+    lam = _EsmLambda(("Enabled",))
+    svc, _, _ = _owner_intake(lam=lam)
+    assert _owner(svc, "/api/owner/runner", {"action": "status"})[1] == {"ok": True, "runner": "running", "changed": 0}
+    assert _owner(svc, "/api/owner/runner", {"action": "stop"})[1] == {"ok": True, "runner": "stopped", "changed": 1}
+    assert _owner(svc, "/api/owner/runner", {"action": "stop"})[1]["changed"] == 0     # already off
+    assert _owner(svc, "/api/owner/runner", {"action": "start"})[1] == {"ok": True, "runner": "running", "changed": 1}
+    assert lam.updates == [("u0", False), ("u0", True)] and set(lam.functions) == {"calls-log-runner"}
+    assert _owner(svc, "/api/owner/runner", {"action": "delete"})[1]["code"] == "bad_action"
+    svc.lambda_client = _EsmLambda(fail=True)
+    assert _owner(svc, "/api/owner/runner", {"action": "stop"})[1]["code"] == "runner_failed"
+    svc2, _, _ = _owner_intake(runner="")
+    assert _owner(svc2, "/api/owner/runner", {"action": "start"})[0:2] == (
+        503, {"ok": False, "error": "The page doesn't know the runner (CALLS_LOG_RUNNER_FUNCTION is not set).",
+              "code": "no_runner", "args": {}})
+
+
+def test_runner_state_names_the_mixed_and_missing_cases():
+    assert ckill.runner_state(_EsmLambda(()), "f") == "missing"
+    assert ckill.runner_state(_EsmLambda(("Disabling",)), "f") == "changing"
+    assert ckill.runner_state(_EsmLambda(("Enabled", "Disabled")), "f") == "stopped"
+    lam = _EsmLambda(("Disabled", "Enabled", "Disabling"))
+    assert [u for u, _ in [(s["uuid"], s["was"]) for s in ckill.start_runner(lam, "f")]] == ["u0", "u2"]
+
+
+def test_owner_timings_are_the_turnaround_tools_numbers():
+    svc, _, _ = _owner_intake()
+    items = [{"status": "Done", "readyAt": "2026-06-08T01:00:00Z", "updatedAt": f"2026-06-08T01:{m:02d}:00Z"}
+             for m in (5, 10, 40)] + [{"status": "Failed"}, {"status": "Pending"}]
+    asked = []
+    svc.status.recent = lambda day: asked.append(day) or (items if day == "2026-06-08" else [])
+    code, body = _owner(svc, "/api/owner/timings", {"days": 3})
+    assert code == 200 and asked == ["2026-06-08", "2026-06-07", "2026-06-06"]
+    assert body == {"ok": True, "days": 3, "targetSeconds": 7200, **turnaround.summary(items)}
+    assert body["median"] == 600 and body["p95"] == body["slowest"] == 2400
+    for days in (0, 29, "7", True):
+        assert _owner(svc, "/api/owner/timings", {"days": days})[1]["code"] == "days_range"
+    assert ctiming.summary is turnaround.summary
+
+
+def test_put_parameters_stores_the_owner_password_hash_apart():
+    aws = _FakeAws()
+    answers, asked = iter([_OWNER, _OWNER]), []
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = put_parameters.main(["--owner-passphrase"], run=aws,
+                                   ask=lambda prompt: asked.append(prompt) or next(answers))
+    assert code == 0, out.getvalue() + err.getvalue()
+    (stored,) = aws.inputs
+    assert stored["Name"] == "/calls-log/owner_passphrase_hash" and cpass.verify(_OWNER, stored["Value"])
+    assert "owner password" in asked[0] and _OWNER not in out.getvalue() + err.getvalue()
+
+
+def test_settings_read_the_owner_password_hash_but_never_show_it():
+    ssm = _FakeSsm(dict(_ST_VALUES, owner_passphrase_hash=_OWNER_HASH))
+    got = settings.read(ssm, _ST_ENV)
+    assert got.owner_passphrase_hash == _OWNER_HASH and _OWNER_HASH not in repr(got)
+    assert settings.read(_FakeSsm(_ST_VALUES), _ST_ENV).owner_passphrase_hash == ""   # missing: not set up
+
+
+def _page_words():
+    page = intake.PAGE.read_text(encoding="utf-8")
+    script = _re.search(r"<script>(.*?)</script>", page, _re.S).group(1)
+
+    def keys(name):
+        block = _re.search(rf"const {name} = \{{\n(.*?)\n  \}};", script, _re.S).group(1)
+        return [m.group(1) for m in _re.finditer(r"^    (\w+): ", block, _re.M)]
+
+    return page, script, keys("EN"), keys("VI")
+
+
+def test_page_has_english_and_vietnamese_for_every_word_and_code():
+    page, script, en, vi = _page_words()
+    assert len(en) == len(set(en)) and len(vi) == len(set(vi)), "a key is defined twice"
+    assert set(en) == set(vi), set(en) ^ set(vi)
+    missing = [c for c in intake.CODES if f"e_{c}" not in en]
+    assert not missing, missing
+    used = set(_re.findall(r'data-i18n="(\w+)"', page))
+    used |= set(_re.findall(r'\bt\("(\w+)"[,)]', script)) | set(_re.findall(r'\{k: "(\w+)"[,}]', script))
+    used |= {f"run_{s}" for s in ("running", "stopped", "changing", "missing", "unknown")}
+    used |= {f"st_{s.value}" for s in fstatus.Status if s.value not in ("Skipped",)}
+    assert used <= set(en), used - set(en)
+
+
+def test_page_stays_inside_its_csp():
+    page = intake.PAGE.read_text(encoding="utf-8")
+    assert len(_re.findall(r"<script>", page)) == 1 and len(_re.findall(r"<style>", page)) == 1
+    assert " style=" not in page and "javascript:" not in page and "<script src" not in page
+    assert not _re.search(r"https?://", page), "the page loads nothing from elsewhere"

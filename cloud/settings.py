@@ -35,7 +35,8 @@ log = logging.getLogger("calls-log.settings")
 PARAMETER_PREFIX = "/calls-log/"
 PLACEHOLDER = "unset"
 SYNC_SWITCH = PARAMETER_PREFIX + "sync_enabled"
-_CACHED_PARAMETERS = ("webapp_url", "sync_secret", "name_prefixes", "intake_passphrase_hash", "alert_email")
+_CACHED_PARAMETERS = ("webapp_url", "sync_secret", "name_prefixes", "intake_passphrase_hash",
+                      "owner_passphrase_hash", "alert_email")
 # Settings field -> environment variable (Terraform builds the function
 # environment from one locals map with these names).
 ENVIRONMENT = {
@@ -43,7 +44,7 @@ ENVIRONMENT = {
     "table": "CALLS_LOG_TABLE",
     "queue_url": "CALLS_LOG_QUEUE_URL",
     "alerts_topic_arn": "CALLS_LOG_ALERTS_TOPIC_ARN",
-    "runner_function": "CALLS_LOG_RUNNER_FUNCTION",   # the kill switch's only
+    "runner_function": "CALLS_LOG_RUNNER_FUNCTION",   # the kill switch and the page's Owner tab
     "intake_function": "CALLS_LOG_INTAKE_FUNCTION",   # the kill switch's only
 }
 
@@ -61,6 +62,7 @@ class Settings:
     sync_secret: str = field(default="", repr=False)
     name_prefixes: Tuple[str, ...] = field(default=(), repr=False)
     intake_passphrase_hash: str = field(default="", repr=False)
+    owner_passphrase_hash: str = field(default="", repr=False)   # the page's Owner tab
     alert_email: str = field(default="", repr=False)
 
 
@@ -94,6 +96,7 @@ def read(ssm: Any, environ: Mapping[str, str] = os.environ) -> Settings:
         sync_secret=_value(values.get("sync_secret")),
         name_prefixes=tuple(naming.prefixes_from_json(prefixes)) if prefixes else (),
         intake_passphrase_hash=_value(values.get("intake_passphrase_hash")),
+        owner_passphrase_hash=_value(values.get("owner_passphrase_hash")),
         alert_email=_value(values.get("alert_email")),
     )
 

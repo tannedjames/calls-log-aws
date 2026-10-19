@@ -4,190 +4,689 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>calls-log uploads</title>
+<title>calls-log</title>
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNyIgZmlsbD0iIzJmNWJlYSIvPjxwYXRoIGQ9Ik04LjYgNS41Yy40IDAgLjcuMi45LjZsMSAyLjNjLjIuNC4xLjgtLjIgMS4xbC0xIDFjLjYgMS4zIDEuNyAyLjQgMyAzbDEtMWMuMy0uMy43LS40IDEuMS0uMmwyLjMgMWMuNC4yLjYuNS42Ljl2Mi4yYzAgLjYtLjUgMS4xLTEuMSAxLjFDMTAuOSAxNy41IDYuNSAxMy4xIDYuNSA3LjZjMC0uNi41LTEuMSAxLjEtMS4xeiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg==">
 <style>
 :root {
-  --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #5d6677; --line: #dde1e8;
-  --accent: #1f5fbf; --ok: #1d7a46; --bad: #b3261e; --warn: #9a6200;
+  --bg: #f4f6fb; --card: #ffffff; --text: #18202f; --muted: #5b6578; --line: #e3e7ef;
+  --accent: #2f5bea; --accent-ink: #ffffff; --accent-soft: #e8eeff;
+  --ok: #127a45; --ok-soft: #e3f5ea; --bad: #c0362c; --bad-soft: #fde8e6; --bad-ink: #ffffff;
+  --warn: #8a5300; --warn-soft: #fff2dc; --info: #2463c7; --info-soft: #e6efff;
+  --grey: #5b6578; --grey-soft: #eef0f4;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 6px 16px rgba(16, 24, 40, .06);
+  --radius: 14px;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #14171c; --card: #1c2027; --text: #e7eaf0; --muted: #9aa3b2; --line: #2e3440;
-          --accent: #6ea0f0; --ok: #5cc28a; --bad: #f08a80; --warn: #e0b45a; }
+  :root {
+    --bg: #0f131a; --card: #171c25; --text: #e8ecf3; --muted: #9aa4b5; --line: #283041;
+    --accent: #7b9cff; --accent-ink: #0f131a; --accent-soft: #1f2a48;
+    --ok: #5dd39a; --ok-soft: #12301f; --bad: #ff8a80; --bad-soft: #3a1714; --bad-ink: #2a0b08;
+    --warn: #f2c26b; --warn-soft: #3a2a0d; --info: #8cb4ff; --info-soft: #182742;
+    --grey: #9aa4b5; --grey-soft: #222936;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 6px 16px rgba(0, 0, 0, .25);
+  }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text);
-       font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 960px; margin: 0 auto; padding: 16px; }
-h1 { font-size: 20px; margin: 8px 0 16px; }
-h2 { font-size: 16px; margin: 0 0 12px; }
-section { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-          padding: 16px; margin-bottom: 16px; }
-label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 4px; }
-input[type=password], input[type=text], input[type=date] {
-  font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
-  background: var(--bg); color: var(--text); width: 100%; max-width: 320px; }
-button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent);
-         background: var(--accent); color: #fff; cursor: pointer; }
-button.plain { background: transparent; color: var(--accent); }
-button:disabled { opacity: .5; cursor: default; }
-.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 12px; }
-.muted { color: var(--muted); font-size: 13px; }
-.msg { margin: 8px 0 0; min-height: 1.2em; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text);
+       font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif; }
+.top { position: sticky; top: 0; z-index: 2; background: var(--card); border-bottom: 1px solid var(--line); }
+.top-in { max-width: 1040px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; flex: 1; min-width: 0; }
+.brand svg { flex: none; color: var(--accent); }
+.brand small { display: block; font-weight: 500; font-size: 12px; color: var(--muted); }
+.lang { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; flex: none; }
+.lang button { border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 5px 11px;
+               font-weight: 600; font-size: 13px; }
+.lang button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.tabs { max-width: 1040px; margin: 0 auto; padding: 0 16px; display: flex; gap: 4px; overflow-x: auto; }
+.tabs button { background: transparent; border: 0; border-bottom: 3px solid transparent; border-radius: 0;
+               color: var(--muted); padding: 10px 12px; font-weight: 600; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+main { max-width: 1040px; margin: 0 auto; padding: 20px 16px 40px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+        box-shadow: var(--shadow); padding: 20px; margin-bottom: 18px; }
+.card.narrow { max-width: 440px; margin: 40px auto; }
+h2 { font-size: 18px; margin: 0 0 6px; }
+h3 { font-size: 15px; margin: 0 0 6px; }
+p { margin: 0 0 12px; }
+.muted { color: var(--muted); font-size: 13.5px; }
+label.field { display: block; color: var(--muted); font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+input[type=password], input[type=text], input[type=date], select {
+  font: inherit; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg); color: var(--text); width: 100%; max-width: 340px; }
+input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 10px; border: 1px solid var(--accent);
+         background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); border-color: var(--line); }
+button.danger { background: var(--bad); border-color: var(--bad); color: var(--bad-ink); }
+button.small { padding: 5px 10px; font-size: 13px; border-radius: 8px; }
+button:disabled { opacity: .45; cursor: default; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+.row.center { align-items: center; }
+.row.actions { margin-top: 16px; }
+.row.head { margin-bottom: 14px; }
+.row.head p { margin: 0; }
+.spread { justify-content: space-between; }
+.stack > * + * { margin-top: 14px; }
+.msg { margin: 12px 0 0; min-height: 1.3em; font-size: 14px; }
 .bad { color: var(--bad); } .ok { color: var(--ok); } .warn { color: var(--warn); }
-.scroll { overflow-x: auto; }
+.drop { display: flex; align-items: center; gap: 14px; border: 2px dashed var(--line); border-radius: var(--radius);
+        padding: 18px; cursor: pointer; background: var(--bg); }
+.drop:hover { border-color: var(--accent); }
+.drop strong { display: block; color: var(--accent); }
+.drop svg { flex: none; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.scroll { overflow-x: auto; margin-top: 14px; }
 table { border-collapse: collapse; width: 100%; font-size: 14px; }
-th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { color: var(--muted); font-weight: 600; font-size: 13px; }
-.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px;
-         border: 1px solid currentColor; white-space: nowrap; }
-.hidden { display: none; }
-.gap { margin-top: 12px; }
-.head { justify-content: space-between; align-items: center; }
-.head h2 { margin: 0; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .03em; }
+tbody tr:last-child td { border-bottom: 0; }
+td.err { color: var(--bad); font-size: 13px; max-width: 280px; }
+td.pd b { display: block; font-weight: 600; white-space: nowrap; }
+td.pd span { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.why { font-size: 13px; margin-top: 4px; min-width: 12em; }
+.why.bad { color: var(--bad); } .why.muted { color: var(--muted); }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+         white-space: nowrap; background: var(--grey-soft); color: var(--grey); }
+.b-ok { background: var(--ok-soft); color: var(--ok); }
+.b-bad { background: var(--bad-soft); color: var(--bad); }
+.b-warn { background: var(--warn-soft); color: var(--warn); }
+.b-info { background: var(--info-soft); color: var(--info); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px;
+        background: var(--grey-soft); font-size: 13px; font-weight: 600; }
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+progress { width: 120px; height: 8px; vertical-align: middle; accent-color: var(--accent); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+.grid .card { margin: 0; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 12px; }
+.stat { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.stat b { display: block; font-size: 20px; }
+.stat span { color: var(--muted); font-size: 12.5px; }
+code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--bg);
+       border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; overflow-wrap: anywhere; }
+.hidden { display: none !important; }
+@media (max-width: 560px) {
+  .card { padding: 16px; }
+  .brand small { display: none; }
+  input[type=password], input[type=text], input[type=date], select { max-width: none; }
+}
 </style>
 </head>
 <body>
-<main>
-  <h1>calls-log uploads</h1>
+<header class="top">
+  <div class="top-in">
+    <div class="brand">
+      <svg width="30" height="30" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="7" fill="currentColor" opacity=".12"/><path d="M8.6 5.5c.4 0 .7.2.9.6l1 2.3c.2.4.1.8-.2 1.1l-1 1c.6 1.3 1.7 2.4 3 3l1-1c.3-.3.7-.4 1.1-.2l2.3 1c.4.2.6.5.6.9v2.2c0 .6-.5 1.1-1.1 1.1C10.9 17.5 6.5 13.1 6.5 7.6c0-.6.5-1.1 1.1-1.1z" fill="currentColor"/></svg>
+      <div><span data-i18n="title">calls-log</span><small data-i18n="subtitle">Call-log uploads</small></div>
+    </div>
+    <div class="lang" role="group" aria-label="Language">
+      <button type="button" data-lang="en" aria-pressed="true">EN</button>
+      <button type="button" data-lang="vi" aria-pressed="false">VI</button>
+    </div>
+    <button type="button" id="signout" class="ghost small hidden" data-i18n="sign_out">Sign out</button>
+  </div>
+  <nav id="tabs" class="tabs hidden" role="tablist">
+    <button type="button" role="tab" data-tab="upload" aria-selected="true" data-i18n="tab_upload">Upload</button>
+    <button type="button" role="tab" data-tab="status" aria-selected="false" data-i18n="tab_status">Status</button>
+    <button type="button" role="tab" data-tab="sheets" aria-selected="false" data-i18n="tab_sheets">Day Sheets</button>
+    <button type="button" role="tab" data-tab="owner" aria-selected="false" data-i18n="tab_owner">Owner</button>
+  </nav>
+</header>
 
-  <section id="login">
-    <h2>Passphrase</h2>
-    <form id="login-form" class="row">
-      <div><label for="pass">Passphrase</label>
+<main>
+  <section id="login" class="card narrow">
+    <h2 data-i18n="login_title">Sign in</h2>
+    <p class="muted" data-i18n="login_help">Enter the upload passphrase.</p>
+    <form id="login-form" class="stack">
+      <div><label class="field" for="pass" data-i18n="passphrase">Passphrase</label>
         <input id="pass" type="password" autocomplete="current-password" required></div>
-      <button type="submit">Open</button>
+      <button type="submit" data-i18n="open">Open</button>
     </form>
     <p id="login-msg" class="msg" role="status"></p>
   </section>
 
   <div id="app" class="hidden">
-    <section>
-      <h2>Upload folders</h2>
-      <p class="muted">Choose one day folder ("Nguyen Van A &amp; 2026-06-01"), or a folder that holds
-        several day folders. Up to <span id="max-images">40</span> images each, .jpg .jpeg .png .webp or
-        .bmp, at most <span id="max-mb">15</span> MB each. Nothing is processed until you click Ready.</p>
-      <div class="row">
-        <div><label for="picker">Folder</label><input id="picker" type="file" webkitdirectory multiple></div>
-      </div>
+    <section id="tab-upload" class="card">
+      <h2 data-i18n="up_title">Upload folders</h2>
+      <p class="muted" id="up-help"></p>
+      <label class="drop" for="picker">
+        <svg width="36" height="36" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.2l1.8 2h9A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" fill="currentColor" opacity=".18"/><path d="M12 10v6m-3-3 3-3 3 3" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span><strong data-i18n="pick">Choose a folder</strong><span class="muted" data-i18n="pick_hint">Click to browse, then confirm Chrome's "Upload" prompt.</span></span>
+      </label>
+      <input id="picker" class="sr-only" type="file" webkitdirectory multiple>
       <div class="scroll"><table id="batch" class="hidden">
-        <thead><tr><th>Folder</th><th>Images</th><th>State</th></tr></thead><tbody></tbody>
+        <thead><tr><th data-i18n="col_folder">Folder</th><th data-i18n="col_images">Images</th><th data-i18n="col_state">State</th></tr></thead>
+        <tbody></tbody>
       </table></div>
-      <div class="row gap">
-        <button id="upload" disabled>Upload</button>
-        <button id="ready" disabled>Mark uploaded folders Ready</button>
+      <div class="row actions" id="up-actions">
+        <button type="button" id="upload" disabled data-i18n="btn_upload">Upload</button>
+        <button type="button" id="ready" disabled data-i18n="btn_ready">Ready: start processing</button>
+        <button type="button" id="to-status" class="ghost hidden" data-i18n="see_status">See status</button>
       </div>
       <p id="batch-msg" class="msg" role="status"></p>
     </section>
 
-    <section>
-      <div class="row head">
-        <h2>Folder status, last 7 days</h2>
-        <span class="muted">AWS Sync: <strong id="sync">?</strong> (set by the Owner)</span>
+    <section id="tab-status" class="card hidden">
+      <div class="row center spread">
+        <h2 data-i18n="st_title">Folder status, last 7 days</h2>
+        <span class="pill" id="sync-pill"><span class="dot"></span><span><span data-i18n="sync_label">Sync to Google Sheets</span>: <span id="sync">?</span></span></span>
       </div>
       <div class="scroll"><table id="status">
-        <thead><tr><th>Person-Day</th><th>Status</th><th>Images</th><th>Last Run</th><th>Last error</th></tr></thead>
+        <thead><tr><th data-i18n="col_day">Person-Day</th><th data-i18n="col_status">Status</th><th data-i18n="col_images">Images</th><th data-i18n="col_lastrun">Last run</th><th data-i18n="col_error">Last error</th><th class="owner-col hidden"></th></tr></thead>
         <tbody></tbody>
       </table></div>
-      <div class="row gap">
-        <button id="refresh" class="plain">Refresh</button>
+      <div class="row center actions" id="status-bar">
+        <button type="button" id="refresh" class="ghost small" data-i18n="refresh">Refresh</button>
         <span id="status-msg" class="muted" role="status"></span>
       </div>
     </section>
 
-    <section>
-      <h2>Day Sheets</h2>
+    <section id="tab-sheets" class="card hidden">
+      <h2 data-i18n="sh_title">Day Sheets</h2>
+      <p class="muted" data-i18n="sh_help">Find a stored Day Sheet by employee and/or date.</p>
       <form id="search" class="row">
-        <div><label for="s-name">Employee</label><input id="s-name" type="text" autocomplete="off"></div>
-        <div><label for="s-date">Date</label><input id="s-date" type="date"></div>
-        <button type="submit">Search</button>
+        <div><label class="field" for="s-name" data-i18n="employee">Employee</label><input id="s-name" type="text" autocomplete="off"></div>
+        <div><label class="field" for="s-date" data-i18n="date">Date</label><input id="s-date" type="date"></div>
+        <button type="submit" data-i18n="search">Search</button>
       </form>
       <div class="scroll"><table id="sheets" class="hidden">
-        <thead><tr><th>Person-Day</th><th>Saved</th><th></th></tr></thead><tbody></tbody>
+        <thead><tr><th data-i18n="col_day">Person-Day</th><th data-i18n="col_saved">Saved</th><th></th></tr></thead><tbody></tbody>
       </table></div>
       <p id="sheets-msg" class="msg" role="status"></p>
+    </section>
+
+    <section id="tab-owner" class="hidden">
+      <div id="owner-login" class="card narrow">
+        <h2 data-i18n="ow_title">Owner</h2>
+        <p class="muted" data-i18n="ow_help">Owner tools need the owner password, not the upload passphrase.</p>
+        <form id="owner-form" class="stack">
+          <div><label class="field" for="opass" data-i18n="owner_pass">Owner password</label>
+            <input id="opass" type="password" autocomplete="off" required></div>
+          <button type="submit" data-i18n="unlock">Unlock</button>
+        </form>
+        <p id="owner-msg" class="msg" role="status"></p>
+      </div>
+      <div id="owner-panel" class="hidden">
+        <div class="row center spread head">
+          <p class="ok" data-i18n="ow_unlocked">Unlocked. Re-run and Re-send buttons now appear in Status and Day Sheets.</p>
+          <button type="button" id="owner-lock" class="ghost small" data-i18n="lock">Lock</button>
+        </div>
+        <div class="grid">
+          <div class="card">
+            <h3 data-i18n="proc_title">AWS processing</h3>
+            <p class="muted" data-i18n="proc_help">Stopping pauses new runs; queued folders wait up to 14 days. Runs already going finish.</p>
+            <div class="row center">
+              <span class="pill" id="runner-pill"><span class="dot"></span><span id="runner">?</span></span>
+              <button type="button" id="runner-stop" class="danger small" data-i18n="stop">Stop</button>
+              <button type="button" id="runner-start" class="small" data-i18n="start">Start</button>
+              <button type="button" id="runner-refresh" class="ghost small" data-i18n="refresh">Refresh</button>
+            </div>
+            <p id="runner-msg" class="msg" role="status"></p>
+          </div>
+          <div class="card">
+            <h3 data-i18n="sync_title">Sync to Google Sheets</h3>
+            <div class="row center"><span class="pill" id="osync-pill"><span class="dot"></span><span id="osync">?</span></span></div>
+            <p class="muted msg" data-i18n="sync_help_ro">With sync on, each finished folder writes its day into the employee's Google Sheet. To change it, in CloudShell: python3 tools/put_parameters.py --sync-enabled true (or false).</p>
+          </div>
+          <div class="card">
+            <h3 data-i18n="tm_title">Timings</h3>
+            <div class="row">
+              <div><label class="field" for="tm-days" data-i18n="tm_period">Period</label>
+                <select id="tm-days"><option value="1" data-i18n="days_1">Today</option><option value="7" selected data-i18n="days_7">7 days</option><option value="28" data-i18n="days_28">28 days</option></select></div>
+              <button type="button" id="tm-show" class="small" data-i18n="show">Show</button>
+            </div>
+            <div id="tm-out"></div>
+            <p id="tm-msg" class="msg" role="status"></p>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 </main>
 <script>
 "use strict";
 (function () {
+  // ----- words: English and Vietnamese (a test checks both have every key) -----
+  const EN = {
+    title: "calls-log",
+    subtitle: "Call-log uploads",
+    sign_out: "Sign out",
+    tab_upload: "Upload",
+    tab_status: "Status",
+    tab_sheets: "Day Sheets",
+    tab_owner: "Owner",
+    login_title: "Sign in",
+    login_help: "Enter the upload passphrase.",
+    passphrase: "Passphrase",
+    open: "Open",
+    checking: "Checking…",
+    lost_pass: "The passphrase no longer works. Enter it again.",
+    up_title: "Upload folders",
+    up_help: "Choose one day folder (\"Nguyen Van A & 2026-06-01\") or a folder that holds several day folders. Up to {max} images each (.jpg .jpeg .png .webp .bmp), at most {mb} MB each. Nothing is processed until you click Ready.",
+    pick: "Choose a folder",
+    pick_hint: "Click to browse, then confirm Chrome's \"Upload\" prompt.",
+    col_folder: "Folder",
+    col_images: "Images",
+    col_state: "State",
+    btn_upload: "Upload",
+    btn_ready: "Ready: start processing",
+    see_status: "See status",
+    none_chosen: "No day folder found in what you chose: pick a day folder, or the folder that holds them.",
+    n_ok: "{good} of {all} folder(s) can be uploaded.",
+    n_ok_some: "{good} of {all} folder(s) can be uploaded. Refused folders are not uploaded.",
+    accepted: "Accepted",
+    left_out: "Not images, left out: {files}",
+    refused: "Refused",
+    starting: "Starting…",
+    uploading: "Uploading {done}/{all}",
+    uploaded: "Uploaded",
+    upload_failed: "Upload failed: {why} Choose the folder again.",
+    keep_open: "Uploading. Keep this page open.",
+    n_failed_up: "{n} folder(s) failed to upload; the rest can be marked Ready.",
+    click_ready: "Uploaded. Click Ready to start processing.",
+    not_ready: "Not Ready: {why}",
+    n_not_ready: "{n} folder(s) could not be made Ready.",
+    queued_msg: "Queued. AWS processes them on its own; you can close this page.",
+    st_title: "Folder status, last 7 days",
+    sync_label: "Sync to Google Sheets",
+    on: "on",
+    off: "off",
+    unknown: "unknown",
+    col_day: "Person-Day",
+    col_status: "Status",
+    col_lastrun: "Last run",
+    col_error: "Last error",
+    col_saved: "Saved",
+    n_uploads: "{n} uploads",
+    no_uploads: "No uploads in the last 7 days.",
+    updated_at: "Updated {time}",
+    refresh: "Refresh",
+    st_Uploading: "Upload not finished",
+    st_Pending: "Waiting",
+    st_Processing: "Processing",
+    st_Done: "Done",
+    st_Failed: "Failed",
+    st_Parked: "Stopped after 3 tries",
+    sh_title: "Day Sheets",
+    sh_help: "Find a stored Day Sheet by employee and/or date.",
+    employee: "Employee",
+    date: "Date",
+    search: "Search",
+    searching: "Searching…",
+    download: "Download",
+    links_5min: "Links work for 5 minutes; search again after that.",
+    newest_50: "Showing the newest 50; narrow the search.",
+    no_match: "No Day Sheet matches.",
+    ow_title: "Owner",
+    ow_help: "Owner tools need the owner password, not the upload passphrase.",
+    owner_pass: "Owner password",
+    unlock: "Unlock",
+    lock: "Lock",
+    ow_unlocked: "Unlocked. Re-run and Re-send buttons now appear in Status and Day Sheets.",
+    owner_lost: "The owner password no longer works. Enter it again.",
+    proc_title: "AWS processing",
+    proc_help: "Stopping pauses new runs; queued folders wait up to 14 days. Runs already going finish.",
+    run_running: "running",
+    run_stopped: "stopped",
+    run_changing: "changing… refresh in a minute",
+    run_missing: "no trigger found",
+    run_unknown: "unknown",
+    stop: "Stop",
+    start: "Start",
+    confirm_stop: "Stop AWS processing? Queued folders wait until you start it again.",
+    confirm_start: "Start AWS processing again? If a safety stop turned it off, find the cause first.",
+    sync_title: "Sync to Google Sheets",
+    sync_help_ro: "With sync on, each finished folder writes its day into the employee's Google Sheet. To change it, in CloudShell: python3 tools/put_parameters.py --sync-enabled true (or false).",
+    tm_title: "Timings",
+    tm_period: "Period",
+    days_1: "Today",
+    days_7: "7 days",
+    days_28: "28 days",
+    show: "Show",
+    tm_uploads: "Uploads",
+    tm_finished: "Finished",
+    tm_median: "Median",
+    tm_p95: "95% within",
+    tm_slowest: "Slowest",
+    tm_target_ok: "Ready to Done: 95% within the 2-hour target.",
+    tm_target_over: "Ready to Done: 95% takes longer than the 2-hour target.",
+    tm_none: "No folder went from Ready to Done in that time.",
+    minutes: "{n} min",
+    hours: "{h} h {m} min",
+    rerun: "Re-run",
+    confirm_rerun: "Run {day} again from its stored images? With sync on, its tab is overwritten.",
+    rerun_ok: "{day}: queued again.",
+    resend: "Re-send to Sheet",
+    confirm_resend: "Send the stored Day Sheet of {day} to its Google Sheet again? Its tab is overwritten, whatever the sync switch says.",
+    resend_ok: "{day}: queued; the Sheet updates within a minute or so.",
+    net_error: "The page can't reach the server. Check the internet connection.",
+    server_said: "The server answered {status}.",
+    s3_refused: "S3 refused {file} ({status}).",
+    e_bad_name: "its name isn't \"<Name> & <yyyy-mm-dd>\" with a real date",
+    e_no_employee_list: "the employee list isn't set up yet",
+    e_not_registered: "{name} is not a registered employee",
+    e_listed_twice: "{file} is listed twice",
+    e_empty_file: "{file} is empty",
+    e_too_big: "{file} is {mb} MB, more than 15 MB",
+    e_only_heic: "it has only HEIC photos: save the screenshots as JPEG or PNG and choose the folder again",
+    e_no_images: "it has no images (.jpg, .jpeg, .png, .webp or .bmp)",
+    e_too_many: "it has {count} images, more than {max}",
+    e_same_day: "it is the same Person-Day as {other}",
+    e_folders_count: "Choose between 1 and {max} folders at once.",
+    e_file_list: "A folder may list at most {max} files.",
+    e_file_list_invalid: "The file list isn't valid.",
+    e_queue_failed: "It couldn't be queued. Click the button again.",
+    e_not_an_upload: "That isn't an upload.",
+    e_no_such_upload: "No such upload.",
+    e_already: "This upload is already {status}. To correct the day, upload the whole folder again.",
+    e_partial: "Only {arrived} of {declared} images arrived, so it can't be made Ready. Choose the folder and upload it again.",
+    e_changed_meanwhile: "This upload changed meanwhile; refresh the status.",
+    e_name_or_date: "Give a name, a date or both.",
+    e_date_format: "The date must look like 2026-06-01.",
+    e_not_set_up: "The page isn't set up yet: the Owner sets a passphrase first.",
+    e_wrong_passphrase: "Wrong passphrase.",
+    e_owner_not_set: "The Owner tab isn't set up yet. In CloudShell: python3 tools/put_parameters.py --owner-passphrase",
+    e_wrong_owner: "Wrong owner password.",
+    e_bad_json: "The request isn't valid.",
+    e_too_large: "Too much at once; choose fewer folders.",
+    e_not_found: "No such page.",
+    e_server_error: "Something went wrong on the server. Try again in a minute.",
+    e_bad_day: "That isn't a Person-Day (\"<Name> & <yyyy-mm-dd>\").",
+    e_no_sheet: "No Day Sheet is stored for that day.",
+    e_no_runner: "The page doesn't know the runner.",
+    e_bad_action: "Unknown action.",
+    e_runner_failed: "AWS didn't answer; try again in a minute.",
+    e_days_range: "Choose 1 to {max} days.",
+    e_no_upload: "No stored upload for that day.",
+    e_not_requeueable: "It is {status}; only a Done, Failed or Parked folder can run again.",
+    e_images_gone: "Only {arrived} of its {declared} images are still stored (kept 30 days); upload the folder again instead.",
+    e_changed: "It changed meanwhile; nothing was done. Refresh and try again.",
+  };
+  const VI = {
+    title: "calls-log",
+    subtitle: "Tải lên nhật ký cuộc gọi",
+    sign_out: "Đăng xuất",
+    tab_upload: "Tải lên",
+    tab_status: "Trạng thái",
+    tab_sheets: "Bảng ngày",
+    tab_owner: "Quản lý",
+    login_title: "Đăng nhập",
+    login_help: "Nhập mật khẩu tải lên.",
+    passphrase: "Mật khẩu",
+    open: "Mở",
+    checking: "Đang kiểm tra…",
+    lost_pass: "Mật khẩu không còn đúng. Hãy nhập lại.",
+    up_title: "Tải thư mục lên",
+    up_help: "Chọn một thư mục ngày (\"Nguyen Van A & 2026-06-01\") hoặc một thư mục chứa nhiều thư mục ngày. Tối đa {max} ảnh mỗi thư mục (.jpg .jpeg .png .webp .bmp), mỗi ảnh tối đa {mb} MB. Chưa xử lý gì cho đến khi bạn bấm Sẵn sàng.",
+    pick: "Chọn thư mục",
+    pick_hint: "Bấm để chọn, rồi xác nhận \"Tải lên\" khi Chrome hỏi.",
+    col_folder: "Thư mục",
+    col_images: "Ảnh",
+    col_state: "Tình trạng",
+    btn_upload: "Tải lên",
+    btn_ready: "Sẵn sàng: bắt đầu xử lý",
+    see_status: "Xem trạng thái",
+    none_chosen: "Không tìm thấy thư mục ngày nào: hãy chọn một thư mục ngày, hoặc thư mục chứa chúng.",
+    n_ok: "Có thể tải lên {good}/{all} thư mục.",
+    n_ok_some: "Có thể tải lên {good}/{all} thư mục. Thư mục bị từ chối sẽ không được tải lên.",
+    accepted: "Hợp lệ",
+    left_out: "Không phải ảnh, bỏ qua: {files}",
+    refused: "Bị từ chối",
+    starting: "Đang bắt đầu…",
+    uploading: "Đang tải {done}/{all}",
+    uploaded: "Đã tải lên",
+    upload_failed: "Tải lên thất bại: {why} Hãy chọn lại thư mục.",
+    keep_open: "Đang tải lên. Đừng đóng trang này.",
+    n_failed_up: "{n} thư mục tải lên thất bại; các thư mục còn lại vẫn có thể bấm Sẵn sàng.",
+    click_ready: "Đã tải lên. Bấm Sẵn sàng để bắt đầu xử lý.",
+    not_ready: "Chưa sẵn sàng: {why}",
+    n_not_ready: "{n} thư mục không thể chuyển sang Sẵn sàng.",
+    queued_msg: "Đã xếp hàng. AWS sẽ tự xử lý; bạn có thể đóng trang này.",
+    st_title: "Trạng thái thư mục, 7 ngày qua",
+    sync_label: "Đồng bộ Google Sheets",
+    on: "bật",
+    off: "tắt",
+    unknown: "không rõ",
+    col_day: "Người & ngày",
+    col_status: "Trạng thái",
+    col_lastrun: "Lần chạy gần nhất",
+    col_error: "Lỗi gần nhất",
+    col_saved: "Đã lưu",
+    n_uploads: "{n} lần tải",
+    no_uploads: "Không có lần tải lên nào trong 7 ngày qua.",
+    updated_at: "Cập nhật lúc {time}",
+    refresh: "Làm mới",
+    st_Uploading: "Chưa tải xong",
+    st_Pending: "Đang chờ",
+    st_Processing: "Đang xử lý",
+    st_Done: "Xong",
+    st_Failed: "Thất bại",
+    st_Parked: "Dừng sau 3 lần thử",
+    sh_title: "Bảng ngày",
+    sh_help: "Tìm Bảng ngày đã lưu theo nhân viên và/hoặc ngày.",
+    employee: "Nhân viên",
+    date: "Ngày",
+    search: "Tìm",
+    searching: "Đang tìm…",
+    download: "Tải về",
+    links_5min: "Liên kết dùng được trong 5 phút; sau đó hãy tìm lại.",
+    newest_50: "Đang hiện 50 bảng mới nhất; hãy thu hẹp tìm kiếm.",
+    no_match: "Không có Bảng ngày nào phù hợp.",
+    ow_title: "Quản lý",
+    ow_help: "Công cụ quản lý cần mật khẩu quản lý, không phải mật khẩu tải lên.",
+    owner_pass: "Mật khẩu quản lý",
+    unlock: "Mở khoá",
+    lock: "Khoá",
+    ow_unlocked: "Đã mở khoá. Nút Chạy lại và Gửi lại đã xuất hiện ở Trạng thái và Bảng ngày.",
+    owner_lost: "Mật khẩu quản lý không còn đúng. Hãy nhập lại.",
+    proc_title: "Xử lý trên AWS",
+    proc_help: "Dừng sẽ tạm ngưng các lần chạy mới; thư mục trong hàng chờ được giữ tối đa 14 ngày. Lần chạy đang dở vẫn hoàn tất.",
+    run_running: "đang chạy",
+    run_stopped: "đã dừng",
+    run_changing: "đang chuyển… làm mới sau một phút",
+    run_missing: "không tìm thấy bộ kích hoạt",
+    run_unknown: "không rõ",
+    stop: "Dừng",
+    start: "Chạy",
+    confirm_stop: "Dừng xử lý trên AWS? Thư mục trong hàng chờ sẽ đợi đến khi bạn chạy lại.",
+    confirm_start: "Chạy lại xử lý trên AWS? Nếu nó bị dừng tự động vì an toàn, hãy tìm nguyên nhân trước.",
+    sync_title: "Đồng bộ Google Sheets",
+    sync_help_ro: "Khi bật đồng bộ, mỗi thư mục xử lý xong sẽ ghi ngày đó vào Google Sheet của nhân viên. Để thay đổi, trong CloudShell: python3 tools/put_parameters.py --sync-enabled true (hoặc false).",
+    tm_title: "Thời gian xử lý",
+    tm_period: "Khoảng thời gian",
+    days_1: "Hôm nay",
+    days_7: "7 ngày",
+    days_28: "28 ngày",
+    show: "Xem",
+    tm_uploads: "Lần tải",
+    tm_finished: "Đã xong",
+    tm_median: "Trung vị",
+    tm_p95: "95% trong vòng",
+    tm_slowest: "Chậm nhất",
+    tm_target_ok: "Từ Sẵn sàng đến Xong: 95% trong mục tiêu 2 giờ.",
+    tm_target_over: "Từ Sẵn sàng đến Xong: 95% lâu hơn mục tiêu 2 giờ.",
+    tm_none: "Không có thư mục nào từ Sẵn sàng đến Xong trong khoảng thời gian đó.",
+    minutes: "{n} phút",
+    hours: "{h} giờ {m} phút",
+    rerun: "Chạy lại",
+    confirm_rerun: "Chạy lại {day} từ ảnh đã lưu? Khi bật đồng bộ, trang tính của ngày đó sẽ bị ghi đè.",
+    rerun_ok: "{day}: đã xếp hàng lại.",
+    resend: "Gửi lại vào Sheet",
+    confirm_resend: "Gửi lại Bảng ngày đã lưu của {day} vào Google Sheet? Trang tính sẽ bị ghi đè, bất kể công tắc đồng bộ.",
+    resend_ok: "{day}: đã xếp hàng; Sheet sẽ cập nhật trong khoảng một phút.",
+    net_error: "Trang không kết nối được máy chủ. Hãy kiểm tra mạng.",
+    server_said: "Máy chủ trả lời {status}.",
+    s3_refused: "S3 từ chối {file} ({status}).",
+    e_bad_name: "tên không đúng dạng \"<Tên> & <yyyy-mm-dd>\" với ngày có thật",
+    e_no_employee_list: "danh sách nhân viên chưa được thiết lập",
+    e_not_registered: "{name} không có trong danh sách nhân viên",
+    e_listed_twice: "{file} bị liệt kê hai lần",
+    e_empty_file: "{file} rỗng",
+    e_too_big: "{file} nặng {mb} MB, quá 15 MB",
+    e_only_heic: "chỉ có ảnh HEIC: hãy lưu ảnh chụp màn hình dạng JPEG hoặc PNG rồi chọn lại thư mục",
+    e_no_images: "không có ảnh (.jpg, .jpeg, .png, .webp hoặc .bmp)",
+    e_too_many: "có {count} ảnh, nhiều hơn {max}",
+    e_same_day: "trùng người và ngày với {other}",
+    e_folders_count: "Hãy chọn từ 1 đến {max} thư mục mỗi lần.",
+    e_file_list: "Mỗi thư mục tối đa {max} tệp.",
+    e_file_list_invalid: "Danh sách tệp không hợp lệ.",
+    e_queue_failed: "Không thể xếp hàng. Hãy bấm lại.",
+    e_not_an_upload: "Đây không phải một lần tải lên.",
+    e_no_such_upload: "Không có lần tải lên này.",
+    e_already: "Lần tải này đã ở trạng thái {status}. Để sửa ngày đó, hãy tải lại cả thư mục.",
+    e_partial: "Chỉ {arrived}/{declared} ảnh đã lên, nên chưa thể Sẵn sàng. Hãy chọn thư mục và tải lại.",
+    e_changed_meanwhile: "Lần tải này vừa thay đổi; hãy làm mới trạng thái.",
+    e_name_or_date: "Hãy nhập tên, ngày hoặc cả hai.",
+    e_date_format: "Ngày phải có dạng 2026-06-01.",
+    e_not_set_up: "Trang chưa được thiết lập: Quản lý cần đặt mật khẩu trước.",
+    e_wrong_passphrase: "Sai mật khẩu.",
+    e_owner_not_set: "Mục Quản lý chưa được thiết lập. Trong CloudShell: python3 tools/put_parameters.py --owner-passphrase",
+    e_wrong_owner: "Sai mật khẩu quản lý.",
+    e_bad_json: "Yêu cầu không hợp lệ.",
+    e_too_large: "Quá nhiều cùng lúc; hãy chọn ít thư mục hơn.",
+    e_not_found: "Không có trang này.",
+    e_server_error: "Máy chủ gặp lỗi. Hãy thử lại sau một phút.",
+    e_bad_day: "Đây không phải người & ngày (\"<Tên> & <yyyy-mm-dd>\").",
+    e_no_sheet: "Chưa có Bảng ngày nào được lưu cho ngày đó.",
+    e_no_runner: "Trang không tìm thấy bộ xử lý.",
+    e_bad_action: "Thao tác không hợp lệ.",
+    e_runner_failed: "AWS không phản hồi; hãy thử lại sau một phút.",
+    e_days_range: "Hãy chọn từ 1 đến {max} ngày.",
+    e_no_upload: "Không có lần tải lên nào được lưu cho ngày đó.",
+    e_not_requeueable: "Đang ở trạng thái {status}; chỉ thư mục Xong, Thất bại hoặc Dừng sau 3 lần thử mới chạy lại được.",
+    e_images_gone: "Chỉ còn {arrived}/{declared} ảnh được lưu (giữ 30 ngày); hãy tải lại thư mục.",
+    e_changed: "Vừa có thay đổi nên chưa làm gì. Hãy làm mới và thử lại.",
+  };
+  const WORDS = {en: EN, vi: VI};
+
   const IMAGE = [".jpg", ".jpeg", ".png", ".webp", ".bmp"];
   const HEIC = [".heic", ".heif"];
   const DAY = /\d{4}-\d{1,2}-\d{1,2}\s*$/;
   const PARALLEL = 4;
+  const RERUNNABLE = ["Done", "Failed", "Parked", "Pending"];
   let passphrase = "";            // kept in memory only, never stored
+  let ownerPass = "";             // likewise
+  let lang = "en";
   let limits = {maxImages: 50, maxImageMb: 15};
-  let batch = [];                 // {folder, files, images, state, reason, ignored, upload, failed}
+  let batch = [];                 // {folder, files, images, state:{k,a}|null, reason, ignored, upload, failed}
+  let statusData = null, sheetsData = null, ownerData = null, timingsData = null;
+  const msgs = {};                // element id -> {m, cls}: re-drawn when the language changes
 
   const $ = (id) => document.getElementById(id);
-  function cell(tr, text, cls) {
-    const td = document.createElement("td");
-    td.textContent = text == null ? "" : String(text);
-    if (cls) td.className = cls;
-    tr.appendChild(td);
-    return td;
-  }
-  function say(id, text, cls) { const el = $(id); el.textContent = text || ""; el.className = "msg " + (cls || ""); }
-  function suffix(name) { const i = name.lastIndexOf("."); return i > 0 ? name.slice(i).toLowerCase() : ""; }
-  function when(iso) { return iso ? new Date(iso).toLocaleString() : ""; }
 
-  async function api(path, body) {
+  // ----- translation -----
+  function t(key, args) {
+    const s = (WORDS[lang] && WORDS[lang][key]) || EN[key] || key;
+    return s.replace(/\{(\w+)\}/g, (_, k) => (args && args[k] != null ? String(args[k]) : ""));
+  }
+  function explain(e) {            // a server or page error, in the chosen language
+    if (e && e.code && EN["e_" + e.code]) {
+      const args = Object.assign({}, e.args || {});
+      if (args.status) args.status = stName(args.status);
+      return t("e_" + e.code, args);
+    }
+    if (e && e.k) return t(e.k, e.a);
+    return (e && e.message) || String(e);
+  }
+  function text(m) { return m == null ? "" : typeof m === "string" ? m : explain(m); }
+  function say(id, m, cls) { msgs[id] = {m: m, cls: cls}; paint(id); }
+  function paint(id) {
+    const el = $(id), v = msgs[id];
+    if (!el || !v) return;
+    el.textContent = text(v.m);
+    el.className = (el.classList.contains("muted") ? "muted " : "") + "msg " + (v.cls || "");
+  }
+  function stName(s) { return EN["st_" + s] ? t("st_" + s) : (s || ""); }
+  function when(iso) { return iso ? new Date(iso).toLocaleString(lang === "vi" ? "vi-VN" : undefined) : ""; }
+  function span(seconds) {
+    const minutes = Math.round(seconds / 60);
+    return minutes >= 60 ? t("hours", {h: Math.floor(minutes / 60), m: String(minutes % 60).padStart(2, "0")})
+                         : t("minutes", {n: minutes});
+  }
+
+  function applyLanguage() {
+    document.documentElement.lang = lang;
+    document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll("[data-lang]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.lang === lang)));
+    $("up-help").textContent = t("up_help", {max: limits.maxImages, mb: limits.maxImageMb});
+    Object.keys(msgs).forEach(paint);
+    draw(); renderStatus(); renderSheets(); renderOwner(); renderTimings();
+  }
+  function setLanguage(l) {
+    lang = WORDS[l] ? l : "en";
+    try { localStorage.setItem("calls-log-lang", lang); } catch (e) { /* private window: not remembered */ }
+    applyLanguage();
+  }
+  document.querySelectorAll("[data-lang]").forEach(b => b.addEventListener("click", () => setLanguage(b.dataset.lang)));
+
+  // ----- talking to the server -----
+  async function call(path, body, headers) {
     let res;
     try {
-      res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json",
-        "x-calls-log-passphrase": passphrase}, body: JSON.stringify(body || {})});
+      res = await fetch(path, {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, headers),
+                               body: JSON.stringify(body || {})});
     } catch (e) {
-      throw new Error("The page can't reach the server. Check the internet connection.");
+      throw {k: "net_error"};
     }
     let data = {};
     try { data = await res.json(); } catch (e) { /* not JSON */ }
     if (!res.ok || !data.ok) {
-      const err = new Error(data.error || ("The server answered " + res.status + "."));
-      err.status = res.status;
-      throw err;
+      throw {status: res.status, code: data.code, args: data.args, message: data.error || t("server_said", {status: res.status})};
     }
     return data;
   }
+  const api = (path, body) => call(path, body, {"x-calls-log-passphrase": passphrase});
+  const ownerApi = (path, body) => call(path, body, {"x-calls-log-owner": ownerPass});
 
-  // ----- passphrase -----
+  // ----- tabs -----
+  function showTab(name) {
+    document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
+    ["upload", "status", "sheets", "owner"].forEach(n => $("tab-" + n).classList.toggle("hidden", n !== name));
+    if (name === "status") refresh();
+  }
+  document.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
+  $("to-status").addEventListener("click", () => showTab("status"));
+
+  // ----- signing in -----
   $("login-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     passphrase = $("pass").value;
-    say("login-msg", "Checking...");
+    say("login-msg", {k: "checking"});
     try {
       const hello = await api("/api/hello");
-      limits = hello;
-      $("max-images").textContent = hello.maxImages;
-      $("max-mb").textContent = hello.maxImageMb;
-      showSync(hello.syncEnabled);
+      limits = {maxImages: hello.maxImages, maxImageMb: hello.maxImageMb};
+      statusData = statusData || {syncEnabled: hello.syncEnabled, folders: []};
       $("pass").value = "";
+      say("login-msg", "");
       $("login").classList.add("hidden");
-      $("app").classList.remove("hidden");
+      ["app", "tabs", "signout"].forEach(id => $(id).classList.remove("hidden"));
+      applyLanguage();
+      showTab("upload");
       refresh();
     } catch (e) {
       passphrase = "";
-      say("login-msg", e.message, "bad");
+      say("login-msg", e, "bad");
     }
   });
 
+  function signOut(m) {
+    passphrase = ""; ownerPass = ""; ownerData = null; timingsData = null;
+    ["app", "tabs", "signout"].forEach(id => $(id).classList.add("hidden"));
+    $("login").classList.remove("hidden");
+    say("login-msg", m || "", m ? "bad" : "");
+    renderOwner();
+  }
+  $("signout").addEventListener("click", () => signOut());
+
   function lockedOut(e) {
-    if (e.status === 401) {
-      passphrase = "";
-      $("app").classList.add("hidden");
-      $("login").classList.remove("hidden");
-      say("login-msg", "The passphrase no longer works. Enter it again.", "bad");
-      return true;
-    }
+    if (e && e.status === 401) { signOut({k: "lost_pass"}); return true; }
     return false;
   }
 
-  function showSync(on) {
-    const el = $("sync");
-    el.textContent = on === true ? "on" : on === false ? "off" : "unknown";
-    el.className = on === true ? "ok" : on === false ? "warn" : "";
-  }
-
   // ----- choosing folders: the page's own check, before the server's -----
+  function suffix(name) { const i = name.lastIndexOf("."); return i > 0 ? name.slice(i).toLowerCase() : ""; }
+
   function group(files) {
     const roots = {};
     for (const f of files) {
@@ -211,16 +710,45 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 
   function localCheck(f) {
     const images = f.files.filter(x => IMAGE.includes(suffix(x.name)));
-    if (!DAY.test(f.folder)) return 'its name isn\'t "<Name> & <yyyy-mm-dd>"';
+    if (!DAY.test(f.folder)) return {code: "bad_name"};
     if (!images.length) {
-      return f.files.some(x => HEIC.includes(suffix(x.name)))
-        ? "it has only HEIC photos: save the screenshots as JPEG or PNG"
-        : "it has no images (.jpg, .jpeg, .png, .webp or .bmp)";
+      return f.files.some(x => HEIC.includes(suffix(x.name))) ? {code: "only_heic"} : {code: "no_images"};
     }
-    if (images.length > limits.maxImages) return "it has " + images.length + " images, more than " + limits.maxImages;
+    if (images.length > limits.maxImages) return {code: "too_many", args: {count: images.length, max: limits.maxImages}};
     const big = images.find(x => x.size > limits.maxImageMb * 1024 * 1024);
-    if (big) return big.name + " is over " + limits.maxImageMb + " MB";
-    return "";
+    if (big) return {code: "too_big", args: {file: big.name, mb: Math.round(big.size / 1024 / 1024)}};
+    return null;
+  }
+
+  function cell(tr, value, cls) {
+    const td = document.createElement("td");
+    td.textContent = value == null ? "" : String(value);
+    if (cls) td.className = cls;
+    tr.appendChild(td);
+    return td;
+  }
+  function badge(textValue, cls) {
+    const b = document.createElement("span");
+    b.className = "badge " + (cls || "");
+    b.textContent = textValue;
+    return b;
+  }
+  // "Nguyen Van A & 2026-06-01" as the name over the date, so a phone-width column stays readable.
+  function dayCell(tr, key) {
+    const td = cell(tr, "");
+    const at = String(key).lastIndexOf(" & ");
+    if (at < 0) { td.textContent = key; return td; }
+    td.className = "pd";
+    const name = document.createElement("b"), date = document.createElement("span");
+    name.textContent = key.slice(0, at); date.textContent = key.slice(at + 3);
+    td.appendChild(name); td.appendChild(date);
+    return td;
+  }
+  function why(td, textValue, cls) {
+    const d = document.createElement("div");
+    d.className = "why " + cls;
+    d.textContent = textValue;
+    td.appendChild(d);
   }
 
   function draw() {
@@ -228,27 +756,40 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     body.textContent = "";
     for (const b of batch) {
       const tr = document.createElement("tr");
-      cell(tr, b.folder);
+      dayCell(tr, b.folder);
       cell(tr, b.images == null ? "" : b.images);
-      const note = b.state === "Accepted" && b.ignored && b.ignored.length
-        ? " (not images, left out: " + b.ignored.join(", ") + ")" : "";
-      cell(tr, b.reason ? "Refused: " + b.reason : b.state + note,
-           b.reason || b.failed ? "bad" : b.state === "Pending" ? "ok" : "");
+      const td = cell(tr, "");
+      if (b.reason) {
+        td.appendChild(badge(t("refused"), "b-bad"));
+        why(td, explain(b.reason), "bad");
+      } else if (b.state) {
+        const cls = b.failed ? "b-bad" : b.state.k === "st_Pending" ? "b-ok" : b.state.k === "accepted" ? "b-info" : "";
+        td.appendChild(badge(text(b.state), cls));
+        if (b.state.k === "accepted" && b.ignored && b.ignored.length) {
+          why(td, t("left_out", {files: b.ignored.join(", ")}), "muted");
+        }
+        if (b.progress) {
+          const p = document.createElement("progress");
+          p.max = b.progress.all; p.value = b.progress.done;
+          td.appendChild(document.createTextNode(" ")); td.appendChild(p);
+        }
+      }
       body.appendChild(tr);
     }
     $("batch").classList.toggle("hidden", !batch.length);
-    $("upload").disabled = !batch.some(b => b.state === "Accepted");
-    $("ready").disabled = !batch.some(b => b.state === "Uploaded");
+    $("upload").disabled = !batch.some(b => b.state && b.state.k === "accepted");
+    $("ready").disabled = !batch.some(b => b.state && b.state.k === "uploaded");
   }
 
   $("picker").addEventListener("change", async () => {
     const folders = group(Array.from($("picker").files));
+    $("to-status").classList.add("hidden");
     batch = folders.map(f => {
       const reason = localCheck(f);
-      return {folder: f.folder, files: f.files, reason: reason, state: reason ? "" : "Checking...",
+      return {folder: f.folder, files: f.files, reason: reason, state: reason ? null : {k: "checking"},
               images: f.files.filter(x => IMAGE.includes(suffix(x.name))).length};
     });
-    say("batch-msg", folders.length ? "" : "No folder with files was chosen.", "bad");
+    say("batch-msg", folders.length ? "" : {k: "none_chosen"}, "bad");
     draw();
     const asked = batch.filter(b => !b.reason);
     if (!asked.length) return;
@@ -257,16 +798,15 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
         files: b.files.map(x => ({name: x.name, size: x.size}))}))});
       res.folders.forEach((r, i) => {
         const b = asked[i];
-        if (r.ok) { b.state = "Accepted"; b.images = r.images; b.ignored = r.ignored; }
-        else { b.reason = r.error; b.state = ""; }
+        if (r.ok) { b.state = {k: "accepted"}; b.images = r.images; b.ignored = r.ignored; }
+        else { b.reason = {code: r.code, args: r.args, message: r.error}; b.state = null; }
       });
-      const good = batch.filter(b => b.state === "Accepted").length;
-      say("batch-msg", good + " of " + batch.length + " folder(s) can be uploaded." +
-          (good < batch.length ? " Refused folders are not uploaded." : ""), good ? "" : "bad");
+      const good = batch.filter(b => b.state && b.state.k === "accepted").length;
+      say("batch-msg", {k: good < batch.length ? "n_ok_some" : "n_ok", a: {good: good, all: batch.length}}, good ? "" : "bad");
     } catch (e) {
       if (lockedOut(e)) return;
-      asked.forEach(b => { b.state = ""; b.reason = e.message; });
-      say("batch-msg", e.message, "bad");
+      asked.forEach(b => { b.state = null; b.reason = e; });
+      say("batch-msg", e, "bad");
     }
     draw();
   });
@@ -277,133 +817,301 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
       const data = new FormData();
       for (const [k, v] of Object.entries(form.fields)) data.append(k, v);
       data.append("file", file);       // must come last
+      let res = null;
       try {
-        const res = await fetch(form.url, {method: "POST", body: data});
-        if (res.ok) return;
-        if (res.status < 500 || attempt >= 3) throw new Error("S3 refused " + file.name + " (" + res.status + ")");
-      } catch (e) {
-        if (attempt >= 3) throw e;
+        res = await fetch(form.url, {method: "POST", body: data});
+      } catch (e) {                     // the network dropped: try again, three times in all
+        if (attempt >= 3) throw {k: "net_error"};
       }
+      if (res && res.ok) return;
+      if (res && (res.status < 500 || attempt >= 3)) throw {k: "s3_refused", a: {file: file.name, status: res.status}};
       await new Promise(r => setTimeout(r, attempt * 1500));
     }
   }
 
   async function uploadOne(b) {
-    b.state = "Starting..."; draw();
+    b.state = {k: "starting"}; draw();
     const up = await api("/api/uploads", {folder: b.folder,
       files: b.files.map(x => ({name: x.name, size: x.size}))});
     b.upload = {personDay: up.personDay, uploadId: up.uploadId};
     const byName = new Map(b.files.map(x => [x.name.normalize("NFC"), x]));
     const queue = up.forms.slice();
     let done = 0;
-    b.state = "Uploading 0/" + up.forms.length; draw();
+    b.progress = {done: 0, all: up.forms.length};
+    b.state = {k: "uploading", a: {done: 0, all: up.forms.length}}; draw();
     async function worker() {
       while (queue.length) {
         const form = queue.shift();
         await sendFile(form, byName.get(form.name));
         done++;
-        b.state = "Uploading " + done + "/" + up.forms.length; draw();
+        b.progress.done = done;
+        b.state = {k: "uploading", a: {done: done, all: up.forms.length}}; draw();
       }
     }
     await Promise.all(Array.from({length: Math.min(PARALLEL, queue.length)}, worker));
-    b.state = "Uploaded"; draw();
+    b.progress = null;
+    b.state = {k: "uploaded"}; draw();
   }
 
   $("upload").addEventListener("click", async () => {
     $("upload").disabled = true; $("picker").disabled = true;
-    say("batch-msg", "Uploading. Keep this page open.");
+    say("batch-msg", {k: "keep_open"});
     let failed = 0;
-    for (const b of batch.filter(x => x.state === "Accepted")) {
+    for (const b of batch.filter(x => x.state && x.state.k === "accepted")) {
       try { await uploadOne(b); }
       catch (e) {
         if (lockedOut(e)) return;
-        failed++; b.failed = true; b.state = "Upload failed: " + e.message + " Choose the folder again.";
+        failed++; b.failed = true; b.progress = null;
+        b.state = {k: "upload_failed", a: {why: explain(e)}};
         draw();
       }
     }
     $("picker").disabled = false;
-    say("batch-msg", failed ? failed + " folder(s) failed to upload; the rest can be marked Ready."
-                            : "Uploaded. Click Ready to start processing.", failed ? "bad" : "ok");
+    say("batch-msg", failed ? {k: "n_failed_up", a: {n: failed}} : {k: "click_ready"}, failed ? "bad" : "ok");
     draw();
   });
 
   $("ready").addEventListener("click", async () => {
     $("ready").disabled = true;
     let refused = 0;
-    for (const b of batch.filter(x => x.state === "Uploaded" && x.upload)) {
-      try { await api("/api/ready", b.upload); b.state = "Pending"; }
+    for (const b of batch.filter(x => x.state && x.state.k === "uploaded" && x.upload)) {
+      try { await api("/api/ready", b.upload); b.state = {k: "st_Pending"}; }
       catch (e) {
         if (lockedOut(e)) return;
-        refused++; b.failed = true; b.state = "Not Ready: " + e.message;
+        refused++; b.failed = true; b.state = {k: "not_ready", a: {why: explain(e)}};
       }
       draw();
     }
-    say("batch-msg", refused ? refused + " folder(s) could not be made Ready." : "Queued. Watch the status below.",
-        refused ? "bad" : "ok");
+    say("batch-msg", refused ? {k: "n_not_ready", a: {n: refused}} : {k: "queued_msg"}, refused ? "bad" : "ok");
+    $("to-status").classList.remove("hidden");
     refresh();
   });
 
   // ----- status -----
-  const COLOURS = {Done: "ok", Pending: "", Processing: "", Uploading: "warn", Failed: "bad", Parked: "bad"};
+  const COLOURS = {Done: "b-ok", Pending: "b-info", Processing: "b-info", Uploading: "b-warn", Failed: "b-bad", Parked: "b-bad"};
+
+  function showSync(on) {
+    const word = on === true ? t("on") : on === false ? t("off") : t("unknown");
+    const cls = on === true ? "pill ok" : on === false ? "pill warn" : "pill";
+    $("sync").textContent = word; $("sync-pill").className = cls;
+    $("osync").textContent = word; $("osync-pill").className = cls;
+  }
+
+  function actionButton(label, onClick, cls) {
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "small " + (cls || "ghost"); btn.textContent = label;
+    btn.addEventListener("click", onClick);
+    return btn;
+  }
+
+  function renderStatus() {
+    showSync(statusData ? statusData.syncEnabled : null);
+    document.querySelectorAll(".owner-col").forEach(el => el.classList.toggle("hidden", !ownerPass));
+    const body = $("status").querySelector("tbody");
+    body.textContent = "";
+    if (!statusData) return;
+    for (const f of statusData.folders) {
+      const tr = document.createElement("tr");
+      dayCell(tr, f.personDay);
+      const td = cell(tr, "");
+      td.appendChild(badge(stName(f.status), COLOURS[f.status]));
+      if (f.uploads > 1) td.appendChild(document.createTextNode(" " + t("n_uploads", {n: f.uploads})));
+      cell(tr, f.imageCount);
+      cell(tr, when(f.lastRunAt));
+      cell(tr, f.lastError, f.lastError ? "err" : "");
+      if (ownerPass) {
+        const act = cell(tr, "");
+        if (RERUNNABLE.includes(f.status)) act.appendChild(actionButton(t("rerun"), () => rerun(f)));
+      }
+      body.appendChild(tr);
+    }
+    if (!statusData.folders.length) {
+      const tr = document.createElement("tr");
+      cell(tr, t("no_uploads"), "muted").colSpan = ownerPass ? 6 : 5;
+      body.appendChild(tr);
+    }
+  }
+
   async function refresh() {
     if (!passphrase) return;
     try {
-      const res = await api("/api/status");
-      showSync(res.syncEnabled);
-      const body = $("status").querySelector("tbody");
-      body.textContent = "";
-      for (const f of res.folders) {
-        const tr = document.createElement("tr");
-        cell(tr, f.personDay);
-        const td = cell(tr, "");
-        const badge = document.createElement("span");
-        badge.className = "badge " + (COLOURS[f.status] || "");
-        badge.textContent = f.status === "Uploading" ? "Upload not finished" : f.status;
-        td.appendChild(badge);
-        if (f.uploads > 1) td.appendChild(document.createTextNode(" (" + f.uploads + " uploads)"));
-        cell(tr, f.imageCount);
-        cell(tr, when(f.lastRunAt));
-        cell(tr, f.lastError, f.lastError ? "bad" : "");
-        body.appendChild(tr);
-      }
-      if (!res.folders.length) {
-        const tr = document.createElement("tr");
-        cell(tr, "No uploads in the last 7 days.", "muted").colSpan = 5;
-        body.appendChild(tr);
-      }
-      $("status-msg").textContent = "Updated " + new Date().toLocaleTimeString();
+      statusData = await api("/api/status");
+      renderStatus();
+      say("status-msg", {k: "updated_at", a: {time: new Date().toLocaleTimeString(lang === "vi" ? "vi-VN" : undefined)}});
     } catch (e) {
-      if (!lockedOut(e)) $("status-msg").textContent = e.message;
+      if (!lockedOut(e)) say("status-msg", e, "bad");
     }
   }
   $("refresh").addEventListener("click", refresh);
-  setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 60000);
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
+  setInterval(() => { if (passphrase && document.visibilityState === "visible") refresh(); }, 60000);
+  document.addEventListener("visibilitychange", () => { if (passphrase && document.visibilityState === "visible") refresh(); });
+
+  async function rerun(f) {
+    if (!window.confirm(t("confirm_rerun", {day: f.personDay}))) return;
+    try {
+      await ownerApi("/api/owner/requeue", {personDay: f.personDay, uploadId: f.uploadId});
+      await refresh();
+      say("status-msg", {k: "rerun_ok", a: {day: f.personDay}}, "ok");   // after the refresh, so it stays
+    } catch (e) {
+      if (!ownerLockedOut(e)) say("status-msg", e, "bad");
+    }
+  }
 
   // ----- Day Sheets -----
+  function renderSheets() {
+    const body = $("sheets").querySelector("tbody");
+    body.textContent = "";
+    if (!sheetsData) return;
+    for (const s of sheetsData.sheets) {
+      const tr = document.createElement("tr");
+      dayCell(tr, s.personDay);
+      cell(tr, when(s.updatedAt));
+      const td = cell(tr, "");
+      const a = document.createElement("a");
+      a.href = s.url; a.textContent = t("download"); a.rel = "noreferrer";
+      td.appendChild(a);
+      if (ownerPass) {
+        td.appendChild(document.createTextNode(" "));
+        td.appendChild(actionButton(t("resend"), () => resend(s)));
+      }
+      body.appendChild(tr);
+    }
+    $("sheets").classList.toggle("hidden", !sheetsData.sheets.length);
+  }
+
   $("search").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    say("sheets-msg", "Searching...");
+    say("sheets-msg", {k: "searching"});
     try {
-      const res = await api("/api/sheets", {name: $("s-name").value, date: $("s-date").value});
-      const body = $("sheets").querySelector("tbody");
-      body.textContent = "";
-      for (const s of res.sheets) {
-        const tr = document.createElement("tr");
-        cell(tr, s.personDay);
-        cell(tr, when(s.updatedAt));
-        const a = document.createElement("a");
-        a.href = s.url; a.textContent = "Download"; a.rel = "noreferrer";
-        cell(tr, "").appendChild(a);
-        body.appendChild(tr);
-      }
-      $("sheets").classList.toggle("hidden", !res.sheets.length);
-      say("sheets-msg", res.sheets.length ? (res.more ? "Showing the newest 50; narrow the search." :
-          "Links work for 5 minutes; search again after that.") : "No Day Sheet matches.", res.sheets.length ? "" : "warn");
+      sheetsData = await api("/api/sheets", {name: $("s-name").value, date: $("s-date").value});
+      renderSheets();
+      const n = sheetsData.sheets.length;
+      say("sheets-msg", {k: n ? (sheetsData.more ? "newest_50" : "links_5min") : "no_match"}, n ? "" : "warn");
     } catch (e) {
-      if (!lockedOut(e)) say("sheets-msg", e.message, "bad");
+      if (!lockedOut(e)) say("sheets-msg", e, "bad");
     }
   });
+
+  async function resend(s) {
+    if (!window.confirm(t("confirm_resend", {day: s.personDay}))) return;
+    try {
+      await ownerApi("/api/owner/resend", {personDay: s.personDay});
+      say("sheets-msg", {k: "resend_ok", a: {day: s.personDay}}, "ok");
+    } catch (e) {
+      if (!ownerLockedOut(e)) say("sheets-msg", e, "bad");
+    }
+  }
+
+  // ----- the Owner tab -----
+  function ownerLockedOut(e) {
+    if (e && e.status === 401) { lockedOut(e); return true; }
+    if (e && (e.status === 403 || e.code === "owner_not_set")) { lockOwner(e); return true; }
+    return false;
+  }
+  function lockOwner(m) {
+    ownerPass = ""; ownerData = null; timingsData = null;
+    say("owner-msg", m || "", m ? "bad" : "");
+    renderOwner(); renderStatus(); renderSheets();
+  }
+  $("owner-lock").addEventListener("click", () => lockOwner());
+
+  $("owner-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    ownerPass = $("opass").value;
+    say("owner-msg", {k: "checking"});
+    try {
+      ownerData = await ownerApi("/api/owner/hello");
+      $("opass").value = "";
+      say("owner-msg", "");
+      renderOwner(); renderStatus(); renderSheets();
+      showTimings();
+    } catch (e) {
+      ownerPass = "";
+      if (!lockedOut(e)) say("owner-msg", e, "bad");
+    }
+  });
+
+  function renderOwner() {
+    const open = !!ownerPass && !!ownerData;
+    $("owner-login").classList.toggle("hidden", open);
+    $("owner-panel").classList.toggle("hidden", !open);
+    if (!open) return;
+    if (statusData) statusData.syncEnabled = ownerData.syncEnabled;
+    showSync(ownerData.syncEnabled);
+    const state = ownerData.runner || "unknown";
+    $("runner").textContent = t("run_" + state);
+    $("runner-pill").className = "pill " + (state === "running" ? "ok" : state === "stopped" ? "bad" : "warn");
+    $("runner-stop").disabled = state !== "running";
+    $("runner-start").disabled = state !== "stopped";
+  }
+
+  async function runner(action) {
+    if (action === "stop" && !window.confirm(t("confirm_stop"))) return;
+    if (action === "start" && !window.confirm(t("confirm_start"))) return;
+    try {
+      const res = await ownerApi("/api/owner/runner", {action: action});
+      ownerData.runner = res.runner;
+      say("runner-msg", "");
+      renderOwner();
+    } catch (e) {
+      if (!ownerLockedOut(e)) say("runner-msg", e, "bad");
+    }
+  }
+  $("runner-stop").addEventListener("click", () => runner("stop"));
+  $("runner-start").addEventListener("click", () => runner("start"));
+  $("runner-refresh").addEventListener("click", () => runner("status"));
+
+  function stat(value, label) {
+    const d = document.createElement("div");
+    d.className = "stat";
+    const b = document.createElement("b"); b.textContent = value;
+    const s = document.createElement("span"); s.textContent = label;
+    d.appendChild(b); d.appendChild(s);
+    return d;
+  }
+  function renderTimings() {
+    const out = $("tm-out");
+    out.textContent = "";
+    if (!timingsData) return;
+    const box = document.createElement("div");
+    box.className = "stats";
+    box.appendChild(stat(timingsData.uploads, t("tm_uploads")));
+    box.appendChild(stat(timingsData.finished, t("tm_finished")));
+    if (timingsData.finished) {
+      box.appendChild(stat(span(timingsData.median), t("tm_median")));
+      box.appendChild(stat(span(timingsData.p95), t("tm_p95")));
+      box.appendChild(stat(span(timingsData.slowest), t("tm_slowest")));
+    }
+    out.appendChild(box);
+    const counts = document.createElement("p");
+    counts.className = "msg";
+    Object.keys(timingsData.counts || {}).sort().forEach(k => {
+      counts.appendChild(badge(stName(k) + " " + timingsData.counts[k], COLOURS[k]));
+      counts.appendChild(document.createTextNode(" "));
+    });
+    out.appendChild(counts);
+    const verdict = document.createElement("p");
+    verdict.className = "msg " + (!timingsData.finished ? "muted" : timingsData.p95 <= timingsData.targetSeconds ? "ok" : "bad");
+    verdict.textContent = !timingsData.finished ? t("tm_none")
+      : t(timingsData.p95 <= timingsData.targetSeconds ? "tm_target_ok" : "tm_target_over");
+    out.appendChild(verdict);
+  }
+  async function showTimings() {
+    try {
+      timingsData = await ownerApi("/api/owner/timings", {days: parseInt($("tm-days").value, 10)});
+      say("tm-msg", "");
+      renderTimings();
+    } catch (e) {
+      if (!ownerLockedOut(e)) say("tm-msg", e, "bad");
+    }
+  }
+  $("tm-show").addEventListener("click", showTimings);
+
+  // ----- start: the language remembered, else the browser's -----
+  let saved = null;
+  try { saved = localStorage.getItem("calls-log-lang"); } catch (e) { /* not available */ }
+  lang = WORDS[saved] ? saved : ((navigator.language || "").toLowerCase().startsWith("vi") ? "vi" : "en");
+  applyLanguage();
 })();
 </script>
 </body>
