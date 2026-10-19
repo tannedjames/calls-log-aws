@@ -15,7 +15,19 @@ header, checked before any data is touched.
     POST /api/sheets   {"name", "date"} -> matching Day Sheets, each with a
                        5-minute download link
 
-Errors are {"ok": false, "error": "<plain words>"}, as the Web App answers.
+The Owner tab's routes need the owner password (owner_passphrase_hash) in the
+x-calls-log-owner header instead; the upload passphrase never opens them:
+
+    POST /api/owner/hello    the switch and whether the runner is on
+    POST /api/owner/requeue  {"personDay", "uploadId"?} -> a stored upload runs
+                             again (cloud/requeue.py, as enqueue.py --requeue)
+    POST /api/owner/resend   {"personDay"} -> its stored Day Sheet is sent to the
+                             Sheet again (as tools/resync.py)
+    POST /api/owner/runner   {"action": "status" | "stop" | "start"}
+    POST /api/owner/timings  {"days"} -> Ready -> Done times (cloud/timing.py)
+
+Errors are {"ok": false, "error": "<plain words>", "code", "args"}: the page
+shows the code in English or Vietnamese, other clients the words.
 cloud/status.py stays the only writer of Folder Status and cloud/naming.py the
 only reader of folder names. Log lines carry the route, the result and the
 uploadId, never a name, a passphrase or a link.
@@ -29,6 +41,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -38,13 +51,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from cloud import naming, passphrase as passphrase_mod, settings as settings_mod
+from cloud import killswitch, naming, passphrase as passphrase_mod, requeue as shared_requeue
+from cloud import settings as settings_mod, timing
 from cloud.status import FolderStatus, Status, TransitionRefused
 from cloud.storage import IMAGE_SUFFIXES, S3Storage, pc_order
 
 log = logging.getLogger("calls-log.intake")
 
 HEADER = "x-calls-log-passphrase"
+OWNER_HEADER = "x-calls-log-owner"
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MAX_FILES = 500             # entries in one folder's listing, images or not
 MAX_FOLDERS = 100           # folders in one check
@@ -54,6 +69,7 @@ DOWNLOAD_SECONDS = 5 * 60
 STATUS_DAYS = 8             # UTC days queried: the last 7 local days, whatever the time zone
 MAX_SHEETS = 50
 SETTINGS_SECONDS = 300      # a changed passphrase or employee list applies within 5 minutes
+MAX_TIMING_DAYS = 28
 PAGE = Path(__file__).resolve().parent / "static" / "upload.html"
 CONTENT_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
                  ".webp": "image/webp", ".bmp": "image/bmp"}
@@ -63,11 +79,28 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 class Refused(Exception):
-    """A request the page can't have: the HTTP status and the reason in plain words."""
+    """A request the page can't have: the HTTP status, the reason in plain words and its code."""
 
-    def __init__(self, status: int, error: str):
+    def __init__(self, status: int, error: str, code: Optional[str] = None, args: Optional[Dict[str, Any]] = None):
         super().__init__(error)
-        self.status, self.error = status, error
+        self.status, self.error, self.code, self.args_ = status, error, code, args or {}
+
+
+# Every code a response can carry; the page has an English and a Vietnamese
+# string for each (a test checks both lists).
+CODES = (
+    "bad_name", "no_employee_list", "not_registered", "listed_twice", "empty_file", "too_big", "only_heic",
+    "no_images", "too_many", "same_day", "folders_count", "file_list", "file_list_invalid", "queue_failed",
+    "not_an_upload", "no_such_upload", "already", "partial", "changed_meanwhile", "name_or_date",
+    "date_format", "not_set_up", "wrong_passphrase", "owner_not_set", "wrong_owner", "bad_json",
+    "too_large", "not_found", "server_error", "bad_day", "no_sheet", "no_runner", "bad_action",
+    "runner_failed", "days_range",
+    *("no_upload", "not_requeueable", "images_gone", "changed"),   # cloud/requeue.py
+)
+
+
+def _no(error: str, code: str, **args: Any) -> Dict[str, Any]:
+    return {"ok": False, "error": error, "code": code, "args": args}
 
 
 # ----- checking a folder (FR-2) ------------------------------------------------
@@ -80,14 +113,15 @@ def _suffix(name: str) -> str:
 def _files(raw: Any) -> List[Tuple[str, int]]:
     """The listing the page sent, as (file name, size); anything malformed is refused."""
     if not isinstance(raw, list) or len(raw) > MAX_FILES:
-        raise Refused(400, f"A folder's file list must be a list of at most {MAX_FILES} files.")
+        raise Refused(400, f"A folder's file list must be a list of at most {MAX_FILES} files.",
+                      "file_list", {"max": MAX_FILES})
     out = []
     for f in raw:
         name = f.get("name") if isinstance(f, dict) else None
         size = f.get("size") if isinstance(f, dict) else None
         if (not isinstance(name, str) or not name or len(name) > 255 or "/" in name or "\\" in name
                 or name in (".", "..") or not isinstance(size, int) or isinstance(size, bool) or size < 0):
-            raise Refused(400, "The file list isn't valid.")
+            raise Refused(400, "The file list isn't valid.", "file_list_invalid")
         out.append((unicodedata.normalize("NFC", name), size))
     return out
 
@@ -96,44 +130,46 @@ def check_folder(folder: str, files: List[Tuple[str, int]], *, prefixes, max_ima
     """
     Whether a folder may be uploaded, as the server decides it:
     {"ok": True, "personDay", "images": [names in the PC's order], "ignored": [...]}
-    or {"ok": False, "error": "<why>"}.
+    or {"ok": False, "error": "<why>", "code", "args"}.
     """
     day = naming.parse(folder) if isinstance(folder, str) and folder.strip() else None
     if day is None:
-        return {"ok": False, "error": 'its name isn\'t "<Name> & <yyyy-mm-dd>" with a real date'}
+        return _no('its name isn\'t "<Name> & <yyyy-mm-dd>" with a real date', "bad_name")
     if not prefixes:
-        return {"ok": False, "error": "the employee list isn't set up yet "
-                                      "(the Owner runs tools/put_parameters.py --from-private-files)"}
+        return _no("the employee list isn't set up yet "
+                   "(the Owner runs tools/put_parameters.py --from-private-files)", "no_employee_list")
     if naming.matching_prefix(day.name, prefixes) is None:
-        return {"ok": False, "error": f"{day.name} is not a registered employee"}
+        return _no(f"{day.name} is not a registered employee", "not_registered", name=day.name)
     images, ignored, heic, seen = [], [], 0, set()
     for name, size in files:
         if name in seen:
-            return {"ok": False, "error": f"{name} is listed twice"}
+            return _no(f"{name} is listed twice", "listed_twice", file=name)
         seen.add(name)
         suffix = _suffix(name)
         if suffix not in IMAGE_SUFFIXES:
             heic += suffix in HEIC
             ignored.append(name)
         elif size == 0:
-            return {"ok": False, "error": f"{name} is empty"}
+            return _no(f"{name} is empty", "empty_file", file=name)
         elif size > MAX_IMAGE_BYTES:
-            return {"ok": False, "error": f"{name} is {size / 1024 / 1024:.0f} MB, more than 15 MB"}
+            mb = math.ceil(size / 1024 / 1024)   # never rounded down to the limit itself
+            return _no(f"{name} is {mb} MB, more than 15 MB", "too_big", file=name, mb=mb)
         else:
             images.append(name)
     if not images:
         if heic:
-            return {"ok": False, "error": "it has only HEIC photos: save the screenshots as JPEG or PNG "
-                                          "(or convert them) and choose the folder again"}
-        return {"ok": False, "error": "it has no images (.jpg, .jpeg, .png, .webp or .bmp)"}
+            return _no("it has only HEIC photos: save the screenshots as JPEG or PNG "
+                       "(or convert them) and choose the folder again", "only_heic")
+        return _no("it has no images (.jpg, .jpeg, .png, .webp or .bmp)", "no_images")
     if len(images) > max_images:
-        return {"ok": False, "error": f"it has {len(images)} images, more than {max_images}"}
+        return _no(f"it has {len(images)} images, more than {max_images}", "too_many",
+                   count=len(images), max=max_images)
     return {"ok": True, "personDay": day.key, "images": pc_order(images), "ignored": sorted(ignored)}
 
 
 # ----- the passphrase (AD-17) ------------------------------------------------------
 
-_verified: Dict[str, bytes] = {}   # stored hash -> SHA-256 of the passphrase that matched it
+_verified: Dict[str, bytes] = {}   # stored hash -> SHA-256 of the passphrase that matched it (upload, owner)
 
 
 def authorised(given: Optional[str], stored: str) -> bool:
@@ -149,7 +185,8 @@ def authorised(given: Optional[str], stored: str) -> bool:
     if known is not None and hmac.compare_digest(digest, known):
         return True
     if passphrase_mod.verify(given, stored):
-        _verified.clear()
+        if len(_verified) >= 4:   # old hashes after a change are never asked for again
+            _verified.clear()
         _verified[stored] = digest
         return True
     return False
@@ -167,6 +204,8 @@ class Services:
     ssm: Any
     max_images: int
     today: Callable[[], _dt.date] = lambda: _dt.datetime.now(_dt.timezone.utc).date()
+    now: Callable[[], _dt.datetime] = lambda: _dt.datetime.now(_dt.timezone.utc)
+    lambda_client: Any = None   # the Owner tab's runner on/off
 
 
 _services: Optional[Services] = None
@@ -202,7 +241,8 @@ def services(clock: Callable[[], float] = time.monotonic) -> Services:
         current = settings_mod.load(ssm)
         s3 = s3_client(_region())
         _services = Services(current, FolderStatus(boto3.client("dynamodb"), current.table),
-                             S3Storage(s3, current.bucket), s3, boto3.client("sqs"), ssm, CONFIG.max_images)
+                             S3Storage(s3, current.bucket), s3, boto3.client("sqs"), ssm, CONFIG.max_images,
+                             lambda_client=boto3.client("lambda"))
         _loaded_at = clock()
     return _services
 
@@ -217,7 +257,8 @@ def hello(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
 def check(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
     folders = body.get("folders")
     if not isinstance(folders, list) or not folders or len(folders) > MAX_FOLDERS:
-        raise Refused(400, f"Send between 1 and {MAX_FOLDERS} folders to check.")
+        raise Refused(400, f"Send between 1 and {MAX_FOLDERS} folders to check.", "folders_count",
+                      {"max": MAX_FOLDERS})
     out, keys = [], {}
     for f in folders:
         folder = f.get("folder") if isinstance(f, dict) else None
@@ -225,7 +266,8 @@ def check(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
                               prefixes=svc.settings.name_prefixes, max_images=svc.max_images)
         if result["ok"]:
             if result["personDay"] in keys:
-                result = {"ok": False, "error": f"it is the same Person-Day as {keys[result['personDay']]}"}
+                result = _no(f"it is the same Person-Day as {keys[result['personDay']]}", "same_day",
+                             other=keys[result["personDay"]])
             else:
                 keys[result["personDay"]] = folder
         out.append({"folder": folder, **({k: v for k, v in result.items() if k != "images"}),
@@ -248,7 +290,7 @@ def create_upload(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
     result = check_folder(folder, _files(body.get("files")),
                           prefixes=svc.settings.name_prefixes, max_images=svc.max_images)
     if not result["ok"]:
-        raise Refused(400, f"{folder}: {result['error']}. Nothing was uploaded.")
+        raise Refused(400, f"{folder}: {result['error']}. Nothing was uploaded.", result["code"], result["args"])
     upload_id = naming.new_upload_id()
     svc.status.create(result["personDay"], upload_id, len(result["images"]))
     return {"ok": True, "uploadId": upload_id, "personDay": result["personDay"],
@@ -256,36 +298,42 @@ def create_upload(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
             "forms": [_form(svc, upload_id, name) for name in result["images"]]}
 
 
-def _queue(svc: Services, person_day: str, upload_id: str) -> None:
-    body = {"uploadId": upload_id, "personDay": person_day, "mode": "process"}
+def _send(svc: Services, body: Dict[str, str], route: str, error: str) -> None:
     try:
         svc.sqs.send_message(QueueUrl=svc.settings.queue_url, MessageBody=json.dumps(body, ensure_ascii=False))
     except Exception as e:
-        log.error(json.dumps({"route": "ready", "uploadId": upload_id, "error": type(e).__name__}))
-        raise Refused(502, "It is Ready, but it couldn't be queued. Click Ready again.") from None
+        log.error(json.dumps({"route": route, **({"uploadId": body["uploadId"]} if "uploadId" in body else {}),
+                              "error": type(e).__name__}))
+        raise Refused(502, error, "queue_failed") from None
+
+
+def _queue(svc: Services, person_day: str, upload_id: str) -> None:
+    _send(svc, {"uploadId": upload_id, "personDay": person_day, "mode": "process"}, "ready",
+          "It is Ready, but it couldn't be queued. Click Ready again.")
 
 
 def ready(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
     person_day, upload_id = body.get("personDay"), body.get("uploadId")
     if not isinstance(person_day, str) or not isinstance(upload_id, str) or not naming.is_upload_id(upload_id):
-        raise Refused(400, "That isn't an upload.")
+        raise Refused(400, "That isn't an upload.", "not_an_upload")
     item = svc.status.get(person_day, upload_id)
     if item is None:
-        raise Refused(404, "No such upload.")
+        raise Refused(404, "No such upload.", "no_such_upload")
     if item["status"] == Status.PENDING.value:   # Ready already, maybe without its message: queue it again
         _queue(svc, person_day, upload_id)
         return {"ok": True, "status": Status.PENDING.value, "queuedAgain": True}
     if item["status"] != Status.UPLOADING.value:
         raise Refused(409, f"This upload is already {item['status']}. To correct the day, "
-                           "upload the whole folder again.")
+                           "upload the whole folder again.", "already", {"status": item["status"]})
     arrived, declared = len(svc.storage.list_images(upload_id)), int(item["imageCount"])
     if arrived != declared:
         raise Refused(409, f"Only {arrived} of {declared} images arrived, so it can't be made Ready. "
-                           "Choose the folder and upload it again; the partial upload is deleted after 30 days.")
+                           "Choose the folder and upload it again; the partial upload is deleted after 30 days.",
+                      "partial", {"arrived": arrived, "declared": declared})
     try:
         svc.status.mark_ready(person_day, upload_id)
     except TransitionRefused:
-        raise Refused(409, "This upload changed meanwhile; refresh the status.") from None
+        raise Refused(409, "This upload changed meanwhile; refresh the status.", "changed_meanwhile") from None
     _queue(svc, person_day, upload_id)
     return {"ok": True, "status": Status.PENDING.value}
 
@@ -319,10 +367,10 @@ def _disposition(file_name: str) -> str:
 def sheets(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
     name, date = body.get("name") or "", body.get("date") or ""
     if not isinstance(name, str) or not isinstance(date, str) or not (name.strip() or date.strip()):
-        raise Refused(400, "Give a name, a date or both.")
+        raise Refused(400, "Give a name, a date or both.", "name_or_date")
     date = date.strip()
     if date and not _DATE.fullmatch(date):
-        raise Refused(400, "The date must look like 2026-06-01.")
+        raise Refused(400, "The date must look like 2026-06-01.", "date_format")
     want = naming.norm(name)
     found = []
     kwargs: Dict[str, Any] = {"Bucket": svc.settings.bucket, "Prefix": "results/"}
@@ -368,6 +416,108 @@ ROUTES: Dict[str, Callable[[Services, Dict[str, Any]], Dict[str, Any]]] = {
 }
 
 
+# ----- the Owner tab (owner password) ------------------------------------------------
+
+def _runner_state(svc: Services) -> Optional[str]:
+    if not svc.settings.runner_function or svc.lambda_client is None:
+        return None
+    try:
+        return killswitch.runner_state(svc.lambda_client, svc.settings.runner_function)
+    except Exception as e:   # shown as "unknown"; the tab still opens
+        log.warning(json.dumps({"runner": "unreadable", "error": type(e).__name__}))
+        return None
+
+
+def owner_hello(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    return {"ok": True, "syncEnabled": _sync_switch(svc), "runner": _runner_state(svc)}
+
+
+def _day(body: Dict[str, Any]) -> naming.PersonDay:
+    person_day = body.get("personDay")
+    day = naming.parse(person_day) if isinstance(person_day, str) and person_day.strip() else None
+    if day is None:
+        raise Refused(400, 'That isn\'t a Person-Day ("<Name> & <yyyy-mm-dd>").', "bad_day")
+    return day
+
+
+def owner_requeue(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a stored upload again: Done, Failed or Parked -> Pending, one message (as enqueue.py --requeue)."""
+    day, upload_id = _day(body), body.get("uploadId")
+    if upload_id is not None and (not isinstance(upload_id, str) or not naming.is_upload_id(upload_id)):
+        raise Refused(400, "That isn't an upload.", "not_an_upload")
+
+    def send(message: Dict[str, str]) -> None:
+        _send(svc, message, "owner/requeue", "It is Pending again, but it couldn't be queued. Click Re-run again.")
+
+    try:
+        upload_id, images = shared_requeue.requeue(day, upload_id, status=svc.status,
+                                                   list_images=svc.storage.list_images, send=send)
+    except shared_requeue.Refused as e:
+        if e.code == "not_requeueable" and e.args_.get("status") == Status.PENDING.value:
+            # Pending already, maybe without its message (a failed send): queue it again,
+            # as Ready does; the runner skips a duplicate.
+            send({"uploadId": e.args_["uploadId"], "personDay": day.key, "mode": "process"})
+            return {"ok": True, "uploadId": e.args_["uploadId"], "status": Status.PENDING.value, "queuedAgain": True}
+        raise Refused(409, str(e), e.code, e.args_) from None
+    return {"ok": True, "uploadId": upload_id, "images": images, "status": Status.PENDING.value}
+
+
+def owner_resend(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Send a stored Day Sheet to its Sheet again, whatever the AWS Sync Switch says (AD-10, as resync.py)."""
+    day = _day(body)
+    key = naming.result_key(day)
+    listing = svc.s3.list_objects_v2(Bucket=svc.settings.bucket, Prefix=key)
+    if not any(obj["Key"] == key for obj in listing.get("Contents", [])):
+        raise Refused(404, f"No Day Sheet is stored for {day.key}.", "no_sheet")
+    _send(svc, {"personDay": day.key, "mode": "resync"}, "owner/resend", "It couldn't be queued. Try again.")
+    return {"ok": True, "personDay": day.key}
+
+
+def owner_runner(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether AWS processes queued folders, and the switch to stop or start it (the runner's queue trigger)."""
+    action = body.get("action", "status")
+    if action not in ("status", "stop", "start"):
+        raise Refused(400, 'The action must be "status", "stop" or "start".', "bad_action")
+    if not svc.settings.runner_function or svc.lambda_client is None:
+        raise Refused(503, "The page doesn't know the runner (CALLS_LOG_RUNNER_FUNCTION is not set).", "no_runner")
+    try:
+        changed: List[Dict[str, str]] = []
+        if action == "stop":
+            changed = killswitch.stop_runner(svc.lambda_client, svc.settings.runner_function)
+        elif action == "start":
+            changed = killswitch.start_runner(svc.lambda_client, svc.settings.runner_function)
+        state = killswitch.runner_state(svc.lambda_client, svc.settings.runner_function)
+    except Exception as e:
+        log.error(json.dumps({"route": "owner/runner", "action": action, "error": type(e).__name__}))
+        raise Refused(502, "AWS didn't answer; try again in a minute.", "runner_failed") from None
+    if changed:
+        log.info(json.dumps({"route": "owner/runner", "action": action, "triggers": len(changed)}))
+    return {"ok": True, "runner": state, "changed": len(changed)}
+
+
+def owner_timings(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ready -> Done over the uploads started in the last N x 24 hours: counts,
+    median, p95, slowest (seconds). A rolling window, so "1 day" means the
+    last 24 hours wherever the Owner is, not the current UTC date.
+    """
+    days = body.get("days", 7)
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_TIMING_DAYS:
+        raise Refused(400, f"Days must be 1 to {MAX_TIMING_DAYS}.", "days_range", {"max": MAX_TIMING_DAYS})
+    now = svc.now()
+    since = f"{now - _dt.timedelta(days=days):%Y%m%dT%H%M%SZ}"   # uploadIds start with their UTC time
+    items = [i for back in range(days + 1)
+             for i in svc.status.recent((now.date() - _dt.timedelta(days=back)).isoformat())
+             if str(i.get("uploadId") or "") >= since]
+    return {"ok": True, "days": days, "targetSeconds": timing.TARGET_S, **timing.summary(items)}
+
+
+OWNER_ROUTES: Dict[str, Callable[[Services, Dict[str, Any]], Dict[str, Any]]] = {
+    "/api/owner/hello": owner_hello, "/api/owner/requeue": owner_requeue, "/api/owner/resend": owner_resend,
+    "/api/owner/runner": owner_runner, "/api/owner/timings": owner_timings,
+}
+
+
 # ----- HTTP -----------------------------------------------------------------------------
 
 def _page() -> Tuple[str, str]:
@@ -400,15 +550,15 @@ def _body(event: Dict[str, Any]) -> Dict[str, Any]:
         try:
             raw = base64.b64decode(raw).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
-            raise Refused(400, "The request isn't valid JSON.") from None
+            raise Refused(400, "The request isn't valid JSON.", "bad_json") from None
     if len(raw.encode("utf-8")) > MAX_BODY_BYTES:
-        raise Refused(413, "The request is too large; choose fewer folders at once.")
+        raise Refused(413, "The request is too large; choose fewer folders at once.", "too_large")
     try:
         body = json.loads(raw) if raw.strip() else {}
     except ValueError:
-        raise Refused(400, "The request isn't valid JSON.") from None
+        raise Refused(400, "The request isn't valid JSON.", "bad_json") from None
     if not isinstance(body, dict):
-        raise Refused(400, "The request isn't valid JSON.")
+        raise Refused(400, "The request isn't valid JSON.", "bad_json")
     return body
 
 
@@ -421,30 +571,40 @@ def handle(event: Dict[str, Any], get_services: Callable[[], Services] = service
                 "headers": {"Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": csp,
                             "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
                             "X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"}}
-    route = ROUTES.get(path)
-    if route is None or method != "POST":
-        return _respond(404, {"ok": False, "error": "No such page."})
+    route, owner = ROUTES.get(path), OWNER_ROUTES.get(path)
+    if (route is None and owner is None) or method != "POST":
+        return _respond(404, {"ok": False, "error": "No such page.", "code": "not_found", "args": {}})
 
     started = time.monotonic()
     result, upload_id = "ok", None
     try:
         svc = get_services()
-        if not svc.settings.intake_passphrase_hash:
-            raise Refused(503, "The page isn't set up yet: the Owner sets a passphrase with "
-                               "tools/put_parameters.py --passphrase.")
-        given = {k.lower(): v for k, v in (event.get("headers") or {}).items()}.get(HEADER)
-        if not authorised(given, svc.settings.intake_passphrase_hash):
-            raise Refused(401, "Wrong passphrase.")
+        headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
+        if owner is not None:   # the owner password only: the upload passphrase never opens these
+            if not svc.settings.owner_passphrase_hash:
+                raise Refused(503, "The Owner tab isn't set up yet: the Owner sets a password with "
+                                   "tools/put_parameters.py --owner-passphrase.", "owner_not_set")
+            if not authorised(headers.get(OWNER_HEADER), svc.settings.owner_passphrase_hash):
+                raise Refused(403, "Wrong owner password.", "wrong_owner")
+            route = owner
+        else:
+            if not svc.settings.intake_passphrase_hash:
+                raise Refused(503, "The page isn't set up yet: the Owner sets a passphrase with "
+                                   "tools/put_parameters.py --passphrase.", "not_set_up")
+            if not authorised(headers.get(HEADER), svc.settings.intake_passphrase_hash):
+                raise Refused(401, "Wrong passphrase.", "wrong_passphrase")
         body = _body(event)
         response = _respond(200, route(svc, body))
         upload_id = json.loads(response["body"]).get("uploadId") or body.get("uploadId")
         return response
     except Refused as e:
         result = str(e.status)
-        return _respond(e.status, {"ok": False, "error": e.error})
+        return _respond(e.status, {"ok": False, "error": e.error,
+                                   **({"code": e.code, "args": e.args_} if e.code else {})})
     except Exception as e:
         result = type(e).__name__
-        return _respond(500, {"ok": False, "error": "Something went wrong on the server. Try again in a minute."})
+        return _respond(500, {"ok": False, "error": "Something went wrong on the server. Try again in a minute.",
+                              "code": "server_error", "args": {}})
     finally:
         log.info(json.dumps({"route": path, "result": result, "durationMs": int((time.monotonic() - started) * 1000),
                              **({"uploadId": upload_id} if isinstance(upload_id, str)

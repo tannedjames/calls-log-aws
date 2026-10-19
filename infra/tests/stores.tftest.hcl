@@ -122,9 +122,10 @@ run "parameters_hold_only_placeholders" {
 
   assert {
     condition = toset(keys(aws_ssm_parameter.setting)) == toset([
-      "webapp_url", "sync_secret", "sync_enabled", "name_prefixes", "intake_passphrase_hash", "alert_email",
+      "webapp_url", "sync_secret", "sync_enabled", "name_prefixes", "intake_passphrase_hash",
+      "owner_passphrase_hash", "alert_email",
     ])
-    error_message = "The six /calls-log/ parameters of the spine must exist, and no others."
+    error_message = "The seven /calls-log/ parameters (the spine's six and the Owner tab's password) must exist, and no others."
   }
 
   assert {

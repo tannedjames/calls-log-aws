@@ -57,4 +57,6 @@ def weak(passphrase: str) -> Optional[str]:
         return f"use at least {MIN_LENGTH} characters"
     if passphrase != passphrase.strip():
         return "no spaces at the start or the end"
+    if not passphrase.isascii():   # the page sends it in an HTTP header, which can't carry accented letters
+        return "use only unaccented letters, digits and symbols (a browser can't send accented letters)"
     return None

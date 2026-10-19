@@ -288,10 +288,10 @@ stateDiagram-v2
 | Concern | Convention |
 | --- | --- |
 | Resource names | `calls-log-<component>` (e.g. `calls-log-runner`, `calls-log-folders`); tags `project=calls-log`, `env=prod`, `managed-by=terraform` |
-| SSM parameters | `/calls-log/<snake_case>`: `webapp_url`, `sync_secret`, `sync_enabled`, `name_prefixes`, `intake_passphrase_hash`, `alert_email` |
+| SSM parameters | `/calls-log/<snake_case>`: `webapp_url`, `sync_secret`, `sync_enabled`, `name_prefixes`, `intake_passphrase_hash`, `owner_passphrase_hash`, `alert_email` |
 | Status item | PK `pd#<Person-Day>`, SK `up#<uploadId>`, plus a lease item `pd#<Person-Day>` / `lease`; timestamps in UTC ISO 8601 |
 | Queue message | `{"uploadId": "<ULID>", "personDay": "<NFC name & date>", "mode": "process"\|"resync"}` |
-| Intake API errors | `{"ok": false, "error": "<plain words>"}`, the same shape as the Web App |
+| Intake API errors | `{"ok": false, "error": "<plain words>", "code": "<stable id>", "args": {…}}`: the Web App's shape plus a code the page translates |
 | Env vars | `CALLS_LOG_<NAME>` for cloud settings; existing OpenMP vars set from the function's vCPU count |
 | Python layout | New code only in `cloud/` and `tools/`. Core modules keep their current names and signatures |
 | Tests | Plain functions runnable by `run_tests.py`; AWS faked via `unittest.mock` (no moto dependency [ASSUMPTION]) |
