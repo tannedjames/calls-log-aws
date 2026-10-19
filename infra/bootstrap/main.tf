@@ -38,8 +38,8 @@ locals {
   log_groups     = "arn:aws:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/calls-log-*"
   alarms         = "arn:aws:cloudwatch:${var.region}:${local.account_id}:alarm:calls-log-*"
   # The /calls-log/ settings a function may write (the upload page's Owner
-  # tab, Story 4.5); cloud/owner_settings.py WRITABLE names the same five.
-  owner_settings = ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "alert_email", "name_prefixes"]
+  # tab, Story 4.5); cloud/owner_settings.py WRITABLE names the same four.
+  owner_settings = ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "name_prefixes"]
 }
 
 # ---------------------------------------------------------------------------

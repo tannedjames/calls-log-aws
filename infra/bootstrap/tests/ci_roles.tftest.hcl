@@ -292,14 +292,14 @@ run "the_boundary_reaches_only_this_project" {
     error_message = "The deploy role sets the data bucket's CORS for the upload page (infra/data.tf)."
   }
 
-  # Story 4.5 part B: the Owner tab writes five settings, named one by one.
+  # Story 4.5 part B: the Owner tab writes four settings, named one by one.
   assert {
     condition = toset(flatten([
       for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement : s.Resource
       if contains(flatten([s.Action]), "ssm:PutParameter")
-      ])) == toset([for n in ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "alert_email", "name_prefixes"] :
+      ])) == toset([for n in ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "name_prefixes"] :
     "arn:aws:ssm:ap-southeast-2:123456789012:parameter/calls-log/${n}"])
-    error_message = "A function may write exactly the five Owner-tab settings, never webapp_url, sync_secret or a wildcard."
+    error_message = "A function may write exactly the four Owner-tab settings, never webapp_url, sync_secret or a wildcard."
   }
 
   assert {
@@ -318,5 +318,16 @@ run "the_boundary_reaches_only_this_project" {
       if length(setintersection(toset(flatten([s.Action])), toset(["sns:Subscribe", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic"]))) > 0
     ])) == toset(["arn:aws:sns:ap-southeast-2:123456789012:calls-log-*"])
     error_message = "Alert subscriptions may be changed on calls-log topics only."
+  }
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement :
+      !can(s.NotAction) && alltrue([
+        for a in flatten([s.Action]) : a != "*" && (
+          !startswith(a, "ssm:") || contains(["ssm:GetParameter", "ssm:GetParameters", "ssm:PutParameter"], a)) && (
+        !startswith(a, "sns:") || contains(["sns:Publish", "sns:Subscribe", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic"], a))
+      ])
+    ])
+    error_message = "Parameter and topic rights are named one by one: no ssm:Put*, no \"*\", no NotAction that would reach webapp_url or sync_secret."
   }
 }

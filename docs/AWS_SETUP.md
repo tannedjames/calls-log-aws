@@ -225,8 +225,8 @@ A higher limit costs nothing; Lambda bills per use.
 - **Settings from the Owner tab** (Story 4.5 part B). Its bootstrap change,
   applied by hand before its PR merges, adds two statements to the workload
   boundary: `ChangeSettings` (`ssm:PutParameter` on exactly `sync_enabled`,
-  `intake_passphrase_hash`, `owner_passphrase_hash`, `alert_email` and
-  `name_prefixes`; never `webapp_url` or `sync_secret`) and
+  `intake_passphrase_hash`, `owner_passphrase_hash` and `name_prefixes`;
+  never `webapp_url` or `sync_secret`) and
   `AlertSubscriptions` (subscribe, unsubscribe and list on `calls-log-*`
   topics). The plan shows 0 to add, 1 to change (`workload_boundary`), 0 to
   destroy. Without it the page's settings cards answer "AWS didn't save it".

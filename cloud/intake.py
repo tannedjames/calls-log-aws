@@ -108,7 +108,7 @@ CODES = (
     "same_as_other", "save_failed", "no_topic", "alerts_failed", "bad_action_alerts", "not_confirmed",
     "last_alert",
     *("employees_invalid", "employees_empty", "employees_many", "employee_blank", "employee_long",
-      "employee_twice", "prefix_clash", "bad_email"),                    # cloud/owner_settings.py
+      "employee_twice", "prefix_clash", "bad_email", "employees_too_long"),                    # cloud/owner_settings.py
     *("no_upload", "not_requeueable", "images_gone", "changed"),   # cloud/requeue.py
 )
 
@@ -636,7 +636,6 @@ def owner_alerts(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
             except owner_settings.Invalid as e:
                 raise _invalid(e) from None
             svc.sns.subscribe(TopicArn=topic, Protocol="email", Endpoint=address)
-            _put(svc, "alert_email", address)
         elif action == "remove":
             confirmed = [a for a in _alerts(svc) or [] if a["confirmed"]]
             sub = body.get("id")

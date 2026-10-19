@@ -80,7 +80,7 @@ This reverses Epic 4's "Never: the page changing the Sync Switch" (spec-4) **for
 - the runbook covers owner-password guessing (403 lines), and AWS_SETUP.md lists seven parameters.
 
 **Part B (built):**
-- [x] Bootstrap `ChangeSettings` (`ssm:PutParameter` on exactly `sync_enabled`, `intake_passphrase_hash`, `owner_passphrase_hash`, `alert_email`, `name_prefixes`) and `AlertSubscriptions`; tests that `webapp_url` and `sync_secret` stay unwritable.
+- [x] Bootstrap `ChangeSettings` (`ssm:PutParameter` on exactly `sync_enabled`, `intake_passphrase_hash`, `owner_passphrase_hash`, `name_prefixes`) and `AlertSubscriptions`; tests that `webapp_url` and `sync_secret` stay unwritable, also against `ssm:Put*`, `*` or `NotAction`.
 - [x] The intake policy with the same rights, on the alerts topic only.
 - [x] `cloud/owner_settings.py` (`WRITABLE`, the employee-list and address rules) and the routes `/api/owner/settings`, `sync`, `password`, `alerts`, `employees`; every write resets this container's settings; a refused password re-reads them (at most every 10 s).
 - [x] The page's cards: Sync on/off, Passwords (typed twice), Alert emails (add, remove a confirmed one, never the last), Employees (saved in the Web App's form; a prefix clash refused).
@@ -89,6 +89,8 @@ This reverses Epic 4's "Never: the page changing the Sync Switch" (spec-4) **for
 Decisions made while building part B:
 - Employee names are saved folded (lower case, no accents), because the Web App compares the folded folder name with its keys as stored.
 - An earlier name that would match a later one is refused, since the later one could never be reached (the `NAME_TO_ID` rule).
+- `alert_email` is not written by the page (the topic's subscriptions are the record), so the boundary grants four parameters, not five.
+- The employee list must fit the parameter's 4 KB.
 - The last confirmed alert address can't be removed, so alerts always reach someone; an unconfirmed one can't be removed either, since it expires by itself after 3 days.
 
 ## Verification

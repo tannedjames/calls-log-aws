@@ -2,23 +2,26 @@
 The settings the upload page's Owner tab may change (Story 4.5 part B), and
 the rules a new value must pass before it is written.
 
-Only the five names in WRITABLE: the AWS Sync Switch, the two password
-hashes, the alert address and the employee list. Never webapp_url or
+Only the four names in WRITABLE: the AWS Sync Switch, the two password
+hashes and the employee list. Alert addresses live in the topic's
+subscriptions, which the tab manages directly. Never webapp_url or
 sync_secret: whoever could write those could send every Day Sheet, and the
 key to every Sheet, somewhere else. The bootstrap boundary and the intake's
-policy name the same five (infra/bootstrap/main.tf, infra/intake.tf).
+policy name the same four (infra/bootstrap/main.tf, infra/intake.tf).
 """
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, List
 
 from cloud import naming
 
-WRITABLE = ("sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "alert_email", "name_prefixes")
+WRITABLE = ("sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "name_prefixes")
 MAX_EMPLOYEES = 200
 MAX_NAME = 100
+MAX_STORED = 4096   # a Standard parameter holds 4 KB: the list as JSON must fit
 EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")   # the same check as tools/put_parameters.py
 MAX_EMAIL = 254
 
@@ -60,6 +63,9 @@ def employees(lines: Any) -> List[str]:
             raise Invalid(f"{first} comes first and also matches {key}, so {key} would never be reached; "
                           "put the longer name first.", "prefix_clash", first=first, later=key)
         keys.append(key)
+    if len(json.dumps(keys, ensure_ascii=False).encode("utf-8")) > MAX_STORED:
+        raise Invalid(f"The list is too long to store ({MAX_STORED} bytes at most); shorten it.",
+                      "employees_too_long", max=MAX_STORED)
     return keys
 
 

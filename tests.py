@@ -3713,9 +3713,9 @@ def _settings_intake(subs=None):
     return svc
 
 
-def test_owner_tab_writes_only_its_five_settings_and_the_infra_says_the_same():
+def test_owner_tab_writes_only_its_four_settings_and_the_infra_says_the_same():
     assert set(osettings.WRITABLE) == {"sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash",
-                                       "alert_email", "name_prefixes"}
+                                       "name_prefixes"}
     lists = []
     for tf in ("infra/intake.tf", "infra/bootstrap/main.tf"):
         text = Path(tf).read_text(encoding="utf-8")
@@ -3804,6 +3804,7 @@ def test_employee_list_is_saved_the_way_the_web_app_keys_it():
         (["Trần Thị B", "tran thi b"], "employee_twice"),
         (["nguyen van a", "nguyen van an"], "prefix_clash"),   # the first would also match the second
         ([f"person {i:03}" for i in range(201)], "employees_many"),
+        ([f"{i:03} " + "x" * 30 for i in range(150)], "employees_too_long"),   # 150 x 36 bytes: over 4 KB
     ]
     for names, code in cases:
         try:
@@ -3825,7 +3826,7 @@ def test_owner_adds_and_removes_alert_addresses():
     assert _owner(svc, "/api/owner/alerts", {"action": "add", "address": "not an address"})[1]["code"] == "bad_email"
     code, body = _owner(svc, "/api/owner/alerts", {"action": "add", "address": " third@example.com "})
     assert code == 200 and svc.sns.calls == [("subscribe", _TOPIC, "email", "third@example.com")]
-    assert svc.ssm.values["alert_email"] == "third@example.com" and svc.ssm.puts == ["alert_email"]
+    assert svc.ssm.puts == []   # the subscriptions are the record; alert_email stays CloudShell's
     assert {"address": "third@example.com", "confirmed": False, "id": None} in body["alerts"]
     # only a confirmed subscription of this topic, and never the last one
     for sub in (None, "PendingConfirmation", "arn:aws:sns:ap-southeast-2:123456789012:other-topic:00000001"):

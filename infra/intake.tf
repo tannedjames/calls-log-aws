@@ -106,7 +106,7 @@ data "aws_iam_policy_document" "intake" {
   statement {
     sid     = "OwnerChangesSettings"
     actions = ["ssm:PutParameter"]
-    resources = [for name in ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "alert_email", "name_prefixes"] :
+    resources = [for name in ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "name_prefixes"] :
     "arn:aws:ssm:${var.region}:${var.account_id}:parameter/calls-log/${name}"]
   }
 
