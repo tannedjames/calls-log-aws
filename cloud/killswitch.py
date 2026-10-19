@@ -60,6 +60,40 @@ def stop_runner(lambda_client: Any, function_name: str) -> List[Dict[str, str]]:
         kwargs["Marker"] = page["NextMarker"]
 
 
+def _mappings(lambda_client: Any, function_name: str) -> List[Dict[str, Any]]:
+    found: List[Dict[str, Any]] = []
+    kwargs: Dict[str, Any] = {"FunctionName": function_name}
+    while True:
+        page = lambda_client.list_event_source_mappings(**kwargs)
+        found += page.get("EventSourceMappings", [])
+        if not page.get("NextMarker"):
+            return found
+        kwargs["Marker"] = page["NextMarker"]
+
+
+def runner_state(lambda_client: Any, function_name: str) -> str:
+    """"running", "stopped", "changing" (a trigger is between states) or "missing" (no trigger)."""
+    states = [m.get("State") for m in _mappings(lambda_client, function_name)]
+    if not states:
+        return "missing"
+    if any(s not in ("Enabled", "Disabled") for s in states):
+        return "changing"
+    return "running" if all(s == "Enabled" for s in states) else "stopped"
+
+
+def start_runner(lambda_client: Any, function_name: str) -> List[Dict[str, str]]:
+    """
+    Turn the runner's queue triggers back on (the Owner's choice, from the
+    upload page or the runbook). Returns one {"uuid", "was"} per trigger turned on.
+    """
+    started: List[Dict[str, str]] = []
+    for mapping in _mappings(lambda_client, function_name):
+        if mapping.get("State") in ("Disabled", "Disabling"):
+            lambda_client.update_event_source_mapping(UUID=mapping["UUID"], Enabled=True)
+            started.append({"uuid": mapping["UUID"], "was": mapping["State"]})
+    return started
+
+
 def stop_intake(lambda_client: Any, function_name: str) -> int:
     """Throttle the upload page to nothing; returns the reserved concurrency it had (-1: none)."""
     try:
