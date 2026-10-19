@@ -681,7 +681,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     passphrase = ""; ownerPass = ""; ownerData = null; timingsData = null;
     session++; busy = false; batch = [];          // a running Upload or Ready stops; nothing carries over
     $("picker").value = ""; $("picker").disabled = false;
-    say("batch-msg", ""); draw();
+    say("batch-msg", ""); $("to-status").classList.add("hidden"); draw();
     ["app", "tabs", "signout"].forEach(id => $(id).classList.add("hidden"));
     $("login").classList.remove("hidden");
     say("login-msg", m || "", m ? "bad" : "");
@@ -806,9 +806,11 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     draw();
     const asked = batch.filter(b => !b.reason);
     if (!asked.length) return;
+    const mine = batch;                        // a sign-out or a new pick meanwhile drops this answer
     try {
       const res = await api("/api/check", {folders: asked.map(b => ({folder: b.folder,
         files: b.files.map(x => ({name: x.name, size: x.size}))}))});
+      if (batch !== mine) return;
       res.folders.forEach((r, i) => {
         const b = asked[i];
         if (r.ok) { b.state = {k: "accepted"}; b.images = r.images; b.ignored = r.ignored; }
@@ -817,7 +819,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       const good = batch.filter(b => b.state && b.state.k === "accepted").length;
       say("batch-msg", {k: good < batch.length ? "n_ok_some" : "n_ok", a: {good: good, all: batch.length}}, good ? "" : "bad");
     } catch (e) {
-      if (lockedOut(e)) return;
+      if (lockedOut(e) || batch !== mine) return;
       asked.forEach(b => { b.state = null; b.reason = e; });
       say("batch-msg", e, "bad");
     }
@@ -884,6 +886,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
           draw();
         }
       }
+      if (mine !== session) return;
       say("batch-msg", failed ? {k: "n_failed_up", a: {n: failed}} : {k: "click_ready"}, failed ? "bad" : "ok");
     } finally {
       if (mine === session) { busy = false; $("picker").disabled = false; draw(); }
@@ -908,6 +911,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     } finally {
       if (mine === session) { busy = false; draw(); }
     }
+    if (mine !== session) return;
     // "You can close this page" only once no uploaded folder still waits for Ready.
     const left = batch.some(b => b.state && b.state.k === "uploaded");
     say("batch-msg", refused ? {k: "n_not_ready", a: {n: refused}} : {k: left ? "click_ready" : "queued_msg"},
@@ -1054,17 +1058,19 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   $("owner-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const candidate = $("opass").value;     // becomes ownerPass only once the server accepts it
+    const mine = session;                    // ...and only if nobody signed out meanwhile
     say("owner-msg", {k: "checking"});
     try {
       const hello = await call("/api/owner/hello", {}, {"x-calls-log-owner": candidate});
+      if (mine !== session) return;
       ownerPass = candidate; ownerData = hello;
       if (statusData) statusData.syncEnabled = hello.syncEnabled;   // fresh now; later refreshes own it
       $("opass").value = "";
-      say("owner-msg", "");
+      say("owner-msg", ""); say("runner-msg", "");
       renderOwner(); renderStatus(); renderSheets();
       showTimings();
     } catch (e) {
-      if (!lockedOut(e)) say("owner-msg", e, "bad");
+      if (mine === session && !lockedOut(e)) say("owner-msg", e, "bad");
     }
   });
 
@@ -1089,7 +1095,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       say("runner-msg", "");
       renderOwner();
     } catch (e) {
-      if (!ownerLockedOut(e, "runner-msg")) say("runner-msg", e, "bad");
+      if (!ownerLockedOut(e)) say("runner-msg", e, "bad");
     }
   }
   $("runner-stop").addEventListener("click", () => runner("stop"));
@@ -1137,7 +1143,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       say("tm-msg", "");
       renderTimings();
     } catch (e) {
-      if (!ownerLockedOut(e, "tm-msg")) say("tm-msg", e, "bad");
+      if (!ownerLockedOut(e)) say("tm-msg", e, "bad");
     }
   }
   $("tm-show").addEventListener("click", showTimings);
