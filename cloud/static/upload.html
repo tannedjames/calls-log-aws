@@ -52,7 +52,7 @@ h3 { font-size: 15px; margin: 0 0 6px; }
 p { margin: 0 0 12px; }
 .muted { color: var(--muted); font-size: 13.5px; }
 label.field { display: block; color: var(--muted); font-size: 13px; font-weight: 600; margin-bottom: 5px; }
-input[type=password], input[type=text], input[type=date], select {
+input[type=password], input[type=text], input[type=date], select, textarea {
   font: inherit; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--bg); color: var(--text); width: 100%; max-width: 340px; }
 input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -99,6 +99,13 @@ td.pd span { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 progress { width: 120px; height: 8px; vertical-align: middle; accent-color: var(--accent); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
 .grid .card { margin: 0; }
+.grid .card.wide { grid-column: 1 / -1; }
+textarea { max-width: none; resize: vertical; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+ul.plain { list-style: none; margin: 0 0 12px; padding: 0; }
+ul.plain li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 0;
+              border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+ul.plain li:last-child { border-bottom: 0; }
+ul.plain li span.addr { flex: 1; min-width: 10em; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 12px; }
 .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
 .stat b { display: block; font-size: 20px; }
@@ -109,7 +116,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
 @media (max-width: 560px) {
   .card { padding: 16px; }
   .brand small { display: none; }
-  input[type=password], input[type=text], input[type=date], select { max-width: none; }
+  input[type=password], input[type=text], input[type=date], select, textarea { max-width: none; }
 }
 </style>
 </head>
@@ -226,8 +233,13 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
           </div>
           <div class="card">
             <h3 data-i18n="sync_title">Sync to Google Sheets</h3>
-            <div class="row center"><span class="pill" id="osync-pill"><span class="dot"></span><span id="osync">?</span></span></div>
-            <p class="muted msg" data-i18n="sync_help_ro">With sync on, each finished folder writes its day into the employee's Google Sheet. To change it, in CloudShell: python3 tools/put_parameters.py --sync-enabled true (or false).</p>
+            <p class="muted" data-i18n="sync_help">With sync on, each finished folder writes its day into the employee's Google Sheet. A change applies from the next folder.</p>
+            <div class="row center">
+              <span class="pill" id="osync-pill"><span class="dot"></span><span id="osync">?</span></span>
+              <button type="button" id="sync-on" class="small" data-i18n="sync_turn_on">Turn on</button>
+              <button type="button" id="sync-off" class="danger small" data-i18n="sync_turn_off">Turn off</button>
+            </div>
+            <p id="sync-msg" class="msg" role="status"></p>
           </div>
           <div class="card">
             <h3 data-i18n="tm_title">Timings</h3>
@@ -238,6 +250,42 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
             </div>
             <div id="tm-out"></div>
             <p id="tm-msg" class="msg" role="status"></p>
+          </div>
+          <div class="card">
+            <h3 data-i18n="pw_title">Passwords</h3>
+            <p class="muted" data-i18n="pw_help">At least 12 characters, no accents.</p>
+            <form id="pw-form" class="stack">
+              <div><label class="field" for="pw-which" data-i18n="pw_which">Which</label>
+                <select id="pw-which"><option value="upload" data-i18n="pw_upload">Upload passphrase</option><option value="owner" data-i18n="pw_owner">Owner password</option></select></div>
+              <div><label class="field" for="pw-new" data-i18n="pw_new">New password</label>
+                <input id="pw-new" type="password" autocomplete="new-password" required></div>
+              <div><label class="field" for="pw-again" data-i18n="pw_again">Type it again</label>
+                <input id="pw-again" type="password" autocomplete="new-password" required></div>
+              <button type="submit" data-i18n="save">Save</button>
+            </form>
+            <p id="pw-msg" class="msg" role="status"></p>
+          </div>
+          <div class="card">
+            <h3 data-i18n="al_title">Alert emails</h3>
+            <p class="muted" data-i18n="al_help">AWS emails these addresses when something needs you.</p>
+            <ul id="al-list" class="plain"></ul>
+            <form id="al-form" class="row">
+              <div><label class="field" for="al-new" data-i18n="al_new">Add an address</label>
+                <input id="al-new" type="text" inputmode="email" autocomplete="email" required></div>
+              <button type="submit" class="small" data-i18n="add">Add</button>
+            </form>
+            <p id="al-msg" class="msg" role="status"></p>
+          </div>
+          <div class="card wide">
+            <h3 data-i18n="em_title">Employees</h3>
+            <p class="muted" data-i18n="em_help">One name per line.</p>
+            <label class="sr-only" for="em-list" data-i18n="em_title">Employees</label>
+            <textarea id="em-list" rows="8" spellcheck="false" autocomplete="off"></textarea>
+            <div class="row center actions">
+              <button type="button" id="em-save" data-i18n="save">Save</button>
+              <span id="em-count" class="muted"></span>
+            </div>
+            <p id="em-msg" class="msg" role="status"></p>
           </div>
         </div>
       </div>
@@ -337,7 +385,44 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     confirm_stop: "Stop AWS processing? Queued folders wait until you start it again.",
     confirm_start: "Start AWS processing again? If a safety stop turned it off, find the cause first.",
     sync_title: "Sync to Google Sheets",
-    sync_help_ro: "With sync on, each finished folder writes its day into the employee's Google Sheet. To change it, in CloudShell: python3 tools/put_parameters.py --sync-enabled true (or false).",
+    sync_help: "With sync on, each finished folder writes its day into the employee's Google Sheet. A change applies from the next folder.",
+    sync_turn_on: "Turn on",
+    sync_turn_off: "Turn off",
+    confirm_sync_on: "Turn sync on? From the next folder, AWS writes each finished day into the employee's Google Sheet, over that day's tab.",
+    confirm_sync_off: "Turn sync off? Folders are still processed and stored, but nothing is written to the Sheets.",
+    sync_now_on: "Sync is on.",
+    sync_now_off: "Sync is off.",
+    pw_title: "Passwords",
+    pw_help: "At least 12 characters, letters without accents. The upload passphrase and the owner password must differ. The old one stops working within 5 minutes.",
+    pw_which: "Which",
+    pw_upload: "Upload passphrase",
+    pw_owner: "Owner password",
+    pw_new: "New password",
+    pw_again: "Type it again",
+    pw_mismatch: "The two don't match.",
+    confirm_pw_upload: "Change the upload passphrase? Everyone who uploads needs the new one.",
+    confirm_pw_owner: "Change the owner password?",
+    pw_upload_done: "Saved. Give the new passphrase to whoever uploads.",
+    pw_owner_done: "Saved. Use the new owner password from now on.",
+    save: "Save",
+    saving: "Saving…",
+    al_title: "Alert emails",
+    al_help: "AWS emails these addresses when a folder fails 3 times, AWS stops itself, or the budget is nearly used. A new address must click the link in the email AWS sends.",
+    al_new: "Add an address",
+    add: "Add",
+    remove: "Remove",
+    al_confirmed: "Confirmed",
+    al_pending: "Waiting for confirmation",
+    al_unknown: "The address list couldn't be read.",
+    al_none: "No address gets the alerts.",
+    al_added: "Added. Open the email AWS sends and click Confirm subscription.",
+    al_removed: "Removed.",
+    confirm_al_remove: "Stop sending alerts to {address}?",
+    em_title: "Employees",
+    em_help: "One name per line, in the Web App's order; saved in lower case without accents. If one name starts with another, put the longer one first. A new person also needs a line in Employees.gs in Apps Script.",
+    em_count: "{n} names",
+    confirm_em: "Save the list of {n} names? Folders of anyone not on it are refused.",
+    em_saved: "Saved {n} names.",
     tm_title: "Timings",
     tm_period: "Period",
     days_1: "Last 24 hours",
@@ -398,6 +483,27 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     e_bad_action: "Unknown action.",
     e_runner_failed: "AWS didn't answer; try again in a minute.",
     e_days_range: "Choose 1 to {max} days.",
+    e_bad_switch: "Choose on or off.",
+    e_bad_which: "Choose which password.",
+    e_password_short: "Use at least {min} characters.",
+    e_password_spaces: "No spaces at the start or the end.",
+    e_password_accents: "Use letters without accents, digits and symbols only: a browser can't send accented letters.",
+    e_password_weak: "That password isn't allowed.",
+    e_same_as_other: "Keep the upload passphrase and the owner password different.",
+    e_save_failed: "AWS didn't save it. Try again in a minute.",
+    e_no_topic: "There is no alert topic to manage.",
+    e_alerts_failed: "AWS didn't change the alert addresses. Try again in a minute.",
+    e_bad_action_alerts: "Choose add or remove.",
+    e_not_confirmed: "Only a confirmed address can be removed; an unconfirmed one expires by itself after 3 days.",
+    e_last_alert: "Add another address first: this one is the only one that gets the alerts.",
+    e_employees_invalid: "The list must be names, one per line.",
+    e_employees_empty: "The list is empty.",
+    e_employees_many: "At most {max} names.",
+    e_employee_blank: "Line {line} is empty.",
+    e_employee_long: "Line {line} is longer than {max} characters.",
+    e_employee_twice: "{name} is listed twice.",
+    e_prefix_clash: "{first} comes first and also matches {later}, so {later} would never be reached: put {later} above it.",
+    e_bad_email: "That isn't an email address.",
     e_no_upload: "No stored upload for that day.",
     e_not_requeueable: "It is {status}; only a Done, Failed or Parked folder can run again.",
     e_images_gone: "Only {arrived} of its {declared} images are still stored (kept 30 days); upload the folder again instead.",
@@ -492,7 +598,44 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     confirm_stop: "Dừng xử lý trên AWS? Thư mục trong hàng chờ sẽ đợi đến khi bạn chạy lại.",
     confirm_start: "Chạy lại xử lý trên AWS? Nếu nó bị dừng tự động vì an toàn, hãy tìm nguyên nhân trước.",
     sync_title: "Đồng bộ Google Sheets",
-    sync_help_ro: "Khi bật đồng bộ, mỗi thư mục xử lý xong sẽ ghi ngày đó vào Google Sheet của nhân viên. Để thay đổi, trong CloudShell: python3 tools/put_parameters.py --sync-enabled true (hoặc false).",
+    sync_help: "Khi bật đồng bộ, mỗi thư mục xử lý xong sẽ ghi ngày đó vào Google Sheet của nhân viên. Thay đổi áp dụng từ thư mục tiếp theo.",
+    sync_turn_on: "Bật",
+    sync_turn_off: "Tắt",
+    confirm_sync_on: "Bật đồng bộ? Từ thư mục tiếp theo, AWS sẽ ghi mỗi ngày xử lý xong vào Google Sheet của nhân viên, ghi đè tab của ngày đó.",
+    confirm_sync_off: "Tắt đồng bộ? Thư mục vẫn được xử lý và lưu, nhưng không ghi gì vào Google Sheets.",
+    sync_now_on: "Đã bật đồng bộ.",
+    sync_now_off: "Đã tắt đồng bộ.",
+    pw_title: "Mật khẩu",
+    pw_help: "Ít nhất 12 ký tự, chữ không dấu. Mật khẩu tải lên và mật khẩu quản lý phải khác nhau. Mật khẩu cũ hết hiệu lực trong vòng 5 phút.",
+    pw_which: "Loại",
+    pw_upload: "Mật khẩu tải lên",
+    pw_owner: "Mật khẩu quản lý",
+    pw_new: "Mật khẩu mới",
+    pw_again: "Nhập lại",
+    pw_mismatch: "Hai lần nhập không khớp.",
+    confirm_pw_upload: "Đổi mật khẩu tải lên? Mọi người tải lên đều cần mật khẩu mới.",
+    confirm_pw_owner: "Đổi mật khẩu quản lý?",
+    pw_upload_done: "Đã lưu. Hãy báo mật khẩu mới cho người tải lên.",
+    pw_owner_done: "Đã lưu. Từ giờ hãy dùng mật khẩu quản lý mới.",
+    save: "Lưu",
+    saving: "Đang lưu…",
+    al_title: "Email cảnh báo",
+    al_help: "AWS gửi email đến các địa chỉ này khi một thư mục lỗi 3 lần, AWS tự dừng, hoặc ngân sách sắp hết. Địa chỉ mới phải bấm liên kết trong email AWS gửi.",
+    al_new: "Thêm địa chỉ",
+    add: "Thêm",
+    remove: "Xoá",
+    al_confirmed: "Đã xác nhận",
+    al_pending: "Chờ xác nhận",
+    al_unknown: "Không đọc được danh sách địa chỉ.",
+    al_none: "Chưa có địa chỉ nào nhận cảnh báo.",
+    al_added: "Đã thêm. Hãy mở email AWS gửi và bấm Confirm subscription.",
+    al_removed: "Đã xoá.",
+    confirm_al_remove: "Ngừng gửi cảnh báo đến {address}?",
+    em_title: "Nhân viên",
+    em_help: "Mỗi dòng một tên, theo thứ tự của Web App; được lưu bằng chữ thường, không dấu. Nếu một tên bắt đầu bằng tên khác, hãy đặt tên dài hơn lên trước. Người mới cũng cần thêm một dòng trong Employees.gs trên Apps Script.",
+    em_count: "{n} tên",
+    confirm_em: "Lưu danh sách {n} tên? Thư mục của người không có trong danh sách sẽ bị từ chối.",
+    em_saved: "Đã lưu {n} tên.",
     tm_title: "Thời gian xử lý",
     tm_period: "Khoảng thời gian",
     days_1: "24 giờ qua",
@@ -553,6 +696,27 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     e_bad_action: "Thao tác không hợp lệ.",
     e_runner_failed: "AWS không phản hồi; hãy thử lại sau một phút.",
     e_days_range: "Hãy chọn từ 1 đến {max} ngày.",
+    e_bad_switch: "Hãy chọn bật hoặc tắt.",
+    e_bad_which: "Hãy chọn loại mật khẩu.",
+    e_password_short: "Hãy dùng ít nhất {min} ký tự.",
+    e_password_spaces: "Không để khoảng trắng ở đầu hoặc cuối.",
+    e_password_accents: "Chỉ dùng chữ không dấu, số và ký hiệu: trình duyệt không gửi được chữ có dấu.",
+    e_password_weak: "Mật khẩu này không được phép.",
+    e_same_as_other: "Mật khẩu tải lên và mật khẩu quản lý phải khác nhau.",
+    e_save_failed: "AWS không lưu được. Hãy thử lại sau một phút.",
+    e_no_topic: "Không có chủ đề cảnh báo để quản lý.",
+    e_alerts_failed: "AWS không thay đổi được địa chỉ cảnh báo. Hãy thử lại sau một phút.",
+    e_bad_action_alerts: "Hãy chọn thêm hoặc xoá.",
+    e_not_confirmed: "Chỉ xoá được địa chỉ đã xác nhận; địa chỉ chưa xác nhận sẽ tự hết hạn sau 3 ngày.",
+    e_last_alert: "Hãy thêm địa chỉ khác trước: đây là địa chỉ duy nhất nhận cảnh báo.",
+    e_employees_invalid: "Danh sách phải là các tên, mỗi dòng một tên.",
+    e_employees_empty: "Danh sách trống.",
+    e_employees_many: "Tối đa {max} tên.",
+    e_employee_blank: "Dòng {line} trống.",
+    e_employee_long: "Dòng {line} dài hơn {max} ký tự.",
+    e_employee_twice: "{name} bị ghi hai lần.",
+    e_prefix_clash: "{first} đứng trước và cũng khớp với {later}, nên {later} sẽ không bao giờ được dùng: hãy đặt {later} lên trên.",
+    e_bad_email: "Đây không phải địa chỉ email.",
     e_no_upload: "Không có lần tải lên nào được lưu cho ngày đó.",
     e_not_requeueable: "Đang ở trạng thái {status}; chỉ thư mục Xong, Thất bại hoặc Dừng sau 3 lần thử mới chạy lại được.",
     e_images_gone: "Chỉ còn {arrived}/{declared} ảnh được lưu (giữ 30 ngày); hãy tải lại thư mục.",
@@ -571,6 +735,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   let limits = {maxImages: 50, maxImageMb: 15};
   let batch = [];                 // {folder, files, images, state:{k,a}|null, reason, ignored, upload, failed}
   let statusData = null, sheetsData = null, ownerData = null, timingsData = null;
+  let ownerSettings = null;        // {employees, alerts} for the Owner tab's settings cards
   let busy = false;                // an Upload or Ready loop is running: both buttons stay off
   let session = 0;                 // bumped at sign-out, so a running loop stops
   let ownerGen = 0;                // bumped at sign-out and Lock, so a late owner answer is dropped
@@ -619,7 +784,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     document.querySelectorAll("[data-lang]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.lang === lang)));
     $("up-help").textContent = t("up_help", {max: limits.maxImages, mb: limits.maxImageMb});
     Object.keys(msgs).forEach(paint);
-    draw(); renderStatus(); renderSheets(); renderOwner(); renderTimings();
+    draw(); renderStatus(); renderSheets(); renderOwner(); renderTimings(); renderSettings();
   }
   function setLanguage(l) {
     lang = WORDS[l] ? l : "en";
@@ -687,6 +852,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     ["app", "tabs", "signout"].forEach(id => $(id).classList.add("hidden"));
     $("login").classList.remove("hidden");
     say("login-msg", m || "", m ? "bad" : "");
+    forgetSettings();
     renderOwner(); renderTimings();
   }
   $("signout").addEventListener("click", () => signOut());
@@ -930,6 +1096,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     const cls = on === true ? "pill ok" : on === false ? "pill warn" : "pill";
     $("sync").textContent = word; $("sync-pill").className = cls;
     $("osync").textContent = word; $("osync-pill").className = cls;
+    $("sync-on").disabled = on === true; $("sync-off").disabled = on === false;
   }
 
   function actionButton(label, onClick, cls) {
@@ -1058,6 +1225,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     ownerGen++;
     ownerPass = ""; ownerData = null; timingsData = null;
     say("owner-msg", m || "", m ? "bad" : "");
+    forgetSettings();
     renderOwner(); renderStatus(); renderSheets(); renderTimings();
   }
   $("owner-lock").addEventListener("click", () => lockOwner());
@@ -1076,6 +1244,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       say("owner-msg", ""); say("runner-msg", "");
       renderOwner(); renderStatus(); renderSheets();
       showTimings();
+      loadSettings();
     } catch (e) {
       if (mine === ownerGen && !lockedOut(e)) say("owner-msg", e, "bad");
     }
@@ -1159,6 +1328,109 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     }
   }
   $("tm-show").addEventListener("click", showTimings);
+
+  // ----- the Owner tab's settings: sync, passwords, alert emails, employees -----
+  function forgetSettings() {
+    ownerSettings = null;
+    $("em-list").value = ""; $("pw-new").value = ""; $("pw-again").value = ""; $("al-new").value = "";
+    ["sync-msg", "pw-msg", "al-msg", "em-msg"].forEach(id => say(id, ""));
+    renderSettings();
+  }
+  function renderSettings() {
+    const list = $("al-list");
+    list.textContent = "";
+    $("em-count").textContent = ownerSettings ? t("em_count", {n: ownerSettings.employees.length}) : "";
+    if (!ownerSettings) return;
+    const alerts = ownerSettings.alerts;
+    const note = (k) => { const li = document.createElement("li"); li.className = "muted"; li.textContent = t(k); list.appendChild(li); };
+    if (alerts == null) { note("al_unknown"); return; }
+    if (!alerts.length) { note("al_none"); return; }
+    for (const a of alerts) {
+      const li = document.createElement("li");
+      const addr = document.createElement("span"); addr.className = "addr"; addr.textContent = a.address;
+      li.appendChild(addr);
+      li.appendChild(badge(t(a.confirmed ? "al_confirmed" : "al_pending"), a.confirmed ? "b-ok" : "b-warn"));
+      if (a.confirmed && a.id) li.appendChild(actionButton(t("remove"), () => removeAlert(a)));
+      list.appendChild(li);
+    }
+  }
+  async function loadSettings() {
+    const mine = ownerGen;
+    try {
+      const got = await ownerApi("/api/owner/settings");
+      if (mine !== ownerGen) return;
+      ownerSettings = {employees: got.employees, alerts: got.alerts};
+      $("em-list").value = got.employees.join("\n");
+      if (statusData) statusData.syncEnabled = got.syncEnabled;
+      renderStatus(); renderSettings();
+    } catch (e) {
+      if (mine === ownerGen && !ownerLockedOut(e)) say("em-msg", e, "bad");
+    }
+  }
+  // One owner write: drop the answer if the tab was locked or signed out meanwhile.
+  async function ownerWrite(path, body, where, done) {
+    const mine = ownerGen;
+    say(where, {k: "saving"});
+    try {
+      const got = await ownerApi(path, body);
+      if (mine !== ownerGen) return;
+      done(got);
+    } catch (e) {
+      if (mine === ownerGen && !ownerLockedOut(e)) say(where, e, "bad");
+    }
+  }
+
+  function setSync(on) {
+    if (!window.confirm(t(on ? "confirm_sync_on" : "confirm_sync_off"))) return;
+    ownerWrite("/api/owner/sync", {on: on}, "sync-msg", (got) => {
+      if (statusData) statusData.syncEnabled = got.syncEnabled;
+      renderStatus();
+      say("sync-msg", {k: got.syncEnabled ? "sync_now_on" : "sync_now_off"}, "ok");
+    });
+  }
+  $("sync-on").addEventListener("click", () => setSync(true));
+  $("sync-off").addEventListener("click", () => setSync(false));
+
+  $("pw-form").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const which = $("pw-which").value, fresh = $("pw-new").value;
+    if (fresh !== $("pw-again").value) { say("pw-msg", {k: "pw_mismatch"}, "bad"); return; }
+    if (!window.confirm(t(which === "upload" ? "confirm_pw_upload" : "confirm_pw_owner"))) return;
+    ownerWrite("/api/owner/password", {which: which, new: fresh}, "pw-msg", () => {
+      if (which === "upload") passphrase = fresh; else ownerPass = fresh;   // this page keeps working
+      $("pw-new").value = ""; $("pw-again").value = "";
+      say("pw-msg", {k: which === "upload" ? "pw_upload_done" : "pw_owner_done"}, "ok");
+    });
+  });
+
+  $("al-form").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    ownerWrite("/api/owner/alerts", {action: "add", address: $("al-new").value}, "al-msg", (got) => {
+      if (ownerSettings) ownerSettings.alerts = got.alerts;
+      $("al-new").value = "";
+      renderSettings();
+      say("al-msg", {k: "al_added"}, "ok");
+    });
+  });
+  function removeAlert(a) {
+    if (!window.confirm(t("confirm_al_remove", {address: a.address}))) return;
+    ownerWrite("/api/owner/alerts", {action: "remove", id: a.id}, "al-msg", (got) => {
+      if (ownerSettings) ownerSettings.alerts = got.alerts;
+      renderSettings();
+      say("al-msg", {k: "al_removed"}, "ok");
+    });
+  }
+
+  $("em-save").addEventListener("click", () => {
+    const names = $("em-list").value.split("\n").map(x => x.trim()).filter(x => x);   // blank lines dropped
+    if (!window.confirm(t("confirm_em", {n: names.length}))) return;
+    ownerWrite("/api/owner/employees", {names: names}, "em-msg", (got) => {
+      if (ownerSettings) ownerSettings.employees = got.employees;
+      $("em-list").value = got.employees.join("\n");   // as saved: lower case, no accents
+      renderSettings();
+      say("em-msg", {k: "em_saved", a: {n: got.employees.length}}, "ok");
+    });
+  });
 
   // ----- start: the language remembered, else the browser's -----
   let saved = null;

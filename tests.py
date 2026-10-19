@@ -3654,3 +3654,206 @@ def test_page_stays_inside_its_csp():
     assert len(_re.findall(r"<script>", page)) == 1 and len(_re.findall(r"<style>", page)) == 1
     assert " style=" not in page and "javascript:" not in page and "<script src" not in page
     assert not _re.search(r"https?://", page), "the page loads nothing from elsewhere"
+
+
+# ----- the Owner tab's settings (Story 4.5 part B) ------------------------------------------
+
+from cloud import owner_settings as osettings  # noqa: E402
+
+_TOPIC = "arn:aws:sns:ap-southeast-2:123456789012:calls-log-alerts"
+
+
+class _WritableSsm(_FakeSsm):
+    """The settings store, writable for the five Owner-tab names only (as the policy allows)."""
+
+    def __init__(self, values, switch="false"):
+        super().__init__(dict(values), switch)
+        self.puts = []
+
+    def put_parameter(self, Name, Value, Type, Overwrite):
+        name = Name.removeprefix("/calls-log/")
+        assert name in osettings.WRITABLE and Type == "SecureString" and Overwrite is True, Name
+        self.puts.append(name)
+        if name == "sync_enabled":
+            self.switch = Value
+        else:
+            self.values[name] = Value
+
+
+class _AlertsSns:
+    def __init__(self, subs):
+        self.subs, self.calls = list(subs), []
+
+    def list_subscriptions_by_topic(self, TopicArn, NextToken=None):
+        assert TopicArn == _TOPIC
+        half = len(self.subs) // 2   # two pages, to cover NextToken
+        if NextToken is None:
+            return {"Subscriptions": self.subs[:half], "NextToken": "next"}
+        return {"Subscriptions": self.subs[half:]}
+
+    def subscribe(self, TopicArn, Protocol, Endpoint):
+        self.calls.append(("subscribe", TopicArn, Protocol, Endpoint))
+        self.subs.append({"Protocol": Protocol, "Endpoint": Endpoint, "SubscriptionArn": "PendingConfirmation"})
+
+    def unsubscribe(self, SubscriptionArn):
+        self.calls.append(("unsubscribe", SubscriptionArn))
+        self.subs = [s for s in self.subs if s["SubscriptionArn"] != SubscriptionArn]
+
+
+def _sub(address, n=None):
+    return {"Protocol": "email", "Endpoint": address,
+            "SubscriptionArn": f"{_TOPIC}:0000000{n}" if n is not None else "PendingConfirmation"}
+
+
+def _settings_intake(subs=None):
+    svc, _, _ = _owner_intake()
+    svc.ssm = _WritableSsm(dict(_IN_VALUES, owner_passphrase_hash=_OWNER_HASH))
+    svc.settings = dataclasses.replace(svc.settings, alerts_topic_arn=_TOPIC)
+    svc.sns = _AlertsSns(subs if subs is not None else [_sub("owner@example.com", 1), _sub("new@example.com")])
+    return svc
+
+
+def test_owner_tab_writes_only_its_five_settings_and_the_infra_says_the_same():
+    assert set(osettings.WRITABLE) == {"sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash",
+                                       "alert_email", "name_prefixes"}
+    lists = []
+    for tf in ("infra/intake.tf", "infra/bootstrap/main.tf"):
+        text = Path(tf).read_text(encoding="utf-8")
+        lists += [set(_re.findall(r'"(\w+)"', m)) for m in _re.findall(r'\[("sync_enabled"[^\]]*)\]', text)]
+    assert len(lists) == 2 and all(found == set(osettings.WRITABLE) for found in lists), lists
+    svc = _settings_intake()
+    try:
+        intake._put(svc, "webapp_url", "https://example.com")
+        raise AssertionError("webapp_url was written")
+    except RuntimeError:
+        pass
+    assert svc.ssm.puts == []
+
+
+def test_owner_settings_show_the_switch_the_employees_and_the_alert_addresses():
+    svc = _settings_intake()
+    code, body = _owner(svc, "/api/owner/settings")
+    assert code == 200 and body["syncEnabled"] is False and body["employees"] == ["nguyen van a", "tran thi b"]
+    assert body["alerts"] == [
+        {"address": "owner@example.com", "confirmed": True, "id": f"{_TOPIC}:00000001"},
+        {"address": "new@example.com", "confirmed": False, "id": None}]
+    assert svc.ssm.puts == []
+
+
+def test_owner_turns_the_sync_switch_on_and_off():
+    svc = _settings_intake()
+    code, body = _owner(svc, "/api/owner/sync", {"on": True})
+    assert code == 200 and body["syncEnabled"] is True and svc.ssm.switch == "true"
+    code, body = _owner(svc, "/api/owner/sync", {"on": False})
+    assert code == 200 and body["syncEnabled"] is False and svc.ssm.switch == "false"
+    for bad in ("true", 1, None):
+        assert _owner(svc, "/api/owner/sync", {"on": bad})[1]["code"] == "bad_switch"
+    assert svc.ssm.puts == ["sync_enabled", "sync_enabled"]
+
+
+def test_owner_changes_a_password_only_to_a_strong_and_different_one():
+    svc = _settings_intake()
+    for new, why in (("short", "password_short"), (" " + _OWNER + "x", "password_spaces"),
+                     ("Mật khẩu quản lý 2026", "password_accents"), (None, "password_short")):
+        assert _owner(svc, "/api/owner/password", {"which": "owner", "new": new})[1]["code"] == why
+    assert _owner(svc, "/api/owner/password", {"which": "boss", "new": "a fine new one 2026"})[1]["code"] == "bad_which"
+    # the upload passphrase can't become the owner password, nor the other way round
+    assert _owner(svc, "/api/owner/password", {"which": "owner", "new": _PASS})[1]["code"] == "same_as_other"
+    assert _owner(svc, "/api/owner/password", {"which": "upload", "new": _OWNER})[1]["code"] == "same_as_other"
+    assert svc.ssm.puts == []
+    intake._services = object()   # stands for this container's cached settings
+    code, body = _owner(svc, "/api/owner/password", {"which": "upload", "new": "a fine new one 2026"})
+    assert code == 200 and svc.ssm.puts == ["intake_passphrase_hash"] and intake._services is None
+    assert cpass.verify("a fine new one 2026", svc.ssm.values["intake_passphrase_hash"])
+    assert not cpass.verify(_PASS, svc.ssm.values["intake_passphrase_hash"])
+
+
+def test_a_password_changed_elsewhere_works_after_one_reread():
+    svc = _settings_intake()
+    fresh = _settings_intake()
+    fresh.settings = dataclasses.replace(fresh.settings, owner_passphrase_hash=cpass.hash_passphrase(
+        "the new owner one", iterations=1000))
+    event = {"rawPath": "/api/owner/hello", "requestContext": {"http": {"method": "POST"}},
+             "headers": {"x-calls-log-owner": "the new owner one"}, "body": "{}"}
+    asked = []
+    res = intake.handle(event, lambda: svc, reload=lambda: asked.append(1) or fresh)
+    assert res["statusCode"] == 200 and asked == [1]
+    res = intake.handle(event, lambda: svc, reload=lambda: None)   # read too recently: refused as before
+    assert res["statusCode"] == 403
+    # a request that passes never re-reads
+    event["headers"] = {"x-calls-log-owner": _OWNER}
+    assert intake.handle(event, lambda: svc, reload=lambda: asked.append(2) or fresh)["statusCode"] == 200
+    assert asked == [1]
+
+
+def test_reread_happens_at_most_once_per_period():
+    before = (intake._services, intake._loaded_at)
+    try:
+        intake._services, intake._loaded_at = object(), 100.0
+        assert intake._reload(clock=lambda: 105.0) is None and intake._services is not None
+    finally:
+        intake._services, intake._loaded_at = before
+
+
+def test_employee_list_is_saved_the_way_the_web_app_keys_it():
+    assert osettings.employees(["  Nguyễn  Văn  An ", "Nguyen Van A", "TRẦN THỊ B"]) == [
+        "nguyen van an", "nguyen van a", "tran thi b"]
+    cases = [
+        ([], "employees_empty"), ("nguyen van a", "employees_invalid"), (["a", 3], "employees_invalid"),
+        (["nguyen van a", "  "], "employee_blank"), (["x" * 101], "employee_long"),
+        (["Trần Thị B", "tran thi b"], "employee_twice"),
+        (["nguyen van a", "nguyen van an"], "prefix_clash"),   # the first would also match the second
+        ([f"person {i:03}" for i in range(201)], "employees_many"),
+    ]
+    for names, code in cases:
+        try:
+            osettings.employees(names)
+            raise AssertionError(f"accepted {names!r}")
+        except osettings.Invalid as e:
+            assert e.code == code, (names, code, e.code)
+    svc = _settings_intake()
+    code, body = _owner(svc, "/api/owner/employees", {"names": ["nguyen van a", "nguyen van an"]})
+    assert code == 400 and body["code"] == "prefix_clash" and body["args"] == {
+        "first": "nguyen van a", "later": "nguyen van an"}
+    code, body = _owner(svc, "/api/owner/employees", {"names": ["Nguyen Van An", "Nguyen Van A", "Le Van C"]})
+    assert code == 200 and body["employees"] == ["nguyen van an", "nguyen van a", "le van c"]
+    assert json.loads(svc.ssm.values["name_prefixes"]) == body["employees"] and svc.ssm.puts == ["name_prefixes"]
+
+
+def test_owner_adds_and_removes_alert_addresses():
+    svc = _settings_intake([_sub("owner@example.com", 1), _sub("second@example.com", 2), _sub("waiting@example.com")])
+    assert _owner(svc, "/api/owner/alerts", {"action": "add", "address": "not an address"})[1]["code"] == "bad_email"
+    code, body = _owner(svc, "/api/owner/alerts", {"action": "add", "address": " third@example.com "})
+    assert code == 200 and svc.sns.calls == [("subscribe", _TOPIC, "email", "third@example.com")]
+    assert svc.ssm.values["alert_email"] == "third@example.com" and svc.ssm.puts == ["alert_email"]
+    assert {"address": "third@example.com", "confirmed": False, "id": None} in body["alerts"]
+    # only a confirmed subscription of this topic, and never the last one
+    for sub in (None, "PendingConfirmation", "arn:aws:sns:ap-southeast-2:123456789012:other-topic:00000001"):
+        assert _owner(svc, "/api/owner/alerts", {"action": "remove", "id": sub})[1]["code"] == "not_confirmed"
+    code, body = _owner(svc, "/api/owner/alerts", {"action": "remove", "id": f"{_TOPIC}:00000002"})
+    assert code == 200 and svc.sns.calls[-1] == ("unsubscribe", f"{_TOPIC}:00000002")
+    assert _owner(svc, "/api/owner/alerts", {"action": "remove", "id": f"{_TOPIC}:00000001"})[1]["code"] == "last_alert"
+    assert _owner(svc, "/api/owner/alerts", {"action": "list"})[1]["code"] == "bad_action_alerts"
+    svc.settings = dataclasses.replace(svc.settings, alerts_topic_arn="")
+    assert _owner(svc, "/api/owner/alerts", {"action": "add", "address": "x@example.com"})[1]["code"] == "no_topic"
+
+
+def test_owner_settings_never_reach_a_log_line():
+    svc = _settings_intake()
+    lines = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    keep = Keep()
+    intake.log.addHandler(keep)
+    try:
+        _owner(svc, "/api/owner/password", {"which": "owner", "new": "a brand new owner pw"})
+        _owner(svc, "/api/owner/employees", {"names": ["Pham Thi D", "Vo Van E"]})
+        _owner(svc, "/api/owner/alerts", {"action": "add", "address": "secret.person@example.com"})
+        _owner(svc, "/api/owner/alerts", {"action": "secret.person@example.com"})
+    finally:
+        intake.log.removeHandler(keep)
+    text = "\n".join(lines)
+    assert lines and not any(v in text for v in ("a brand new owner pw", "pham thi d", "Pham", "secret.person"))

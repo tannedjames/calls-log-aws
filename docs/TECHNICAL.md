@@ -41,6 +41,7 @@ above never import it.
 | `cloud/intake.py`, `cloud/static/upload.html` | The upload and status page behind a public URL: checks folders, hands out presigned uploads, marks them Ready, shows Folder Status and finds Day Sheets; its Owner tab re-runs and re-sends days, stops and starts the runner and shows timings (§11). English and Vietnamese. |
 | `cloud/passphrase.py` | The page's passphrase and owner password: PBKDF2 hashing and the constant-time check. |
 | `cloud/requeue.py`, `cloud/timing.py` | Shared by the PC tools and the Owner tab: the re-queue rule (`enqueue.py --requeue`) and the Ready→Done percentiles (`turnaround.py`). |
+| `cloud/owner_settings.py` | The five settings the Owner tab may write (never the Web App URL or its secret) and the rules a new employee list or alert address must pass (§11). |
 | `cloud/killswitch.py` | Called by a guardrail alarm: turns the runner's queue trigger off, or the upload page off for its own alarm, and emails the Owner (§11). Also the runner's state and start, for the Owner tab. |
 | `cloud/bench.py` | Story 3.1's benchmark function (only while `enable_bench` is on). |
 | `tools/enqueue.py` | From the PC: sends Folders to the AWS runner, or re-queues a stored one (§11). |
@@ -769,8 +770,10 @@ the server's refusals included (each carries a `code` the page looks up); the
 browser remembers the choice (`localStorage` key `calls-log-lang`, nothing
 else is stored).
 
-A new passphrase, owner password or employee list reaches the page within
-5 minutes.
+A new passphrase, owner password or employee list set in CloudShell reaches
+the page within 5 minutes. A password a person types that the page refuses
+makes it re-read the settings first (at most every 10 s), so a password just
+changed elsewhere works at once.
 
 ### The Owner tab
 
@@ -791,13 +794,18 @@ password stays in the open page only; Lock or reloading forgets it):
 | **Re-run** (Status tab, per row) | Runs the newest stored upload of that day again, if it is Done, Failed or Parked and all its images are still in `inbox/`; a Waiting upload is just queued again | `enqueue.py --requeue` (both call `cloud/requeue.py`) |
 | **Re-send to Sheet** (Day Sheets tab, per row) | Queues one re-send of that stored Day Sheet, **whatever the AWS Sync Switch says**, and overwrites the day's tab | `resync.py --name … --date …` for one day |
 | **AWS processing: Stop / Start** | Turns the runner's queue trigger off or on. Stopped: no new Run starts, queued Folders wait up to 14 days | "Stopping the runner by hand" and "Turning the runner back on" below |
-| **Sync to Google Sheets** | Shows the AWS Sync Switch; changing it is still `put_parameters.py --sync-enabled` | — |
+| **Sync to Google Sheets: Turn on / Turn off** | Writes the AWS Sync Switch; the next folder uses it | `put_parameters.py --sync-enabled` |
+| **Passwords** | A new upload passphrase or owner password, typed twice: at least 12 characters, no accents, never equal to the other one. The old one stops working within 5 minutes (at once in the copy of the page that saved it) | `put_parameters.py --passphrase` / `--owner-passphrase` |
+| **Alert emails** | Lists the addresses (Confirmed or Waiting for confirmation), adds one (AWS emails it a link to confirm), removes a confirmed one; never the last confirmed one | `put_parameters.py --alert-email` |
+| **Employees** | The list the page checks folder names against, one name per line in the Web App's order, saved in its form (lower case, no accents). Refused: a duplicate, or a name that an earlier one would already match (put the longer one first). A new person also needs a line in `Employees.gs` in Apps Script: the Web App routes by its own list | `put_parameters.py --from-private-files` |
 | **Timings** | Ready→Done median and 95th percentile of the uploads started in the last 24 hours, 7 days or 28 days (a rolling window, wherever you are), and the uploads per status | `turnaround.py --days N` (both use `cloud/timing.py`; the tool counts whole UTC dates) |
 
 The intake role may change only the runner's trigger
-(`lambda:UpdateEventSourceMapping` conditioned on the runner's ARN); it can't
-change any function, and the kill switch's alarms still stop the runner on
-their own. A wrong owner password answers 403, so the upload session stays
+(`lambda:UpdateEventSourceMapping` conditioned on the runner's ARN), write
+only the five settings above (`cloud/owner_settings.py` `WRITABLE`, named one
+by one in its policy and in the boundary), and manage subscriptions to the
+alerts topic only; it can't change any function, and the kill switch's alarms
+still stop the runner on their own. A wrong owner password answers 403, so the upload session stays
 signed in; guessing costs page compute like a wrong passphrase, so
 `calls-log-intake-busy` catches it the same way. The Web App URL and its
 secret are never shown or changed on the page.

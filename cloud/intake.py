@@ -25,6 +25,14 @@ x-calls-log-owner header instead; the upload passphrase never opens them:
                              Sheet again (as tools/resync.py)
     POST /api/owner/runner   {"action": "status" | "stop" | "start"}
     POST /api/owner/timings  {"days"} -> Ready -> Done times (cloud/timing.py)
+    POST /api/owner/settings the switch, the employee list and the alert addresses
+    POST /api/owner/sync     {"on": true | false} -> the AWS Sync Switch
+    POST /api/owner/password {"which": "upload" | "owner", "new"} -> its new hash
+    POST /api/owner/alerts   {"action": "add", "address"} | {"action": "remove", "id"}
+    POST /api/owner/employees {"names": [...]} -> name_prefixes, as the Web App keys it
+
+The Owner tab writes only cloud/owner_settings.py WRITABLE, never the Web App
+URL or its secret.
 
 Errors are {"ok": false, "error": "<plain words>", "code", "args"}: the page
 shows the code in English or Vietnamese, other clients the words.
@@ -51,7 +59,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from cloud import killswitch, naming, passphrase as passphrase_mod, requeue as shared_requeue
+from cloud import killswitch, naming, owner_settings, passphrase as passphrase_mod, requeue as shared_requeue
 from cloud import settings as settings_mod, timing
 from cloud.status import FolderStatus, Status, TransitionRefused
 from cloud.storage import IMAGE_SUFFIXES, S3Storage, pc_order
@@ -69,6 +77,7 @@ DOWNLOAD_SECONDS = 5 * 60
 STATUS_DAYS = 8             # UTC days queried: the last 7 local days, whatever the time zone
 MAX_SHEETS = 50
 SETTINGS_SECONDS = 300      # a changed passphrase or employee list applies within 5 minutes
+RECHECK_SECONDS = 10        # a refused password re-reads settings at most this often (a change made elsewhere)
 MAX_TIMING_DAYS = 28
 PAGE = Path(__file__).resolve().parent / "static" / "upload.html"
 CONTENT_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -95,6 +104,11 @@ CODES = (
     "date_format", "not_set_up", "wrong_passphrase", "owner_not_set", "wrong_owner", "bad_json",
     "too_large", "not_found", "server_error", "bad_day", "no_sheet", "no_runner", "bad_action",
     "runner_failed", "days_range",
+    "bad_switch", "bad_which", "password_short", "password_spaces", "password_accents", "password_weak",
+    "same_as_other", "save_failed", "no_topic", "alerts_failed", "bad_action_alerts", "not_confirmed",
+    "last_alert",
+    *("employees_invalid", "employees_empty", "employees_many", "employee_blank", "employee_long",
+      "employee_twice", "prefix_clash", "bad_email"),                    # cloud/owner_settings.py
     *("no_upload", "not_requeueable", "images_gone", "changed"),   # cloud/requeue.py
 )
 
@@ -206,6 +220,7 @@ class Services:
     today: Callable[[], _dt.date] = lambda: _dt.datetime.now(_dt.timezone.utc).date()
     now: Callable[[], _dt.datetime] = lambda: _dt.datetime.now(_dt.timezone.utc)
     lambda_client: Any = None   # the Owner tab's runner on/off
+    sns: Any = None             # the Owner tab's alert addresses
 
 
 _services: Optional[Services] = None
@@ -242,7 +257,7 @@ def services(clock: Callable[[], float] = time.monotonic) -> Services:
         s3 = s3_client(_region())
         _services = Services(current, FolderStatus(boto3.client("dynamodb"), current.table),
                              S3Storage(s3, current.bucket), s3, boto3.client("sqs"), ssm, CONFIG.max_images,
-                             lambda_client=boto3.client("lambda"))
+                             lambda_client=boto3.client("lambda"), sns=boto3.client("sns"))
         _loaded_at = clock()
     return _services
 
@@ -512,9 +527,152 @@ def owner_timings(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "days": days, "targetSeconds": timing.TARGET_S, **timing.summary(items)}
 
 
+# ----- the Owner tab's settings (Story 4.5 part B) ------------------------------------------
+
+def _forget_settings() -> None:
+    """After a write, this container reads the parameters again on its next request."""
+    global _services
+    settings_mod.reset_cache()
+    _services = None
+
+
+def _put(svc: Services, name: str, value: str) -> None:
+    if name not in owner_settings.WRITABLE:   # the policy refuses the rest too; this says so first
+        raise RuntimeError(f"{name} is not a setting the Owner tab may write")
+    try:
+        svc.ssm.put_parameter(Name=settings_mod.PARAMETER_PREFIX + name, Value=value,
+                              Type="SecureString", Overwrite=True)
+    except Exception as e:
+        log.warning(json.dumps({"settingWrite": "failed", "name": name, "error": type(e).__name__}))
+        raise Refused(502, "AWS didn't save it. Try again in a minute.", "save_failed") from None
+    _forget_settings()
+
+
+def _invalid(e: owner_settings.Invalid) -> Refused:
+    return Refused(400, str(e), e.code, e.args_)
+
+
+def _alerts(svc: Services) -> Optional[List[Dict[str, Any]]]:
+    """The topic's email subscriptions: address, confirmed, and the id to remove a confirmed one."""
+    topic = svc.settings.alerts_topic_arn
+    if not topic or svc.sns is None:
+        return None
+    found: List[Dict[str, Any]] = []
+    kwargs: Dict[str, Any] = {"TopicArn": topic}
+    while True:
+        page = svc.sns.list_subscriptions_by_topic(**kwargs)
+        for sub in page.get("Subscriptions", []):
+            if sub.get("Protocol") not in ("email", "email-json"):
+                continue
+            arn = str(sub.get("SubscriptionArn") or "")
+            confirmed = arn.startswith(topic + ":")   # else "PendingConfirmation"
+            found.append({"address": sub.get("Endpoint") or "", "confirmed": confirmed,
+                          "id": arn if confirmed else None})
+        if not page.get("NextToken"):
+            return found
+        kwargs["NextToken"] = page["NextToken"]
+
+
+def _alerts_or_none(svc: Services) -> Optional[List[Dict[str, Any]]]:
+    try:
+        return _alerts(svc)
+    except Exception as e:   # shown as "unknown"; the rest of the card still works
+        log.warning(json.dumps({"alerts": "unreadable", "error": type(e).__name__}))
+        return None
+
+
+def owner_settings_read(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    current = settings_mod.read(svc.ssm)   # fresh: the other container may have just changed it
+    return {"ok": True, "syncEnabled": _sync_switch(svc), "employees": list(current.name_prefixes),
+            "alerts": _alerts_or_none(svc)}
+
+
+def owner_sync(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    on = body.get("on")
+    if not isinstance(on, bool):
+        raise Refused(400, "Say on or off.", "bad_switch")
+    _put(svc, "sync_enabled", "true" if on else "false")
+    return {"ok": True, "syncEnabled": _sync_switch(svc)}
+
+
+def _password_problem(new: Any) -> Optional[Refused]:
+    if not isinstance(new, str) or len(new) < passphrase_mod.MIN_LENGTH:
+        return Refused(400, f"Use at least {passphrase_mod.MIN_LENGTH} characters.", "password_short",
+                       {"min": passphrase_mod.MIN_LENGTH})
+    if new != new.strip():
+        return Refused(400, "No spaces at the start or the end.", "password_spaces")
+    if not new.isascii():
+        return Refused(400, "Use only unaccented letters, digits and symbols.", "password_accents")
+    if passphrase_mod.weak(new):   # any rule added there later
+        return Refused(400, "That password isn't allowed.", "password_weak")
+    return None
+
+
+def owner_password(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    which, new = body.get("which"), body.get("new")
+    if which not in ("upload", "owner"):
+        raise Refused(400, "Say which password: upload or owner.", "bad_which")
+    problem = _password_problem(new)
+    if problem:
+        raise problem
+    current = settings_mod.read(svc.ssm)
+    other = current.owner_passphrase_hash if which == "upload" else current.intake_passphrase_hash
+    if other and passphrase_mod.verify(new, other):
+        raise Refused(400, "Keep the upload passphrase and the owner password different.", "same_as_other")
+    _put(svc, "intake_passphrase_hash" if which == "upload" else "owner_passphrase_hash",
+         passphrase_mod.hash_passphrase(new))
+    return {"ok": True, "which": which}
+
+
+def owner_alerts(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    topic = svc.settings.alerts_topic_arn
+    if not topic or svc.sns is None:
+        raise Refused(503, "There is no alert topic to manage.", "no_topic")
+    action = body.get("action")
+    try:
+        if action == "add":
+            try:
+                address = owner_settings.email(body.get("address"))
+            except owner_settings.Invalid as e:
+                raise _invalid(e) from None
+            svc.sns.subscribe(TopicArn=topic, Protocol="email", Endpoint=address)
+            _put(svc, "alert_email", address)
+        elif action == "remove":
+            confirmed = [a for a in _alerts(svc) or [] if a["confirmed"]]
+            sub = body.get("id")
+            if not any(a["id"] == sub for a in confirmed):
+                raise Refused(404, "Only a confirmed address can be removed; an unconfirmed one expires by itself.",
+                              "not_confirmed")
+            if len(confirmed) == 1:
+                raise Refused(409, "Add another address first: this one is the only one that gets the alerts.",
+                              "last_alert")
+            svc.sns.unsubscribe(SubscriptionArn=sub)
+        else:
+            raise Refused(400, "Say add or remove.", "bad_action_alerts")
+    except Refused:
+        raise
+    except Exception as e:
+        log.warning(json.dumps({"alerts": "failed", "action": action if action in ("add", "remove") else "other",
+                                "error": type(e).__name__}))
+        raise Refused(502, "AWS didn't change the alert addresses. Try again in a minute.", "alerts_failed") from None
+    return {"ok": True, "alerts": _alerts_or_none(svc)}
+
+
+def owner_employees(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        names = owner_settings.employees(body.get("names"))
+    except owner_settings.Invalid as e:
+        raise _invalid(e) from None
+    _put(svc, "name_prefixes", json.dumps(names, ensure_ascii=False))
+    return {"ok": True, "employees": names}
+
+
 OWNER_ROUTES: Dict[str, Callable[[Services, Dict[str, Any]], Dict[str, Any]]] = {
     "/api/owner/hello": owner_hello, "/api/owner/requeue": owner_requeue, "/api/owner/resend": owner_resend,
     "/api/owner/runner": owner_runner, "/api/owner/timings": owner_timings,
+    "/api/owner/settings": owner_settings_read, "/api/owner/sync": owner_sync,
+    "/api/owner/password": owner_password, "/api/owner/alerts": owner_alerts,
+    "/api/owner/employees": owner_employees,
 }
 
 
@@ -562,7 +720,38 @@ def _body(event: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
-def handle(event: Dict[str, Any], get_services: Callable[[], Services] = services) -> Dict[str, Any]:
+def _gate(svc: Services, owner: bool, headers: Dict[str, str]) -> Optional[Refused]:
+    """Why this request may not go on, or None."""
+    if owner:   # the owner password only: the upload passphrase never opens these
+        if not svc.settings.owner_passphrase_hash:
+            return Refused(503, "The Owner tab isn't set up yet: the Owner sets a password with "
+                                "tools/put_parameters.py --owner-passphrase.", "owner_not_set")
+        if not authorised(headers.get(OWNER_HEADER), svc.settings.owner_passphrase_hash):
+            return Refused(403, "Wrong owner password.", "wrong_owner")
+        return None
+    if not svc.settings.intake_passphrase_hash:
+        return Refused(503, "The page isn't set up yet: the Owner sets a passphrase with "
+                            "tools/put_parameters.py --passphrase.", "not_set_up")
+    if not authorised(headers.get(HEADER), svc.settings.intake_passphrase_hash):
+        return Refused(401, "Wrong passphrase.", "wrong_passphrase")
+    return None
+
+
+def _reload(clock: Callable[[], float] = time.monotonic) -> Optional[Services]:
+    """
+    Fresh settings for a refused password, when this container's are older than
+    RECHECK_SECONDS: a password changed in the other container (or in CloudShell)
+    then works here at once. A guesser costs one parameter read per period at most.
+    """
+    global _services
+    if _services is None or clock() - _loaded_at < RECHECK_SECONDS:
+        return None
+    _services = None
+    return services(clock)
+
+
+def handle(event: Dict[str, Any], get_services: Callable[[], Services] = services,
+           reload: Optional[Callable[[], Optional[Services]]] = None) -> Dict[str, Any]:
     http = (event.get("requestContext") or {}).get("http") or {}
     method, path = http.get("method", "GET"), event.get("rawPath") or "/"
     if path == "/" and method in ("GET", "HEAD"):
@@ -580,19 +769,16 @@ def handle(event: Dict[str, Any], get_services: Callable[[], Services] = service
     try:
         svc = get_services()
         headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
-        if owner is not None:   # the owner password only: the upload passphrase never opens these
-            if not svc.settings.owner_passphrase_hash:
-                raise Refused(503, "The Owner tab isn't set up yet: the Owner sets a password with "
-                                   "tools/put_parameters.py --owner-passphrase.", "owner_not_set")
-            if not authorised(headers.get(OWNER_HEADER), svc.settings.owner_passphrase_hash):
-                raise Refused(403, "Wrong owner password.", "wrong_owner")
-            route = owner
-        else:
-            if not svc.settings.intake_passphrase_hash:
-                raise Refused(503, "The page isn't set up yet: the Owner sets a passphrase with "
-                                   "tools/put_parameters.py --passphrase.", "not_set_up")
-            if not authorised(headers.get(HEADER), svc.settings.intake_passphrase_hash):
-                raise Refused(401, "Wrong passphrase.", "wrong_passphrase")
+        denied = _gate(svc, owner is not None, headers)
+        if reload is None and get_services is services:
+            reload = _reload
+        if denied is not None and reload is not None:
+            fresh = reload()
+            if fresh is not None:
+                svc, denied = fresh, _gate(fresh, owner is not None, headers)
+        if denied is not None:
+            raise denied
+        route = owner or route
         body = _body(event)
         response = _respond(200, route(svc, body))
         upload_id = json.loads(response["body"]).get("uploadId") or body.get("uploadId")

@@ -123,6 +123,23 @@ run "the_intake_role_is_fenced" {
     ]) == 0
     error_message = "The page may not change any function: no concurrency, code or configuration rights."
   }
+
+  assert {
+    condition = toset(flatten([
+      for s in jsondecode(data.aws_iam_policy_document.intake.json).Statement : s.Resource
+      if contains(flatten([s.Action]), "ssm:PutParameter")
+      ])) == toset([for n in ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "alert_email", "name_prefixes"] :
+    "arn:aws:ssm:ap-southeast-2:333596351215:parameter/calls-log/${n}"])
+    error_message = "The Owner tab writes exactly five settings; never webapp_url or sync_secret."
+  }
+
+  assert {
+    condition = toset(flatten([
+      for s in jsondecode(data.aws_iam_policy_document.intake.json).Statement : s.Resource
+      if length(setintersection(toset(flatten([s.Action])), toset(["sns:Subscribe", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic"]))) > 0
+    ])) == toset(["arn:aws:sns:ap-southeast-2:333596351215:calls-log-alerts"])
+    error_message = "The Owner tab manages subscriptions to the alerts topic only."
+  }
 }
 
 run "only_the_page_may_post_to_the_bucket" {
