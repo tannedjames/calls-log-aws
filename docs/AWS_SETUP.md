@@ -54,8 +54,9 @@ the deploy, from `infra/`. The deploy role may create a role only under
 `/calls-log/` and only with `calls-log-workload-boundary` attached, so whatever
 a merged commit puts in a function's policy, the role can never do more than
 the boundary allows: this project's bucket, table, parameters, queues, alert
-topic, image and logs, turning the runner's queue trigger off, and setting the
-upload page's reserved concurrency (the kill switch's two stops). The deploy
+topic, image and logs, stopping or starting the runner's queue trigger (the
+kill switch, and the page's Owner tab), and setting the upload page's reserved
+concurrency (the kill switch's other stop). The deploy
 role and the plan role sit at `/`, out of their own reach, and the boundary is
 here, where only a person changes it.
 
@@ -188,7 +189,7 @@ A higher limit costs nothing; Lambda bills per use.
 - **Forks.** The repo setting "Run workflows from fork pull requests" stays
   off. A fork's own runs carry the fork's IDs in their subject, so STS refuses
   them too.
-- **Parameter values** (Story 2.4): Terraform creates the six `/calls-log/`
+- **Parameter values** (Story 2.4): Terraform creates the seven `/calls-log/`
   parameters with placeholders only (`infra/parameters.tf`). Set the real
   values from this PC, where the private files are. The tool reads them
   itself and prints only parameter names, so no value lands in the shell
@@ -214,7 +215,13 @@ A higher limit costs nothing; Lambda bills per use.
   aws lambda get-function-url-config --function-name calls-log-intake --query FunctionUrl --output text
   ```
   Until a passphrase is set, the page answers every action with "isn't set
-  up yet". docs/TECHNICAL.md §11 has how it is used.
+  up yet". The page's Owner tab has its own password, kept apart from the
+  Operator's (letters, digits and symbols without accents; a browser can't
+  send accented ones). Until it is set, that tab says it isn't set up yet:
+  ```powershell
+  .\.venv\Scripts\python.exe tools\put_parameters.py --owner-passphrase
+  ```
+  docs/TECHNICAL.md §11 has how both are used.
 - **Alert email** (Story 2.4): the $2 budget, and later Parked Folders and the
   kill switch, email through the `calls-log-alerts` topic. Subscribe your
   address once; it is stored only in `/calls-log/alert_email` and the

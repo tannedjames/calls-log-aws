@@ -41,6 +41,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -151,8 +152,8 @@ def check_folder(folder: str, files: List[Tuple[str, int]], *, prefixes, max_ima
         elif size == 0:
             return _no(f"{name} is empty", "empty_file", file=name)
         elif size > MAX_IMAGE_BYTES:
-            return _no(f"{name} is {size / 1024 / 1024:.0f} MB, more than 15 MB", "too_big",
-                       file=name, mb=round(size / 1024 / 1024))
+            mb = math.ceil(size / 1024 / 1024)   # never rounded down to the limit itself
+            return _no(f"{name} is {mb} MB, more than 15 MB", "too_big", file=name, mb=mb)
         else:
             images.append(name)
     if not images:
@@ -203,6 +204,7 @@ class Services:
     ssm: Any
     max_images: int
     today: Callable[[], _dt.date] = lambda: _dt.datetime.now(_dt.timezone.utc).date()
+    now: Callable[[], _dt.datetime] = lambda: _dt.datetime.now(_dt.timezone.utc)
     lambda_client: Any = None   # the Owner tab's runner on/off
 
 
@@ -494,12 +496,19 @@ def owner_runner(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def owner_timings(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
-    """Ready -> Done over the uploads of the last N UTC days: counts, median, p95, slowest (seconds)."""
+    """
+    Ready -> Done over the uploads started in the last N x 24 hours: counts,
+    median, p95, slowest (seconds). A rolling window, so "1 day" means the
+    last 24 hours wherever the Owner is, not the current UTC date.
+    """
     days = body.get("days", 7)
     if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_TIMING_DAYS:
         raise Refused(400, f"Days must be 1 to {MAX_TIMING_DAYS}.", "days_range", {"max": MAX_TIMING_DAYS})
-    today = svc.today()
-    items = [i for back in range(days) for i in svc.status.recent((today - _dt.timedelta(days=back)).isoformat())]
+    now = svc.now()
+    since = f"{now - _dt.timedelta(days=days):%Y%m%dT%H%M%SZ}"   # uploadIds start with their UTC time
+    items = [i for back in range(days + 1)
+             for i in svc.status.recent((now.date() - _dt.timedelta(days=back)).isoformat())
+             if str(i.get("uploadId") or "") >= since]
     return {"ok": True, "days": days, "targetSeconds": timing.TARGET_S, **timing.summary(items)}
 
 

@@ -65,6 +65,20 @@ This reverses Epic 4's "Never: the page changing the Sync Switch" (spec-4) **for
 
 **Live checks (A):** the page shows the tabs and EN/VI; the Owner tab refuses the upload passphrase and opens with the owner password; Re-run turns a Done or Failed folder Waiting, then Done; Re-send updates the day's tab; Stop shows stopped, Start shows running; the timings appear.
 
+**Review fixes (2026-10-19, before merge):** a five-dimension review with a skeptic per finding confirmed:
+- the intake role could query only the `uploads-by-day` index, so Re-run (`status.uploads`, a table Query) would have failed in AWS; the role now queries the table too (still no Scan);
+- timings now cover a rolling window (last 24 hours, 7 or 28 days) instead of UTC dates, which in Vietnam start at 07:00;
+- `passphrase.weak()` refuses accented letters, which a browser can't send in a header;
+- page fixes:
+  - a 403 on Re-run or Re-send says "owner password no longer works" where the click was;
+  - Unlock adopts the password only once accepted;
+  - Upload and Ready can't overlap or repeat;
+  - signing out stops them;
+  - nested refusals re-translate on a language switch;
+  - the sync pill no longer reverts;
+  - a 15.3 MB image is "16 MB";
+- the runbook covers owner-password guessing (403 lines), and AWS_SETUP.md lists seven parameters.
+
 **Part B (later):** bootstrap `ChangeSettings` (`ssm:PutParameter` on exactly `sync_enabled`, `intake_passphrase_hash`, `owner_passphrase_hash`, `alert_email`, `name_prefixes`) and `AlertSubscriptions`; the owner routes and the page's forms; a test that `webapp_url` and `sync_secret` stay unwritable.
 
 ## Verification

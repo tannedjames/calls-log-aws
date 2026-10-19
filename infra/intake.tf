@@ -61,10 +61,12 @@ data "aws_iam_policy_document" "intake" {
     resources = [local.arns.table]
   }
 
+  # The index for the Status tab; the table itself for one Person-Day's
+  # uploads (the Owner tab's Re-run, cloud/status.py uploads). No Scan.
   statement {
-    sid       = "RecentUploads"
+    sid       = "QueryUploads"
     actions   = ["dynamodb:Query"]
-    resources = ["${local.arns.table}/index/uploads-by-day"]
+    resources = [local.arns.table, "${local.arns.table}/index/uploads-by-day"]
   }
 
   statement {

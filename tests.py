@@ -2638,6 +2638,14 @@ def test_passphrase_must_be_long_enough_and_unpadded():
     assert cpass.weak(_PASS) is None
 
 
+def test_passphrase_must_be_plain_ascii_since_the_page_sends_it_in_a_header():
+    # fetch() refuses a header value with letters past U+00FF, and Latin-1 ones arrive
+    # as other bytes: either way the page could never send it, so it is refused up front.
+    for typed in ("Mật khẩu quản lý 2026", "café au lait 2026"):
+        assert "unaccented" in cpass.weak(typed)
+    assert cpass.weak("Mat khau quan ly 2026!") is None
+
+
 def test_put_parameters_stores_only_the_passphrase_hash():
     aws = _FakeAws()
     answers = iter([_PASS, _PASS])
@@ -2814,6 +2822,7 @@ def test_intake_refuses_bad_folders_in_plain_words_and_writes_nothing():
         ("Tran Thi B & 2026-06-04", _files("readme.txt"), "no images"),
         ("Tran Thi B & 2026-06-05", _files("a.jpg", size=0), "a.jpg is empty"),
         ("Tran Thi B & 2026-06-06", _files("a.jpg", size=16 * 1024 * 1024), "more than 15 MB"),
+        ("Tran Thi B & 2026-06-07", _files("a.jpg", size=int(15.3 * 1024 * 1024)), "a.jpg is 16 MB, more"),
         ("Nguyen Van A 2026-6-1", _files("a.jpg"), "same Person-Day as Nguyen Van A & 2026-06-01"),
     ]
     code, body = _call(svc, "/api/check", {"folders": [{"folder": f, "files": files} for f, files, _ in folders]})
@@ -3570,13 +3579,21 @@ def test_runner_state_names_the_mixed_and_missing_cases():
 
 def test_owner_timings_are_the_turnaround_tools_numbers():
     svc, _, _ = _owner_intake()
-    items = [{"status": "Done", "readyAt": "2026-06-08T01:00:00Z", "updatedAt": f"2026-06-08T01:{m:02d}:00Z"}
-             for m in (5, 10, 40)] + [{"status": "Failed"}, {"status": "Pending"}]
+    svc.now = lambda: _dt.datetime(2026, 6, 8, 6, 30, tzinfo=_dt.timezone.utc)
+    items = [{"uploadId": f"20260608T00{m:02d}00Z-0a1b2c3d", "status": "Done", "readyAt": "2026-06-08T01:00:00Z",
+              "updatedAt": f"2026-06-08T01:{m:02d}:00Z"} for m in (5, 10, 40)]
+    items += [{"uploadId": "20260605T063000Z-0a1b2c3d", "status": "Failed"},     # 3 x 24 h ago exactly: in
+              {"uploadId": "20260607T120000Z-0a1b2c3d", "status": "Pending"}]
+    before = {"uploadId": "20260605T062959Z-0a1b2c3d", "status": "Done",       # a second too early: out
+              "readyAt": "2026-06-05T07:00:00Z", "updatedAt": "2026-06-05T09:00:00Z"}
+    by_day = {"2026-06-08": items[:3], "2026-06-07": items[4:], "2026-06-05": [before, items[3]]}
     asked = []
-    svc.status.recent = lambda day: asked.append(day) or (items if day == "2026-06-08" else [])
+    svc.status.recent = lambda day: asked.append(day) or by_day.get(day, [])
     code, body = _owner(svc, "/api/owner/timings", {"days": 3})
-    assert code == 200 and asked == ["2026-06-08", "2026-06-07", "2026-06-06"]
+    # The last 3 x 24 hours, not 3 UTC dates: the oldest date is read too, then cut at the hour.
+    assert code == 200 and asked == ["2026-06-08", "2026-06-07", "2026-06-06", "2026-06-05"]
     assert body == {"ok": True, "days": 3, "targetSeconds": 7200, **turnaround.summary(items)}
+    assert body["uploads"] == 5 and body["counts"] == {"Done": 3, "Failed": 1, "Pending": 1}
     assert body["median"] == 600 and body["p95"] == body["slowest"] == 2400
     for days in (0, 29, "7", True):
         assert _owner(svc, "/api/owner/timings", {"days": days})[1]["code"] == "days_range"
@@ -3620,6 +3637,11 @@ def test_page_has_english_and_vietnamese_for_every_word_and_code():
     assert set(en) == set(vi), set(en) ^ set(vi)
     missing = [c for c in intake.CODES if f"e_{c}" not in en]
     assert not missing, missing
+    # and every word is used somewhere: a key spelled out in the code, a data-i18n, or a family built at run time
+    code = script[script.index("const WORDS"):]
+    spelled = set(_re.findall(r'"(\w+)"', code)) | set(_re.findall(r'data-i18n="(\w+)"', page))
+    unused = [k for k in en if k not in spelled and not _re.match(r"(e|st|run)_", k)]
+    assert not unused, unused
     used = set(_re.findall(r'data-i18n="(\w+)"', page))
     used |= set(_re.findall(r'\bt\("(\w+)"[,)]', script)) | set(_re.findall(r'\{k: "(\w+)"[,}]', script))
     used |= {f"run_{s}" for s in ("running", "stopped", "changing", "missing", "unknown")}

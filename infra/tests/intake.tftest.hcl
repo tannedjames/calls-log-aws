@@ -102,8 +102,9 @@ run "the_intake_role_is_fenced" {
     condition = toset(flatten([
       for s in jsondecode(data.aws_iam_policy_document.intake.json).Statement : s.Resource
       if contains(flatten([s.Action]), "dynamodb:Query")
-    ])) == toset(["arn:aws:dynamodb:ap-southeast-2:333596351215:table/calls-log-folders/index/uploads-by-day"])
-    error_message = "The status view queries the uploads-by-day index, nothing wider."
+      ])) == toset(["arn:aws:dynamodb:ap-southeast-2:333596351215:table/calls-log-folders",
+    "arn:aws:dynamodb:ap-southeast-2:333596351215:table/calls-log-folders/index/uploads-by-day"])
+    error_message = "The page queries the uploads-by-day index (Status tab) and the table (one Person-Day's uploads, for Re-run); it never scans."
   }
 
   assert {

@@ -427,11 +427,11 @@ and `post_9am_exception_limit`, is the same on the PC and in AWS.
 **AWS settings (`cloud/settings.py`).** It is the only reader of the
 `CALLS_LOG_*` environment variables, which Terraform sets: `CALLS_LOG_BUCKET`,
 `CALLS_LOG_TABLE`, `CALLS_LOG_QUEUE_URL` and `CALLS_LOG_ALERTS_TOPIC_ARN`,
-plus `CALLS_LOG_RUNNER_FUNCTION` for the kill switch. A test fails if
+plus `CALLS_LOG_RUNNER_FUNCTION` for the kill switch and the page's Owner tab. A test fails if
 `infra/` sets a name it doesn't read. It is also the only reader of the `/calls-log/` parameters (docs/AWS_SETUP.md
 §5).
 - **Once per container:** it reads the Web App URL and secret, the allowed name
-  prefixes, the upload passphrase hash and the alert address. A parameter
+  prefixes, the upload passphrase and owner password hashes and the alert address. A parameter
   still holding Terraform's placeholder `unset` counts as empty.
 - **At the start of every Run:** it reads the AWS Sync Switch
   `/calls-log/sync_enabled`; only `true` turns it on.
@@ -792,7 +792,7 @@ password stays in the open page only; Lock or reloading forgets it):
 | **Re-send to Sheet** (Day Sheets tab, per row) | Queues one re-send of that stored Day Sheet, **whatever the AWS Sync Switch says**, and overwrites the day's tab | `resync.py --name … --date …` for one day |
 | **AWS processing: Stop / Start** | Turns the runner's queue trigger off or on. Stopped: no new Run starts, queued Folders wait up to 14 days | "Stopping the runner by hand" and "Turning the runner back on" below |
 | **Sync to Google Sheets** | Shows the AWS Sync Switch; changing it is still `put_parameters.py --sync-enabled` | — |
-| **Timings** | Ready→Done median and 95th percentile over 1, 7 or 28 days, and the uploads per status | `turnaround.py --days N` (both use `cloud/timing.py`) |
+| **Timings** | Ready→Done median and 95th percentile of the uploads started in the last 24 hours, 7 days or 28 days (a rolling window, wherever you are), and the uploads per status | `turnaround.py --days N` (both use `cloud/timing.py`; the tool counts whole UTC dates) |
 
 The intake role may change only the runner's trigger
 (`lambda:UpdateEventSourceMapping` conditioned on the runner's ARN); it can't
@@ -920,7 +920,7 @@ aws lambda update-event-source-mapping --uuid $uuid --no-enabled --region ap-sou
 
 `calls-log-intake-runaway` or `calls-log-intake-busy` fired: something sent
 the page far more requests, or work, than people do: a script, or someone
-with the link guessing passphrases. The
+with the link guessing the passphrase or the owner password. The
 kill switch set the page's reserved concurrency to 0, so the address answers
 429 and costs nothing. Uploads already made and queued Folders carry on, and
 `enqueue.py` still works. See who called (the log has the routes and results,
@@ -930,8 +930,12 @@ never a passphrase):
 aws logs tail /aws/lambda/calls-log-intake --since 1h --region ap-southeast-2
 ```
 
-If passphrases were being guessed (many `"result": "401"` lines), set a new
-one (`put_parameters.py --passphrase`) before turning the page back on.
+Before turning the page back on, set a new password for whatever was being
+guessed:
+- many `"result": "401"` lines: the upload passphrase
+  (`put_parameters.py --passphrase`, then tell the Operator);
+- many `"result": "403"` lines on `/api/owner/...` routes: the owner password
+  (`put_parameters.py --owner-passphrase`).
 
 ### Turning the upload page back on
 

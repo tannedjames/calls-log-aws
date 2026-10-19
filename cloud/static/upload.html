@@ -340,9 +340,9 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     sync_help_ro: "With sync on, each finished folder writes its day into the employee's Google Sheet. To change it, in CloudShell: python3 tools/put_parameters.py --sync-enabled true (or false).",
     tm_title: "Timings",
     tm_period: "Period",
-    days_1: "Today",
-    days_7: "7 days",
-    days_28: "28 days",
+    days_1: "Last 24 hours",
+    days_7: "Last 7 days",
+    days_28: "Last 28 days",
     show: "Show",
     tm_uploads: "Uploads",
     tm_finished: "Finished",
@@ -495,9 +495,9 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     sync_help_ro: "Khi bật đồng bộ, mỗi thư mục xử lý xong sẽ ghi ngày đó vào Google Sheet của nhân viên. Để thay đổi, trong CloudShell: python3 tools/put_parameters.py --sync-enabled true (hoặc false).",
     tm_title: "Thời gian xử lý",
     tm_period: "Khoảng thời gian",
-    days_1: "Hôm nay",
-    days_7: "7 ngày",
-    days_28: "28 ngày",
+    days_1: "24 giờ qua",
+    days_7: "7 ngày qua",
+    days_28: "28 ngày qua",
     show: "Xem",
     tm_uploads: "Lần tải",
     tm_finished: "Đã xong",
@@ -571,6 +571,8 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   let limits = {maxImages: 50, maxImageMb: 15};
   let batch = [];                 // {folder, files, images, state:{k,a}|null, reason, ignored, upload, failed}
   let statusData = null, sheetsData = null, ownerData = null, timingsData = null;
+  let busy = false;                // an Upload or Ready loop is running: both buttons stay off
+  let session = 0;                 // bumped at sign-out, so a running loop stops
   const msgs = {};                // element id -> {m, cls}: re-drawn when the language changes
 
   const $ = (id) => document.getElementById(id);
@@ -578,7 +580,10 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   // ----- translation -----
   function t(key, args) {
     const s = (WORDS[lang] && WORDS[lang][key]) || EN[key] || key;
-    return s.replace(/\{(\w+)\}/g, (_, k) => (args && args[k] != null ? String(args[k]) : ""));
+    return s.replace(/\{(\w+)\}/g, (_, k) => {
+      const v = args && args[k];
+      return v == null ? "" : typeof v === "object" ? explain(v) : String(v);   // an error: in today's language
+    });
   }
   function explain(e) {            // a server or page error, in the chosen language
     if (e && e.code && EN["e_" + e.code]) {
@@ -587,7 +592,9 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       return t("e_" + e.code, args);
     }
     if (e && e.k) return t(e.k, e.a);
-    return (e && e.message) || String(e);
+    if (e && e.message) return e.message;
+    if (e && e.status) return t("server_said", {status: e.status});
+    return String(e);
   }
   function text(m) { return m == null ? "" : typeof m === "string" ? m : explain(m); }
   function say(id, m, cls) { msgs[id] = {m: m, cls: cls}; paint(id); }
@@ -632,7 +639,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     let data = {};
     try { data = await res.json(); } catch (e) { /* not JSON */ }
     if (!res.ok || !data.ok) {
-      throw {status: res.status, code: data.code, args: data.args, message: data.error || t("server_said", {status: res.status})};
+      throw {status: res.status, code: data.code, args: data.args, message: data.error};
     }
     return data;
   }
@@ -672,6 +679,9 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
 
   function signOut(m) {
     passphrase = ""; ownerPass = ""; ownerData = null; timingsData = null;
+    session++; busy = false; batch = [];          // a running Upload or Ready stops; nothing carries over
+    $("picker").value = ""; $("picker").disabled = false;
+    say("batch-msg", ""); draw();
     ["app", "tabs", "signout"].forEach(id => $(id).classList.add("hidden"));
     $("login").classList.remove("hidden");
     say("login-msg", m || "", m ? "bad" : "");
@@ -680,7 +690,10 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   $("signout").addEventListener("click", () => signOut());
 
   function lockedOut(e) {
-    if (e && e.status === 401) { signOut({k: "lost_pass"}); return true; }
+    if (e && e.status === 401) {
+      if (passphrase) signOut({k: "lost_pass"});   // already signed out: say nothing more
+      return true;
+    }
     return false;
   }
 
@@ -716,7 +729,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     }
     if (images.length > limits.maxImages) return {code: "too_many", args: {count: images.length, max: limits.maxImages}};
     const big = images.find(x => x.size > limits.maxImageMb * 1024 * 1024);
-    if (big) return {code: "too_big", args: {file: big.name, mb: Math.round(big.size / 1024 / 1024)}};
+    if (big) return {code: "too_big", args: {file: big.name, mb: Math.ceil(big.size / 1024 / 1024)}};
     return null;
   }
 
@@ -777,8 +790,8 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       body.appendChild(tr);
     }
     $("batch").classList.toggle("hidden", !batch.length);
-    $("upload").disabled = !batch.some(b => b.state && b.state.k === "accepted");
-    $("ready").disabled = !batch.some(b => b.state && b.state.k === "uploaded");
+    $("upload").disabled = busy || !batch.some(b => b.state && b.state.k === "accepted");
+    $("ready").disabled = busy || !batch.some(b => b.state && b.state.k === "uploaded");
   }
 
   $("picker").addEventListener("change", async () => {
@@ -854,35 +867,51 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   }
 
   $("upload").addEventListener("click", async () => {
-    $("upload").disabled = true; $("picker").disabled = true;
+    if (busy) return;
+    const mine = session;
+    busy = true; $("picker").disabled = true;
     say("batch-msg", {k: "keep_open"});
-    let failed = 0;
-    for (const b of batch.filter(x => x.state && x.state.k === "accepted")) {
-      try { await uploadOne(b); }
-      catch (e) {
-        if (lockedOut(e)) return;
-        failed++; b.failed = true; b.progress = null;
-        b.state = {k: "upload_failed", a: {why: explain(e)}};
-        draw();
-      }
-    }
-    $("picker").disabled = false;
-    say("batch-msg", failed ? {k: "n_failed_up", a: {n: failed}} : {k: "click_ready"}, failed ? "bad" : "ok");
     draw();
+    let failed = 0;
+    try {
+      for (const b of batch.filter(x => x.state && x.state.k === "accepted")) {
+        if (mine !== session) return;            // signed out meanwhile
+        try { await uploadOne(b); }
+        catch (e) {
+          if (lockedOut(e)) return;
+          failed++; b.failed = true; b.progress = null;
+          b.state = {k: "upload_failed", a: {why: e}};
+          draw();
+        }
+      }
+      say("batch-msg", failed ? {k: "n_failed_up", a: {n: failed}} : {k: "click_ready"}, failed ? "bad" : "ok");
+    } finally {
+      if (mine === session) { busy = false; $("picker").disabled = false; draw(); }
+    }
   });
 
   $("ready").addEventListener("click", async () => {
-    $("ready").disabled = true;
+    if (busy) return;
+    const mine = session;
+    busy = true; draw();
     let refused = 0;
-    for (const b of batch.filter(x => x.state && x.state.k === "uploaded" && x.upload)) {
-      try { await api("/api/ready", b.upload); b.state = {k: "st_Pending"}; }
-      catch (e) {
-        if (lockedOut(e)) return;
-        refused++; b.failed = true; b.state = {k: "not_ready", a: {why: explain(e)}};
+    try {
+      for (const b of batch.filter(x => x.state && x.state.k === "uploaded" && x.upload)) {
+        if (mine !== session) return;
+        try { await api("/api/ready", b.upload); b.state = {k: "st_Pending"}; }
+        catch (e) {
+          if (lockedOut(e)) return;
+          refused++; b.failed = true; b.state = {k: "not_ready", a: {why: e}};
+        }
+        draw();
       }
-      draw();
+    } finally {
+      if (mine === session) { busy = false; draw(); }
     }
-    say("batch-msg", refused ? {k: "n_not_ready", a: {n: refused}} : {k: "queued_msg"}, refused ? "bad" : "ok");
+    // "You can close this page" only once no uploaded folder still waits for Ready.
+    const left = batch.some(b => b.state && b.state.k === "uploaded");
+    say("batch-msg", refused ? {k: "n_not_ready", a: {n: refused}} : {k: left ? "click_ready" : "queued_msg"},
+        refused ? "bad" : "ok");
     $("to-status").classList.remove("hidden");
     refresh();
   });
@@ -953,7 +982,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       await refresh();
       say("status-msg", {k: "rerun_ok", a: {day: f.personDay}}, "ok");   // after the refresh, so it stays
     } catch (e) {
-      if (!ownerLockedOut(e)) say("status-msg", e, "bad");
+      if (!ownerLockedOut(e, "status-msg")) say("status-msg", e, "bad");
     }
   }
 
@@ -998,14 +1027,21 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       await ownerApi("/api/owner/resend", {personDay: s.personDay});
       say("sheets-msg", {k: "resend_ok", a: {day: s.personDay}}, "ok");
     } catch (e) {
-      if (!ownerLockedOut(e)) say("sheets-msg", e, "bad");
+      if (!ownerLockedOut(e, "sheets-msg")) say("sheets-msg", e, "bad");
     }
   }
 
   // ----- the Owner tab -----
-  function ownerLockedOut(e) {
+  // The owner password stopped working (changed elsewhere) or isn't set: lock the tab and say so where
+  // the click was, as well as on the Owner tab.
+  function ownerLockedOut(e, where) {
     if (e && e.status === 401) { lockedOut(e); return true; }
-    if (e && (e.status === 403 || e.code === "owner_not_set")) { lockOwner(e); return true; }
+    if (e && (e.status === 403 || e.code === "owner_not_set")) {
+      const m = e.code === "owner_not_set" ? e : {k: "owner_lost"};
+      lockOwner(m);
+      if (where) say(where, m, "bad");
+      return true;
+    }
     return false;
   }
   function lockOwner(m) {
@@ -1017,16 +1053,17 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
 
   $("owner-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    ownerPass = $("opass").value;
+    const candidate = $("opass").value;     // becomes ownerPass only once the server accepts it
     say("owner-msg", {k: "checking"});
     try {
-      ownerData = await ownerApi("/api/owner/hello");
+      const hello = await call("/api/owner/hello", {}, {"x-calls-log-owner": candidate});
+      ownerPass = candidate; ownerData = hello;
+      if (statusData) statusData.syncEnabled = hello.syncEnabled;   // fresh now; later refreshes own it
       $("opass").value = "";
       say("owner-msg", "");
       renderOwner(); renderStatus(); renderSheets();
       showTimings();
     } catch (e) {
-      ownerPass = "";
       if (!lockedOut(e)) say("owner-msg", e, "bad");
     }
   });
@@ -1036,8 +1073,6 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     $("owner-login").classList.toggle("hidden", open);
     $("owner-panel").classList.toggle("hidden", !open);
     if (!open) return;
-    if (statusData) statusData.syncEnabled = ownerData.syncEnabled;
-    showSync(ownerData.syncEnabled);
     const state = ownerData.runner || "unknown";
     $("runner").textContent = t("run_" + state);
     $("runner-pill").className = "pill " + (state === "running" ? "ok" : state === "stopped" ? "bad" : "warn");
@@ -1054,7 +1089,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       say("runner-msg", "");
       renderOwner();
     } catch (e) {
-      if (!ownerLockedOut(e)) say("runner-msg", e, "bad");
+      if (!ownerLockedOut(e, "runner-msg")) say("runner-msg", e, "bad");
     }
   }
   $("runner-stop").addEventListener("click", () => runner("stop"));
@@ -1102,7 +1137,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       say("tm-msg", "");
       renderTimings();
     } catch (e) {
-      if (!ownerLockedOut(e)) say("tm-msg", e, "bad");
+      if (!ownerLockedOut(e, "tm-msg")) say("tm-msg", e, "bad");
     }
   }
   $("tm-show").addEventListener("click", showTimings);
