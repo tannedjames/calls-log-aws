@@ -573,6 +573,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   let statusData = null, sheetsData = null, ownerData = null, timingsData = null;
   let busy = false;                // an Upload or Ready loop is running: both buttons stay off
   let session = 0;                 // bumped at sign-out, so a running loop stops
+  let ownerGen = 0;                // bumped at sign-out and Lock, so a late owner answer is dropped
   const msgs = {};                // element id -> {m, cls}: re-drawn when the language changes
 
   const $ = (id) => document.getElementById(id);
@@ -679,7 +680,8 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
 
   function signOut(m) {
     passphrase = ""; ownerPass = ""; ownerData = null; timingsData = null;
-    session++; busy = false; batch = [];          // a running Upload or Ready stops; nothing carries over
+    session++; ownerGen++; busy = false; batch = [];   // a running Upload or Ready stops; nothing carries over
+    $("opass").value = ""; say("owner-msg", "");      // not even a typed owner password
     $("picker").value = ""; $("picker").disabled = false;
     say("batch-msg", ""); $("to-status").classList.add("hidden"); draw();
     ["app", "tabs", "signout"].forEach(id => $(id).classList.add("hidden"));
@@ -1049,6 +1051,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     return false;
   }
   function lockOwner(m) {
+    ownerGen++;
     ownerPass = ""; ownerData = null; timingsData = null;
     say("owner-msg", m || "", m ? "bad" : "");
     renderOwner(); renderStatus(); renderSheets();
@@ -1058,11 +1061,11 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   $("owner-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const candidate = $("opass").value;     // becomes ownerPass only once the server accepts it
-    const mine = session;                    // ...and only if nobody signed out meanwhile
+    const mine = ownerGen;                   // ...and only if nobody signed out or locked meanwhile
     say("owner-msg", {k: "checking"});
     try {
       const hello = await call("/api/owner/hello", {}, {"x-calls-log-owner": candidate});
-      if (mine !== session) return;
+      if (mine !== ownerGen) return;
       ownerPass = candidate; ownerData = hello;
       if (statusData) statusData.syncEnabled = hello.syncEnabled;   // fresh now; later refreshes own it
       $("opass").value = "";
@@ -1070,7 +1073,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       renderOwner(); renderStatus(); renderSheets();
       showTimings();
     } catch (e) {
-      if (mine === session && !lockedOut(e)) say("owner-msg", e, "bad");
+      if (mine === ownerGen && !lockedOut(e)) say("owner-msg", e, "bad");
     }
   });
 
@@ -1089,13 +1092,15 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   async function runner(action) {
     if (action === "stop" && !window.confirm(t("confirm_stop"))) return;
     if (action === "start" && !window.confirm(t("confirm_start"))) return;
+    const mine = ownerGen;
     try {
       const res = await ownerApi("/api/owner/runner", {action: action});
+      if (mine !== ownerGen) return;         // locked or signed out meanwhile
       ownerData.runner = res.runner;
       say("runner-msg", "");
       renderOwner();
     } catch (e) {
-      if (!ownerLockedOut(e)) say("runner-msg", e, "bad");
+      if (mine === ownerGen && !ownerLockedOut(e)) say("runner-msg", e, "bad");
     }
   }
   $("runner-stop").addEventListener("click", () => runner("stop"));
@@ -1138,12 +1143,15 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     out.appendChild(verdict);
   }
   async function showTimings() {
+    const mine = ownerGen;
     try {
-      timingsData = await ownerApi("/api/owner/timings", {days: parseInt($("tm-days").value, 10)});
+      const got = await ownerApi("/api/owner/timings", {days: parseInt($("tm-days").value, 10)});
+      if (mine !== ownerGen) return;
+      timingsData = got;
       say("tm-msg", "");
       renderTimings();
     } catch (e) {
-      if (!ownerLockedOut(e)) say("tm-msg", e, "bad");
+      if (mine === ownerGen && !ownerLockedOut(e)) say("tm-msg", e, "bad");
     }
   }
   $("tm-show").addEventListener("click", showTimings);
