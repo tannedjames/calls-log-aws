@@ -687,7 +687,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     ["app", "tabs", "signout"].forEach(id => $(id).classList.add("hidden"));
     $("login").classList.remove("hidden");
     say("login-msg", m || "", m ? "bad" : "");
-    renderOwner();
+    renderOwner(); renderTimings();
   }
   $("signout").addEventListener("click", () => signOut());
 
@@ -983,12 +983,14 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
 
   async function rerun(f) {
     if (!window.confirm(t("confirm_rerun", {day: f.personDay}))) return;
+    const mine = ownerGen;
     try {
       await ownerApi("/api/owner/requeue", {personDay: f.personDay, uploadId: f.uploadId});
+      if (mine !== ownerGen) return;         // locked or signed out meanwhile
       await refresh();
       say("status-msg", {k: "rerun_ok", a: {day: f.personDay}}, "ok");   // after the refresh, so it stays
     } catch (e) {
-      if (!ownerLockedOut(e, "status-msg")) say("status-msg", e, "bad");
+      if (mine === ownerGen && !ownerLockedOut(e, "status-msg")) say("status-msg", e, "bad");
     }
   }
 
@@ -1029,11 +1031,13 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
 
   async function resend(s) {
     if (!window.confirm(t("confirm_resend", {day: s.personDay}))) return;
+    const mine = ownerGen;
     try {
       await ownerApi("/api/owner/resend", {personDay: s.personDay});
+      if (mine !== ownerGen) return;
       say("sheets-msg", {k: "resend_ok", a: {day: s.personDay}}, "ok");
     } catch (e) {
-      if (!ownerLockedOut(e, "sheets-msg")) say("sheets-msg", e, "bad");
+      if (mine === ownerGen && !ownerLockedOut(e, "sheets-msg")) say("sheets-msg", e, "bad");
     }
   }
 
@@ -1054,7 +1058,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     ownerGen++;
     ownerPass = ""; ownerData = null; timingsData = null;
     say("owner-msg", m || "", m ? "bad" : "");
-    renderOwner(); renderStatus(); renderSheets();
+    renderOwner(); renderStatus(); renderSheets(); renderTimings();
   }
   $("owner-lock").addEventListener("click", () => lockOwner());
 
