@@ -3713,14 +3713,9 @@ def _settings_intake(subs=None):
     return svc
 
 
-def test_owner_tab_writes_only_its_four_settings_and_the_infra_says_the_same():
+def test_owner_tab_writes_only_its_four_settings():
     assert set(osettings.WRITABLE) == {"sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash",
                                        "name_prefixes"}
-    lists = []
-    for tf in ("infra/intake.tf", "infra/bootstrap/main.tf"):
-        text = Path(tf).read_text(encoding="utf-8")
-        lists += [set(_re.findall(r'"(\w+)"', m)) for m in _re.findall(r'\[("sync_enabled"[^\]]*)\]', text)]
-    assert len(lists) == 2 and all(found == set(osettings.WRITABLE) for found in lists), lists
     svc = _settings_intake()
     try:
         intake._put(svc, "webapp_url", "https://example.com")
@@ -3728,6 +3723,18 @@ def test_owner_tab_writes_only_its_four_settings_and_the_infra_says_the_same():
     except RuntimeError:
         pass
     assert svc.ssm.puts == []
+
+
+def test_infra_grants_exactly_the_owner_tabs_four_settings():
+    # infra/ isn't in the runner image (CI mounts it in), as for _infra_text().
+    infra = Path(__file__).resolve().parent / "infra"
+    if not infra.is_dir():
+        return
+    lists = []
+    for tf in (infra / "intake.tf", infra / "bootstrap" / "main.tf"):
+        text = tf.read_text(encoding="utf-8")
+        lists += [set(_re.findall(r'"(\w+)"', m)) for m in _re.findall(r'\[("sync_enabled"[^\]]*)\]', text)]
+    assert len(lists) == 2 and all(found == set(osettings.WRITABLE) for found in lists), lists
 
 
 def test_owner_settings_show_the_switch_the_employees_and_the_alert_addresses():
