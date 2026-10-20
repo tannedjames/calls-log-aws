@@ -222,6 +222,14 @@ A higher limit costs nothing; Lambda bills per use.
   .\.venv\Scripts\python.exe tools\put_parameters.py --owner-passphrase
   ```
   docs/TECHNICAL.md §11 has how both are used.
+- **Settings from the Owner tab** (Story 4.5 part B). Its bootstrap change,
+  applied by hand before its PR merges, adds two statements to the workload
+  boundary: `ChangeSettings` (`ssm:PutParameter` on exactly `sync_enabled`,
+  `intake_passphrase_hash`, `owner_passphrase_hash` and `name_prefixes`;
+  never `webapp_url` or `sync_secret`) and
+  `AlertSubscriptions` (subscribe, unsubscribe and list on `calls-log-*`
+  topics). The plan shows 0 to add, 1 to change (`workload_boundary`), 0 to
+  destroy. Without it the page's settings cards answer "AWS didn't save it".
 - **Alert email** (Story 2.4): the $2 budget, and later Parked Folders and the
   kill switch, email through the `calls-log-alerts` topic. Subscribe your
   address once; it is stored only in `/calls-log/alert_email` and the

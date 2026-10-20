@@ -37,6 +37,9 @@ locals {
   queues         = "arn:aws:sqs:${var.region}:${local.account_id}:calls-log-*"
   log_groups     = "arn:aws:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/calls-log-*"
   alarms         = "arn:aws:cloudwatch:${var.region}:${local.account_id}:alarm:calls-log-*"
+  # The /calls-log/ settings a function may write (the upload page's Owner
+  # tab, Story 4.5); cloud/owner_settings.py WRITABLE names the same four.
+  owner_settings = ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "name_prefixes"]
 }
 
 # ---------------------------------------------------------------------------
@@ -540,6 +543,23 @@ data "aws_iam_policy_document" "workload_boundary" {
     sid       = "ThrottleTheUploadPage"
     actions   = ["lambda:PutFunctionConcurrency", "lambda:GetFunctionConcurrency"]
     resources = ["arn:aws:lambda:${var.region}:${local.account_id}:function:calls-log-intake"]
+  }
+
+  # Story 4.5 part B: the page's Owner tab changes these settings, named one
+  # by one. Never webapp_url or sync_secret: whoever could write those could
+  # send every Day Sheet, and the key to every Sheet, somewhere else.
+  statement {
+    sid     = "ChangeSettings"
+    actions = ["ssm:PutParameter"]
+    resources = [for name in local.owner_settings :
+    "arn:aws:ssm:${var.region}:${local.account_id}:parameter/calls-log/${name}"]
+  }
+
+  # ...and who gets the alert emails (AWS asks each new address to confirm).
+  statement {
+    sid       = "AlertSubscriptions"
+    actions   = ["sns:Subscribe", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic"]
+    resources = [local.topics]
   }
 }
 
