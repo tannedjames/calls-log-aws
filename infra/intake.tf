@@ -101,6 +101,21 @@ data "aws_iam_policy_document" "intake" {
     resources = ["*"] # no resource-level form
   }
 
+  # The Owner tab's settings (Story 4.5 part B), named one by one as in the
+  # boundary: never webapp_url or sync_secret.
+  statement {
+    sid     = "OwnerChangesSettings"
+    actions = ["ssm:PutParameter"]
+    resources = [for name in ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "name_prefixes"] :
+    "arn:aws:ssm:${var.region}:${var.account_id}:parameter/calls-log/${name}"]
+  }
+
+  statement {
+    sid       = "OwnerManagesAlertEmails"
+    actions   = ["sns:Subscribe", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic"]
+    resources = [local.alerts_topic_arn]
+  }
+
   statement {
     sid       = "Image"
     actions   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]

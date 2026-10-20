@@ -291,4 +291,43 @@ run "the_boundary_reaches_only_this_project" {
     ]), "s3:PutBucketCORS")
     error_message = "The deploy role sets the data bucket's CORS for the upload page (infra/data.tf)."
   }
+
+  # Story 4.5 part B: the Owner tab writes four settings, named one by one.
+  assert {
+    condition = toset(flatten([
+      for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement : s.Resource
+      if contains(flatten([s.Action]), "ssm:PutParameter")
+      ])) == toset([for n in ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "name_prefixes"] :
+    "arn:aws:ssm:ap-southeast-2:123456789012:parameter/calls-log/${n}"])
+    error_message = "A function may write exactly the four Owner-tab settings, never webapp_url, sync_secret or a wildcard."
+  }
+
+  assert {
+    condition = length([
+      for r in flatten([
+        for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement : s.Resource
+        if contains(flatten([s.Action]), "ssm:PutParameter")
+      ]) : r if endswith(r, "webapp_url") || endswith(r, "sync_secret") || strcontains(r, "*")
+    ]) == 0
+    error_message = "The Web App URL and its secret stay CloudShell-only: no function may write them."
+  }
+
+  assert {
+    condition = toset(flatten([
+      for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement : s.Resource
+      if length(setintersection(toset(flatten([s.Action])), toset(["sns:Subscribe", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic"]))) > 0
+    ])) == toset(["arn:aws:sns:ap-southeast-2:123456789012:calls-log-*"])
+    error_message = "Alert subscriptions may be changed on calls-log topics only."
+  }
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.workload_boundary.json).Statement :
+      !can(s.NotAction) && alltrue([
+        for a in flatten([s.Action]) : a != "*" && (
+          !startswith(a, "ssm:") || contains(["ssm:GetParameter", "ssm:GetParameters", "ssm:PutParameter"], a)) && (
+        !startswith(a, "sns:") || contains(["sns:Publish", "sns:Subscribe", "sns:Unsubscribe", "sns:ListSubscriptionsByTopic"], a))
+      ])
+    ])
+    error_message = "Parameter and topic rights are named one by one: no ssm:Put*, no \"*\", no NotAction that would reach webapp_url or sync_secret."
+  }
 }
