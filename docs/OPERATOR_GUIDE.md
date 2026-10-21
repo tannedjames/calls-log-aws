@@ -30,7 +30,9 @@ English or Vietnamese; the browser remembers the choice.
   upload, the new one says *Waiting for Re-run* and nothing changes yet. Click
   its **Re-run (use this upload)** on the Status tab: it then replaces the
   day's results and, with sync on, the day's tab in the Sheet. Without that
-  click, the earlier upload stays (and is still sent if it wasn't yet).
+  click, the earlier upload stays (and is still sent if it wasn't yet). After
+  the click it is queued like any other folder. With two or more waiting,
+  **Re-run all waiting uploads** below the table does them all at once.
 - *Failed* is retried by itself. *Stopped after 3 tries* means it failed 3
   times: the Owner gets an email and looks into it.
 - The **Day Sheets** tab finds a stored Day Sheet by name and/or date, to

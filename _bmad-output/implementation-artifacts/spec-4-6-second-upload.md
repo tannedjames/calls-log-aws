@@ -65,6 +65,7 @@ context: ['{project-root}/_bmad-output/implementation-artifacts/spec-4-5-owner-t
 **Page:**
 - The Status tab shows each day's current upload, then each Held upload on its own row: "Waiting for Re-run", a hint, and **Re-run (use this upload)**.
 - Ready says how many folders wait.
+- **Re-run all waiting uploads (n)**, under the table when two or more are Held, asks once and sends each through `/api/rerun` in turn (the Owner's follow-up, 2026-10-21: "add rerun all 2nd folders option too").
 - EN and VI.
 
 **Infra:**

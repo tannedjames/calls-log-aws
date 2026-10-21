@@ -774,7 +774,9 @@ day keeps its earlier upload, which still runs and is still sent if it hadn't
 been. **Re-run (use this upload)** on a Held row, open to the upload
 passphrase, makes it Pending and the day's choice (`/api/rerun`, the same
 `cloud/requeue.py` rule): it runs, replaces the Day Sheet and, with sync on,
-overwrites the day's tab. The choice is the upload made Pending last
+overwrites the day's tab; it is then queued like any other folder. With two
+or more Held rows, **Re-run all waiting uploads** sends each through the same
+route, one after another. The choice is the upload made Pending last
 (`readyAt`): an earlier upload that hasn't run yet, or fails and retries,
 steps aside when its Run starts (**Superseded**: no Day Sheet, no sync), and
 the per-day lease keeps the two from running at once, so the choice always
