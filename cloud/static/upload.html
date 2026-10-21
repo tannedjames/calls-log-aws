@@ -180,11 +180,12 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
         <span class="pill" id="sync-pill"><span class="dot"></span><span><span data-i18n="sync_label">Sync to Google Sheets</span>: <span id="sync">?</span></span></span>
       </div>
       <div class="scroll"><table id="status">
-        <thead><tr><th data-i18n="col_day">Person-Day</th><th data-i18n="col_status">Status</th><th data-i18n="col_images">Images</th><th data-i18n="col_lastrun">Last run</th><th data-i18n="col_error">Last error</th><th class="owner-col hidden"></th></tr></thead>
+        <thead><tr><th data-i18n="col_day">Person-Day</th><th data-i18n="col_status">Status</th><th data-i18n="col_images">Images</th><th data-i18n="col_lastrun">Last run</th><th data-i18n="col_error">Last error</th><th></th></tr></thead>
         <tbody></tbody>
       </table></div>
       <div class="row center actions" id="status-bar">
         <button type="button" id="refresh" class="ghost small" data-i18n="refresh">Refresh</button>
+        <button type="button" id="rerun-all" class="small hidden"></button>
         <span id="status-msg" class="muted" role="status"></span>
       </div>
     </section>
@@ -356,6 +357,16 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     st_Done: "Done",
     st_Failed: "Failed",
     st_Parked: "Stopped after 3 tries",
+    st_Held: "Waiting for Re-run",
+    st_Superseded: "Replaced by a later upload",
+    held_hint: "Not used yet: the day keeps its earlier upload. Re-run to use this one instead.",
+    use_upload: "Re-run (use this upload)",
+    rerun_all: "Re-run all waiting uploads ({n})",
+    confirm_rerun_all: "Use all {n} waiting uploads instead of their days' earlier ones? Each replaces its day's Day Sheet and, with sync on, overwrites its tab in the Sheet. They are queued like any other folder.",
+    rerun_all_ok: "{n} upload(s) queued.",
+    rerun_all_some: "{n} upload(s) queued; {bad} couldn't be ({why}). Refresh and try again.",
+    confirm_use: "Use this upload of {day} instead of the earlier one? It replaces the day's Day Sheet and, with sync on, overwrites its tab in the Sheet. Without it, the earlier upload stays.",
+    held_msg: "Queued. {n} folder(s) already had an upload for that day, so they wait: to use one instead, click its Re-run on the Status tab.",
     sh_title: "Day Sheets",
     sh_help: "Find a stored Day Sheet by employee and/or date.",
     employee: "Employee",
@@ -506,7 +517,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     e_bad_email: "That isn't an email address.",
     e_employees_too_long: "The list is too long to store (at most {max} bytes): shorten it.",
     e_no_upload: "No stored upload for that day.",
-    e_not_requeueable: "It is {status}; only a Done, Failed or Parked folder can run again.",
+    e_not_requeueable: "It is {status}; it can't run again from here now. Refresh the status.",
     e_images_gone: "Only {arrived} of its {declared} images are still stored (kept 30 days); upload the folder again instead.",
     e_changed: "It changed meanwhile; nothing was done. Refresh and try again.",
   };
@@ -570,6 +581,16 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     st_Done: "Xong",
     st_Failed: "Thất bại",
     st_Parked: "Dừng sau 3 lần thử",
+    st_Held: "Chờ chạy lại",
+    st_Superseded: "Đã thay bằng lần tải sau",
+    held_hint: "Chưa dùng: ngày này vẫn giữ lần tải trước. Bấm Chạy lại để dùng lần tải này.",
+    use_upload: "Chạy lại (dùng lần tải này)",
+    rerun_all: "Chạy lại mọi lần tải đang chờ ({n})",
+    confirm_rerun_all: "Dùng cả {n} lần tải đang chờ thay cho lần tải trước của từng ngày? Bảng ngày sẽ được thay và, khi bật đồng bộ, trang tính của ngày đó bị ghi đè. Chúng được xếp hàng như mọi thư mục khác.",
+    rerun_all_ok: "Đã xếp hàng {n} lần tải.",
+    rerun_all_some: "Đã xếp hàng {n} lần tải; {bad} lần chưa được ({why}). Hãy làm mới và thử lại.",
+    confirm_use: "Dùng lần tải này của {day} thay cho lần trước? Bảng ngày sẽ được thay và, khi bật đồng bộ, trang tính của ngày đó bị ghi đè. Nếu không, lần tải trước được giữ.",
+    held_msg: "Đã xếp hàng. {n} thư mục đã có lần tải cho ngày đó nên đang chờ: để dùng lần tải mới, bấm Chạy lại ở tab Trạng thái.",
     sh_title: "Bảng ngày",
     sh_help: "Tìm Bảng ngày đã lưu theo nhân viên và/hoặc ngày.",
     employee: "Nhân viên",
@@ -720,7 +741,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     e_bad_email: "Đây không phải địa chỉ email.",
     e_employees_too_long: "Danh sách quá dài để lưu (tối đa {max} byte): hãy rút ngắn.",
     e_no_upload: "Không có lần tải lên nào được lưu cho ngày đó.",
-    e_not_requeueable: "Đang ở trạng thái {status}; chỉ thư mục Xong, Thất bại hoặc Dừng sau 3 lần thử mới chạy lại được.",
+    e_not_requeueable: "Đang ở trạng thái {status}; lúc này không chạy lại được từ đây. Hãy làm mới trạng thái.",
     e_images_gone: "Chỉ còn {arrived}/{declared} ảnh được lưu (giữ 30 ngày); hãy tải lại thư mục.",
     e_changed: "Vừa có thay đổi nên chưa làm gì. Hãy làm mới và thử lại.",
   };
@@ -730,7 +751,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   const HEIC = [".heic", ".heif"];
   const DAY = /\d{4}-\d{1,2}-\d{1,2}\s*$/;
   const PARALLEL = 4;
-  const RERUNNABLE = ["Done", "Failed", "Parked", "Pending"];
+  const RERUNNABLE = ["Done", "Failed", "Parked", "Pending", "Superseded"];   // the Owner's; Held has its own button
   let passphrase = "";            // kept in memory only, never stored
   let ownerPass = "";             // likewise
   let lang = "en";
@@ -947,7 +968,8 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
         td.appendChild(badge(t("refused"), "b-bad"));
         why(td, explain(b.reason), "bad");
       } else if (b.state) {
-        const cls = b.failed ? "b-bad" : b.state.k === "st_Pending" ? "b-ok" : b.state.k === "accepted" ? "b-info" : "";
+        const cls = b.failed ? "b-bad" : b.state.k === "st_Pending" ? "b-ok" : b.state.k === "st_Held" ? "b-warn"
+          : b.state.k === "accepted" ? "b-info" : "";
         td.appendChild(badge(text(b.state), cls));
         if (b.state.k === "accepted" && b.ignored && b.ignored.length) {
           why(td, t("left_out", {files: b.ignored.join(", ")}), "muted");
@@ -1072,7 +1094,10 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     try {
       for (const b of batch.filter(x => x.state && x.state.k === "uploaded" && x.upload)) {
         if (mine !== session) return;
-        try { await api("/api/ready", b.upload); b.state = {k: "st_Pending"}; }
+        try {
+          const r = await api("/api/ready", b.upload);
+          b.state = {k: r.status === "Held" ? "st_Held" : "st_Pending"};
+        }
         catch (e) {
           if (lockedOut(e)) return;
           refused++; b.failed = true; b.state = {k: "not_ready", a: {why: e}};
@@ -1085,14 +1110,17 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
     if (mine !== session) return;
     // "You can close this page" only once no uploaded folder still waits for Ready.
     const left = batch.some(b => b.state && b.state.k === "uploaded");
-    say("batch-msg", refused ? {k: "n_not_ready", a: {n: refused}} : {k: left ? "click_ready" : "queued_msg"},
+    const held = batch.filter(b => b.state && b.state.k === "st_Held").length;
+    say("batch-msg", refused ? {k: "n_not_ready", a: {n: refused}}
+        : left ? {k: "click_ready"} : held ? {k: "held_msg", a: {n: held}} : {k: "queued_msg"},
         refused ? "bad" : "ok");
     $("to-status").classList.remove("hidden");
     refresh();
   });
 
   // ----- status -----
-  const COLOURS = {Done: "b-ok", Pending: "b-info", Processing: "b-info", Uploading: "b-warn", Failed: "b-bad", Parked: "b-bad"};
+  const COLOURS = {Done: "b-ok", Pending: "b-info", Processing: "b-info", Uploading: "b-warn", Failed: "b-bad", Parked: "b-bad",
+                   Held: "b-warn"};
 
   function showSync(on) {
     const word = on === true ? t("on") : on === false ? t("off") : t("unknown");
@@ -1111,9 +1139,11 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
 
   function renderStatus() {
     showSync(statusData ? statusData.syncEnabled : null);
-    document.querySelectorAll(".owner-col").forEach(el => el.classList.toggle("hidden", !ownerPass));
     const body = $("status").querySelector("tbody");
     body.textContent = "";
+    const held = statusData ? statusData.folders.filter(f => f.status === "Held") : [];
+    $("rerun-all").classList.toggle("hidden", held.length < 2);   // one waiting upload has its own button
+    $("rerun-all").textContent = t("rerun_all", {n: held.length});
     if (!statusData) return;
     for (const f of statusData.folders) {
       const tr = document.createElement("tr");
@@ -1121,18 +1151,23 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
       const td = cell(tr, "");
       td.appendChild(badge(stName(f.status), COLOURS[f.status]));
       if (f.uploads > 1) td.appendChild(document.createTextNode(" " + t("n_uploads", {n: f.uploads})));
+      if (f.status === "Held") {   // in the status cell, so a phone sees it without scrolling sideways
+        why(td, t("held_hint"), "muted");
+        const d = document.createElement("div");
+        d.className = "why";
+        d.appendChild(actionButton(t("use_upload"), () => useUpload(f)));
+        td.appendChild(d);
+      }
       cell(tr, f.imageCount);
       cell(tr, when(f.lastRunAt));
       cell(tr, f.lastError, f.lastError ? "err" : "");
-      if (ownerPass) {
-        const act = cell(tr, "");
-        if (RERUNNABLE.includes(f.status)) act.appendChild(actionButton(t("rerun"), () => rerun(f)));
-      }
+      const act = cell(tr, "");
+      if (ownerPass && RERUNNABLE.includes(f.status)) act.appendChild(actionButton(t("rerun"), () => rerun(f)));
       body.appendChild(tr);
     }
     if (!statusData.folders.length) {
       const tr = document.createElement("tr");
-      cell(tr, t("no_uploads"), "muted").colSpan = ownerPass ? 6 : 5;
+      cell(tr, t("no_uploads"), "muted").colSpan = 6;
       body.appendChild(tr);
     }
   }
@@ -1150,6 +1185,44 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; back
   $("refresh").addEventListener("click", refresh);
   setInterval(() => { if (passphrase && document.visibilityState === "visible") refresh(); }, 60000);
   document.addEventListener("visibilitychange", () => { if (passphrase && document.visibilityState === "visible") refresh(); });
+
+  // A Held upload (the day already had one, Story 4.6) replaces the earlier one only on this click.
+  async function useUpload(f) {
+    if (!window.confirm(t("confirm_use", {day: f.personDay}))) return;
+    const mine = session;
+    try {
+      await api("/api/rerun", {personDay: f.personDay, uploadId: f.uploadId});
+      if (mine !== session) return;          // signed out meanwhile
+      await refresh();
+      say("status-msg", {k: "rerun_ok", a: {day: f.personDay}}, "ok");
+    } catch (e) {
+      if (mine === session && !lockedOut(e)) say("status-msg", e, "bad");
+    }
+  }
+
+  // Every Held upload of the Status tab, one after another, each through the same /api/rerun.
+  let rerunningAll = false;
+  $("rerun-all").addEventListener("click", async () => {
+    const held = statusData ? statusData.folders.filter(f => f.status === "Held") : [];
+    if (rerunningAll || !held.length || !window.confirm(t("confirm_rerun_all", {n: held.length}))) return;
+    const mine = session;
+    rerunningAll = true; $("rerun-all").disabled = true;
+    let done = 0, last = null;
+    try {
+      for (const f of held) {
+        if (mine !== session) return;
+        try { await api("/api/rerun", {personDay: f.personDay, uploadId: f.uploadId}); done++; }
+        catch (e) { if (lockedOut(e)) return; last = e; }
+      }
+    } finally {
+      rerunningAll = false; $("rerun-all").disabled = false;
+    }
+    if (mine !== session) return;
+    await refresh();
+    const bad = held.length - done;
+    say("status-msg", bad ? {k: "rerun_all_some", a: {n: done, bad: bad, why: last}} : {k: "rerun_all_ok", a: {n: done}},
+        bad ? "bad" : "ok");
+  });
 
   async function rerun(f) {
     if (!window.confirm(t("confirm_rerun", {day: f.personDay}))) return;

@@ -15,14 +15,20 @@ to max_images images. Then, one folder at a time:
   3. Uploading -> Pending (cloud/status.py stays the table's only writer);
   4. one queue message {"uploadId", "personDay", "mode": "process"}.
 
+If the day already has an upload, step 3 is Uploading -> Held instead and
+nothing is queued (Story 4.6): the earlier upload stays the day's, until this
+one is re-queued with --requeue --upload-id.
+
 The runner takes it from there; the Day Sheet lands in results/ and, with the
 AWS Sync Switch on, in the Sheet. Nothing on the PC is moved or changed.
 
 --requeue runs a stored Folder again without uploading it (Story 3.8, FR-7):
-the newest upload of that Person-Day, or --upload-id, if it is Done, Failed
-or Parked and its images are all still in inbox/ (kept 30 days). It becomes
-Pending with its attempts back at 0, and one message is queued. The Day Sheet
-it writes is a new version; earlier ones stay in results/.
+the day's current upload (the one chosen last, never a Held one), or
+--upload-id, if it is Done, Failed,
+Parked, Held or Superseded and its images are all still in inbox/ (kept 30
+days). It becomes Pending with its attempts back at 0, and the day's choice: an
+older upload of the day that hasn't run yet steps aside. One message is
+queued. The Day Sheet it writes is a new version; earlier ones stay in results/.
 
 Exit code 0 = all sent, 1 = AWS failed (the folders after it are not sent),
 2 = bad usage or a folder refused (nothing sent at all).
@@ -43,7 +49,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from cloud import naming, requeue as shared_requeue  # noqa: E402
-from cloud.status import FolderStatus  # noqa: E402
+from cloud.status import FolderStatus, Status  # noqa: E402
 from cloud.storage import IMAGE_SUFFIXES, pc_order  # noqa: E402
 from tools.aws_cli import REGION, AwsError, Client, account_id, call, run_cli  # noqa: E402
 
@@ -80,16 +86,20 @@ def check(path: Path, max_images: int) -> tuple[Optional[Folder], Optional[str]]
 
 
 def send(folder: Folder, *, bucket: str, queue_url: str, status: FolderStatus,
-         run=subprocess.run) -> str:
-    """Upload one checked folder, mark it Pending and queue it. Returns its uploadId."""
+         run=subprocess.run) -> tuple[str, str]:
+    """
+    Upload one checked folder, then mark it Pending and queue it, or Held when
+    the day already has an upload (Story 4.6). Returns (uploadId, status).
+    """
     upload_id = naming.new_upload_id()
     status.create(folder.day.key, upload_id, len(folder.images))
     for name in folder.images:
         run_cli(["s3", "cp", str(folder.path / name),
                  f"s3://{bucket}/{naming.inbox_key(upload_id, name)}", "--only-show-errors"], run=run)
-    status.mark_ready(folder.day.key, upload_id)
-    _queue(upload_id, folder.day, queue_url, run)
-    return upload_id
+    now = status.mark_ready(folder.day.key, upload_id)["status"]
+    if now == Status.PENDING.value:
+        _queue(upload_id, folder.day, queue_url, run)
+    return upload_id, now
 
 
 def _queue(upload_id: str, day: naming.PersonDay, queue_url: str, run) -> None:
@@ -186,13 +196,16 @@ def main(argv: Optional[List[str]] = None, *, run=subprocess.run, max_images: Op
 
     for done, f in enumerate(checked):
         try:
-            upload_id = send(f, bucket=bucket, queue_url=queue_url, status=status, run=run)
+            upload_id, now = send(f, bucket=bucket, queue_url=queue_url, status=status, run=run)
         except AwsError as e:
             print(f"{f.day.key}: not sent: {e}", file=sys.stderr)
             print("It never runs as it is; send the folder again. "
                   f"Not tried: {len(checked) - done - 1} folder(s) after it.", file=sys.stderr)
             return 1
         print(f"sent {f.day.key}: {len(f.images)} image(s), upload {upload_id}")
+        if now == Status.HELD.value:
+            print(f"  Held: the day already has an upload, which stays. To use this one instead: "
+                  f'enqueue.py --requeue "{f.day.key}" --upload-id {upload_id}')
     return 0
 
 

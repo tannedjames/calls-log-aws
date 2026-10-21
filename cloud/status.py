@@ -15,11 +15,21 @@ and raises TransitionRefused (or returns False for the lease).
 
     create        -> Uploading
     record_import -> Done, imported (Story 5.1: a PC Day Sheet brought over; no images)
-    mark_ready    Uploading -> Pending (readyAt: the start of the turnaround)
+    mark_ready    Uploading -> Pending (readyAt: the start of the turnaround), or
+                  Uploading -> Held when another upload of the day was already
+                  made Ready (Story 4.6): it waits for a Re-run, nothing is queued
     begin_run     take the lease, then Pending | Failed | Processing -> Processing
-                  (attempts + 1), or -> Parked when 3 Runs have already started
+                  (attempts + 1), or -> Parked when 3 Runs have already started,
+                  or -> Superseded when another upload of the day was chosen later
     finish        Processing -> Done | Failed
-    requeue       Done | Failed | Parked -> Pending, attempts back to 0, readyAt again
+    requeue       Done | Failed | Parked | Held | Superseded -> Pending, attempts
+                  back to 0, readyAt again: a Re-run makes it the day's choice
+
+The day's choice is the upload made Pending last (readyAt, then uploadId). The
+lease keeps two Runs of a day apart, so an older upload that starts after a
+newer one was chosen steps aside (Superseded), and a newer one that waited for
+an older one's lease runs after it: the choice is always the last Day Sheet
+written and sent.
 
 Processing -> Processing is a redelivered message after a Run that timed out
 and so never wrote Failed. It needs the lease, which outlives the 900 s Lambda
@@ -49,10 +59,22 @@ class Status(str, Enum):
     DONE = "Done"
     FAILED = "Failed"
     PARKED = "Parked"
+    HELD = "Held"
+    SUPERSEDED = "Superseded"
+
+
+# A Held upload is one this day already made Ready before; a chosen one is in
+# the running (or has run) and so may replace the day's Day Sheet.
+_CHOSEN = (Status.PENDING.value, Status.PROCESSING.value, Status.DONE.value,
+           Status.FAILED.value, Status.PARKED.value)
 
 
 class TransitionRefused(Exception):
     """The upload wasn't in a state this change starts from (or doesn't exist); nothing changed."""
+
+
+class Superseded(TransitionRefused):
+    """Another upload of this Person-Day was chosen later; this one is Superseded and never runs."""
 
 
 class Busy(Exception):
@@ -189,10 +211,40 @@ class FolderStatus:
             raise
 
     def mark_ready(self, person_day: str, upload_id: str) -> Dict[str, Any]:
-        """Uploading -> Pending, once the intake has counted every image."""
+        """
+        Uploading -> Pending once every image arrived; Uploading -> Held instead
+        when another upload of this Person-Day was already made Ready (Story
+        4.6). Only Pending is queued; a Held upload waits for a Re-run. An
+        earlier upload still Uploading (never finished) doesn't count.
+        """
+        others = [u for u in self.uploads(person_day)
+                  if u.get("uploadId") != upload_id and u.get("status") != Status.UPLOADING.value]
+        now = _s(_iso(self.clock()))
+        if others:
+            return self._update(person_day, upload_id, "SET #s = :to, #u = :now", "#s IN (:from0)",
+                                {":to": _s(Status.HELD.value), ":from0": _s(Status.UPLOADING.value),
+                                 ":now": now})
         return self._update(person_day, upload_id, "SET #s = :to, #u = :now, #y = :now", "#s IN (:from0)",
                             {":to": _s(Status.PENDING.value), ":from0": _s(Status.UPLOADING.value),
-                             ":now": _s(_iso(self.clock()))})
+                             ":now": now})
+
+    def chosen_later(self, person_day: str, upload_id: str) -> Optional[str]:
+        """The uploadId of another upload of this day chosen after this one, or None."""
+        uploads = self.uploads(person_day)
+        mine = next((u for u in uploads if u.get("uploadId") == upload_id), None)
+        if mine is None:
+            return None
+        rank = (mine.get("readyAt") or "", upload_id)
+        later = [u["uploadId"] for u in uploads if u.get("uploadId") != upload_id
+                 and u.get("status") in _CHOSEN and (u.get("readyAt") or "", u["uploadId"]) > rank]
+        return later[-1] if later else None
+
+    def _supersede(self, person_day: str, upload_id: str) -> Dict[str, Any]:
+        return self._update(person_day, upload_id, "SET #s = :to, #u = :now",
+                            "#s IN (:from0, :from1, :from2)",
+                            {":to": _s(Status.SUPERSEDED.value), ":now": _s(_iso(self.clock())),
+                             ":from0": _s(Status.PENDING.value), ":from1": _s(Status.FAILED.value),
+                             ":from2": _s(Status.PROCESSING.value)})
 
     def _start(self, person_day: str, upload_id: str) -> Dict[str, Any]:
         """Counts the attempt before any work (AD-6): Processing, or Parked at the 4th start."""
@@ -214,12 +266,18 @@ class FolderStatus:
         """
         Take the Person-Day's lease, then count the attempt (AD-5, AD-6). Returns
         the item: status Processing (work on it) or Parked (alert, stop). Raises
-        Busy when another Run holds the lease (nothing changed), TransitionRefused
-        when the upload isn't startable. Either way the lease is not kept.
+        Busy when another Run holds the lease (nothing changed), Superseded when
+        another upload of the day was chosen later (written Superseded), and
+        TransitionRefused when the upload isn't startable. In each of those the
+        lease is not kept.
         """
         if not self.take_lease(person_day, holder):
             raise Busy(f"{person_day}: another Run holds the lease")
         try:
+            later = self.chosen_later(person_day, upload_id)
+            if later is not None:
+                self._supersede(person_day, upload_id)
+                raise Superseded(f"{person_day} / {upload_id}: upload {later} was chosen later")
             item = self._start(person_day, upload_id)
         except BaseException:
             self.release_lease(person_day, holder)
@@ -239,13 +297,17 @@ class FolderStatus:
                                                ":err": _s(error[:_ERROR_LIMIT] or "failed")})
 
     def requeue(self, person_day: str, upload_id: str) -> Dict[str, Any]:
-        """Done | Failed | Parked -> Pending with the attempt count reset (the Owner's re-queue)."""
+        """
+        Done | Failed | Parked | Held | Superseded -> Pending with the attempt
+        count reset and readyAt now: a Re-run, which makes it the day's choice.
+        """
         return self._update(
             person_day, upload_id, "SET #s = :to, #a = :zero, #u = :now, #y = :now REMOVE #e",
-            "#s IN (:from0, :from1, :from2)",
+            "#s IN (:from0, :from1, :from2, :from3, :from4)",
             {":to": _s(Status.PENDING.value), ":zero": _n(0), ":now": _s(_iso(self.clock())),
              ":from0": _s(Status.DONE.value), ":from1": _s(Status.FAILED.value),
-             ":from2": _s(Status.PARKED.value)})
+             ":from2": _s(Status.PARKED.value), ":from3": _s(Status.HELD.value),
+             ":from4": _s(Status.SUPERSEDED.value)})
 
     # ----- the Person-Day lease (AD-5) --------------------------------------
 

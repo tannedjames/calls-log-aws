@@ -40,7 +40,7 @@ above never import it.
 | `cloud/storage.py`, `cloud/naming.py`, `cloud/settings.py` | The data bucket, the one folder-name parser, and run-time settings and secrets. |
 | `cloud/intake.py`, `cloud/static/upload.html` | The upload and status page behind a public URL: checks folders, hands out presigned uploads, marks them Ready, shows Folder Status and finds Day Sheets; its Owner tab re-runs and re-sends days, stops and starts the runner and shows timings (§11). English and Vietnamese. |
 | `cloud/passphrase.py` | The page's passphrase and owner password: PBKDF2 hashing and the constant-time check. |
-| `cloud/requeue.py`, `cloud/timing.py` | Shared by the PC tools and the Owner tab: the re-queue rule (`enqueue.py --requeue`) and the Ready→Done percentiles (`turnaround.py`). |
+| `cloud/requeue.py`, `cloud/timing.py` | Shared by the PC tools and the page: the re-queue rule (`enqueue.py --requeue`, the Owner tab's Re-run, a Held upload's Re-run) and the Ready→Done percentiles (`turnaround.py`). |
 | `cloud/owner_settings.py` | The four settings the Owner tab may write (never the Web App URL or its secret) and the rules a new employee list or alert address must pass (§11). |
 | `cloud/killswitch.py` | Called by a guardrail alarm: turns the runner's queue trigger off, or the upload page off for its own alarm, and emails the Owner (§11). Also the runner's state and start, for the Owner tab. |
 | `cloud/bench.py` | Story 3.1's benchmark function (only while `enable_bench` is on). |
@@ -760,10 +760,28 @@ Give the address and the passphrase to the Operator. On the page:
    the folder becomes Pending and is queued. Fewer (the upload broke): it is
    refused; choose the folder and upload it again. Clicking Ready on a folder
    that is already Pending queues it again, which is harmless.
+   If the day already has an upload that was made Ready (or imported from the
+   PC), the new one is **Held** instead ("Waiting for Re-run") and nothing is
+   queued (Story 4.6, below).
 
-The Status tab shows the newest upload of each Person-Day of the last 7
-days and refreshes every minute; "Upload not finished" means its images never
-all arrived. The Day Sheets tab finds stored sheets by part of a name
+The Status tab shows the current upload of each Person-Day of the last 7
+days, with each Held upload of that day on a row of its own, and refreshes
+every minute; "Upload not finished" means its images never all arrived.
+
+**A day's second upload (Story 4.6).** Uploads of one day are never combined:
+each Run reads only its own images. So a second upload waits as Held, and the
+day keeps its earlier upload, which still runs and is still sent if it hadn't
+been. **Re-run (use this upload)** on a Held row, open to the upload
+passphrase, makes it Pending and the day's choice (`/api/rerun`, the same
+`cloud/requeue.py` rule): it runs, replaces the Day Sheet and, with sync on,
+overwrites the day's tab; it is then queued like any other folder. With two
+or more Held rows, **Re-run all waiting uploads** sends each through the same
+route, one after another. The choice is the upload made Pending last
+(`readyAt`): an earlier upload that hasn't run yet, or fails and retries,
+steps aside when its Run starts (**Superseded**: no Day Sheet, no sync), and
+the per-day lease keeps the two from running at once, so the choice always
+writes last. A Re-run of any upload from the Owner tab or `enqueue.py
+--requeue` makes that one the choice in the same way. The Day Sheets tab finds stored sheets by part of a name
 (accents and case don't matter) and/or a date; each Download link works for
 5 minutes. The **EN / VI** switch in the header translates the whole page,
 the server's refusals included (each carries a `code` the page looks up); the
@@ -791,7 +809,7 @@ password stays in the open page only; Lock or reloading forgets it):
 
 | Control | What it does | Same as |
 |---|---|---|
-| **Re-run** (Status tab, per row) | Runs the newest stored upload of that day again, if it is Done, Failed or Parked and all its images are still in `inbox/`; a Waiting upload is just queued again | `enqueue.py --requeue` (both call `cloud/requeue.py`) |
+| **Re-run** (Status tab, per row) | Runs that row's stored upload again and makes it the day's choice, if it is Done, Failed, Parked or Superseded and all its images are still in `inbox/`; a Waiting upload is just queued again. A Held row has its own Re-run, open to the upload passphrase too | `enqueue.py --requeue` (both call `cloud/requeue.py`) |
 | **Re-send to Sheet** (Day Sheets tab, per row) | Queues one re-send of that stored Day Sheet, **whatever the AWS Sync Switch says**, and overwrites the day's tab | `resync.py --name … --date …` for one day |
 | **AWS processing: Stop / Start** | Turns the runner's queue trigger off or on. Stopped: no new Run starts, queued Folders wait up to 14 days | "Stopping the runner by hand" and "Turning the runner back on" below |
 | **Sync to Google Sheets: Turn on / Turn off** | Writes the AWS Sync Switch; the next folder uses it | `put_parameters.py --sync-enabled` |
@@ -821,7 +839,9 @@ It checks every folder first and sends nothing if any is refused (a name that
 isn't `<Name> & <yyyy-mm-dd>` with a real date, no images, more than
 `max_images`, or the same Person-Day twice). Then, per folder: a new upload,
 the images to `inbox/<uploadId>/`, the Folder Status Pending, one queue
-message. It moves nothing on the PC. The runner picks the message up within
+message. A day that already has an upload gets Held instead, with no message;
+the tool prints the `--requeue … --upload-id …` line that uses it (Story 4.6,
+§"The upload page"). It moves nothing on the PC. The runner picks the message up within
 about 20 seconds and runs at most two Folders at a time. The Day Sheet lands in
 `results/<Name> & <date>.xlsx` (each Run a new version), and in the Sheet if
 the AWS Sync Switch is on.
@@ -842,15 +862,18 @@ aws logs tail /aws/lambda/calls-log-runner --since 1d --region ap-southeast-2
 ### Re-queueing a Folder
 
 Runs a stored Folder again without uploading it: after a fix, for a Parked or
-Failed Folder, or to redo a Done day.
+Failed Folder, to redo a Done day, or to use a Held or Superseded upload.
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 tools\enqueue.py --requeue "Nguyen Van A & 2026-06-01"
 .\.venv\Scripts\python.exe -X utf8 tools\enqueue.py --requeue "Nguyen Van A & 2026-06-01" --upload-id 20260601T083005Z-0a1b2c3d
 ```
 
-It takes the newest upload of that day (or the one named), if it is Done, Failed
-or Parked. It becomes Pending with its attempts back at 0, and runs again. The
+It takes the day's current upload (the one chosen last; a Held or Superseded
+upload only when named with `--upload-id`), if it is Done, Failed,
+Parked, Held or Superseded. It becomes Pending with its attempts back at 0 and
+the day's choice (an older upload of the day that hasn't run yet steps
+aside), and runs again. The
 new Day Sheet is a new version of `results/<Name> & <date>.xlsx`; earlier
 versions stay. With the AWS Sync Switch on, the day's tab is overwritten, as
 when the PC re-runs a date. Uploads are kept 30 days: if some of its images are
@@ -883,7 +906,7 @@ the queue for up to 14 days. The alarms:
 |---|---|
 | `calls-log-runner-dlq` | a message reached the dead-letter queue: it was received 10 times without the runner finishing it, a crash loop (failed Runs park after 3) |
 | `calls-log-runner-errors` | 6 or more runner crashes in 15 minutes (a failed Run is not a crash) |
-| `calls-log-runner-runaway` | both Run slots busy for N quarter-hours in a row; the alarm's description gives N (7 at 2,048 MB). N is set from the memory size so that, past the free tier, a runaway costs at most $0.50 before the stop ($0.48 at 2,048 MB) |
+| `calls-log-runner-runaway` | both Run slots busy for N quarter-hours in a row; the alarm's description gives N (16, that is 4 hours, at 2,048 MB). N is set from the memory size so that, past the free tier, a runaway costs at most `runaway_cap_usd`, $1.05, before the stop ($1.02 at 2,048 MB). The Owner raised it from $0.50 (1 h 45 min) on 2026-10-21, so that a whole week sent at once finishes without a stop. A batch never stops on its own otherwise: the runner works through every queued folder, two at a time |
 
 The upload page's own alarms don't stop the runner; they turn the page off
 instead (below): `calls-log-intake-runaway` (600 or more page requests in 15
