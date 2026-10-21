@@ -12,16 +12,19 @@
 #                             either makes the kill switch throttle the page to 0
 #
 # N comes from the memory size so that, past the free tier, the worst case
-# stays at or under $0.50 (the AC), counting one more period for the alarm to
-# fire and the switch to act: at 2,048 MB that is 7 periods (1 h 45 min of
-# both slots busy, about 3 times a normal day's peak) and $0.48.
+# stays at or under runaway_cap_usd, counting one more period for the alarm to
+# fire and the switch to act: at 2,048 MB that is 16 periods (4 h of both
+# slots busy) and $1.02. The Owner raised it from $0.50 (FR-18's first figure,
+# 1 h 45 min) on 2026-10-21, so a big week sent at once finishes without a
+# stop (spec-4-6-second-upload.md).
 # Cost: 5 alarms (10 are free) and a function that runs only when one fires.
 # ---------------------------------------------------------------------------
 
 locals {
   lambda_gb_second_usd   = 0.0000166667
   runaway_usd_per_period = 2 * (var.runner_memory_mb / 1024) * 900 * local.lambda_gb_second_usd
-  runaway_periods        = max(2, floor(0.5 / local.runaway_usd_per_period) - 1)
+  runaway_cap_usd        = 1.05
+  runaway_periods        = max(2, floor(local.runaway_cap_usd / local.runaway_usd_per_period) - 1)
   runaway_worst_case_usd = (local.runaway_periods + 1) * local.runaway_usd_per_period
   # Fixed-format ARNs, so the alarms are complete at plan time.
   guardrail_actions = [

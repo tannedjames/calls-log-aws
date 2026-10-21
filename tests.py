@@ -1636,6 +1636,7 @@ _ALLOWED = {   # (operation, from state) pairs the AD-4 diagram allows
     ("begin_run", fstatus.Status.PROCESSING),   # a Run that timed out, its lease expired
     ("finish_ok", fstatus.Status.PROCESSING), ("finish_error", fstatus.Status.PROCESSING),
     ("requeue", fstatus.Status.DONE), ("requeue", fstatus.Status.FAILED), ("requeue", fstatus.Status.PARKED),
+    ("requeue", fstatus.Status.HELD), ("requeue", fstatus.Status.SUPERSEDED),   # Story 4.6: a Re-run
 }
 _OPS = {
     "mark_ready": lambda s: s.mark_ready(_PD, _UP),
@@ -2131,7 +2132,7 @@ def test_enqueue_uploads_then_marks_pending_then_queues():
         code, said = _enqueue([str(folder)], cli)
     assert code == 0, said
     assert cli.log == ["sts get-caller-identity", "dynamodb put-item", "s3 cp", "s3 cp",
-                       "dynamodb update-item", "sqs send-message"]
+                       "dynamodb query", "dynamodb update-item", "sqs send-message"]   # query: Story 4.6
     message = cli.inputs[-1]
     assert message["QueueUrl"] == "https://sqs.ap-southeast-2.amazonaws.com/123456789012/calls-log-runs"
     body = json.loads(message["MessageBody"])
@@ -2407,9 +2408,14 @@ _RQ_NEW = "20260602T080000Z-00000002"
 
 
 def _stored_upload(status, upload_id, state, images=2, person_day=_RUN_PD):
-    """An upload of person_day left in the given state, through the real transitions."""
+    """
+    An upload of person_day left in the given state, through the real
+    transitions. A later upload of the day is Held at Ready; unless Held is
+    asked for, it is re-run (Story 4.6), as the Owner would.
+    """
     status.create(person_day, upload_id, images)
-    status.mark_ready(person_day, upload_id)
+    if status.mark_ready(person_day, upload_id)["status"] == "Held" and state != "Held":
+        status.requeue(person_day, upload_id)
     if state in ("Done", "Failed", "Processing", "Parked"):
         status.begin_run(person_day, upload_id, "run-x")
         status.release_lease(person_day, "run-x")
@@ -3537,7 +3543,7 @@ def test_owner_requeue_refuses_and_changes_nothing():
 
 
 def test_owner_requeue_and_the_pc_tool_share_one_rule():
-    assert enqueue.REQUEUEABLE == crequeue.REQUEUEABLE == ("Done", "Failed", "Parked")
+    assert enqueue.REQUEUEABLE == crequeue.REQUEUEABLE == ("Done", "Failed", "Parked", "Held", "Superseded")
 
 
 def test_owner_resend_queues_only_a_stored_day_sheet():
@@ -3865,3 +3871,203 @@ def test_owner_settings_never_reach_a_log_line():
         intake.log.removeHandler(keep)
     text = "\n".join(lines)
     assert lines and not any(v in text for v in ("a brand new owner pw", "pham thi d", "Pham", "secret.person"))
+
+
+# ----- a day's second upload waits for a Re-run (Story 4.6) ---------------------------------
+
+_HELD_OLD = "20260601T080000Z-00000001"
+_HELD_NEW = "20260601T090000Z-00000002"
+
+
+def _two_uploads(old_state="Done"):
+    """A store with an older upload in old_state and a newer one Held, the clock at 1_780_000_000."""
+    store, now = _store()
+    _stored_upload(store, _HELD_OLD, old_state)
+    store.create(_RUN_PD, _HELD_NEW, 2)
+    assert store.mark_ready(_RUN_PD, _HELD_NEW)["status"] == "Held"
+    return store, now
+
+
+def test_second_upload_of_a_day_is_held_without_ready_time():
+    store, _ = _two_uploads()
+    item = store.get(_RUN_PD, _HELD_NEW)
+    assert item["status"] == "Held" and "readyAt" not in item   # out of the turnaround until a Re-run
+    assert store.get(_RUN_PD, _HELD_OLD)["status"] == "Done"     # the earlier upload stays the day's
+    try:
+        store.begin_run(_RUN_PD, _HELD_NEW, "run-1")              # a stray message can't start it
+    except fstatus.TransitionRefused:
+        pass
+    else:
+        raise AssertionError("a Held upload started")
+    assert ("pd#" + _RUN_PD, "lease") not in store.client.items
+
+
+def test_an_unfinished_upload_does_not_hold_the_next_but_an_import_does():
+    store, _ = _store()
+    store.create(_RUN_PD, _HELD_OLD, 2)                                  # never made Ready
+    store.create(_RUN_PD, _HELD_NEW, 2)
+    assert store.mark_ready(_RUN_PD, _HELD_NEW)["status"] == "Pending"
+    store, _ = _store()
+    store.record_import(_RUN_PD, _HELD_OLD)                             # the PC already sent this day
+    store.create(_RUN_PD, _HELD_NEW, 2)
+    assert store.mark_ready(_RUN_PD, _HELD_NEW)["status"] == "Held"
+
+
+def test_without_a_rerun_the_earlier_upload_still_runs_and_stays():
+    for old in ("Pending", "Failed"):                                    # not yet in the Sheet
+        store, _ = _two_uploads(old)
+        assert store.begin_run(_RUN_PD, _HELD_OLD, "run-1")["status"] == "Processing"
+        store.finish(_RUN_PD, _HELD_OLD)
+        store.release_lease(_RUN_PD, "run-1")
+        assert store.get(_RUN_PD, _HELD_NEW)["status"] == "Held"
+
+
+def test_a_rerun_makes_the_later_upload_the_days_choice_and_the_earlier_steps_aside():
+    for old in ("Pending", "Failed"):
+        store, now = _two_uploads(old)
+        now[0] += 60
+        store.requeue(_RUN_PD, _HELD_NEW)                                # Re-run: Held -> Pending
+        assert store.chosen_later(_RUN_PD, _HELD_OLD) == _HELD_NEW
+        try:
+            store.begin_run(_RUN_PD, _HELD_OLD, "run-1")
+        except fstatus.Superseded:
+            pass
+        else:
+            raise AssertionError(f"an older {old} upload ran after a later one was chosen")
+        assert store.get(_RUN_PD, _HELD_OLD)["status"] == "Superseded"
+        assert ("pd#" + _RUN_PD, "lease") not in store.client.items
+        assert store.begin_run(_RUN_PD, _HELD_NEW, "run-2")["status"] == "Processing"
+
+
+def test_a_rerun_while_the_earlier_one_runs_waits_then_writes_last():
+    store, now = _two_uploads("Pending")
+    store.begin_run(_RUN_PD, _HELD_OLD, "run-1")                         # the earlier one is running
+    now[0] += 60
+    store.requeue(_RUN_PD, _HELD_NEW)
+    try:
+        store.begin_run(_RUN_PD, _HELD_NEW, "run-2")
+    except fstatus.Busy:
+        pass
+    else:
+        raise AssertionError("two Runs of one day at once")
+    store.finish(_RUN_PD, _HELD_OLD)
+    store.release_lease(_RUN_PD, "run-1")
+    assert store.begin_run(_RUN_PD, _HELD_NEW, "run-2")["status"] == "Processing"   # runs after: its sheet wins
+
+
+def test_re_running_an_older_upload_makes_it_the_choice_again():
+    store, now = _two_uploads("Done")
+    now[0] += 60
+    store.requeue(_RUN_PD, _HELD_NEW)
+    store.begin_run(_RUN_PD, _HELD_NEW, "run-1")
+    store.finish(_RUN_PD, _HELD_NEW, "boom")                             # Failed, would retry by itself
+    store.release_lease(_RUN_PD, "run-1")
+    now[0] += 60
+    store.requeue(_RUN_PD, _HELD_OLD)                                    # the Owner goes back to the first
+    try:
+        store.begin_run(_RUN_PD, _HELD_NEW, "run-2")
+    except fstatus.Superseded:
+        pass
+    else:
+        raise AssertionError("the retried later upload overwrote the Owner's choice")
+    assert store.begin_run(_RUN_PD, _HELD_OLD, "run-3")["status"] == "Processing"
+
+
+def test_runner_steps_aside_for_a_later_choice_without_a_day_sheet_or_sync():
+    rig = _Rig(switch="true")
+    rig.status.create(_RUN_PD, "20260601T090000Z-0000000f", 1)
+    assert rig.status.mark_ready(_RUN_PD, "20260601T090000Z-0000000f")["status"] == "Held"
+    rig.status.clock = lambda: 1_780_000_100.0
+    rig.status.requeue(_RUN_PD, "20260601T090000Z-0000000f")
+    outcome = rig.run()
+    assert outcome.status == "Superseded" and rig.ocr_calls == [] and not rig.sync.called
+    assert not any(k.startswith("results/") for k in rig.s3.objects)
+    assert rig.item()["status"] == "Superseded" and rig.item()["attempts"] == 0
+    assert [e["status"] for e in rig.events()] == ["Superseded"]
+    assert ("pd#" + _RUN_PD, "lease") not in rig.status.client.items
+
+
+def _intake_two_uploads():
+    """Two uploads of one day, every image arrived, neither Ready. Their uploadIds carry today's date."""
+    svc, _, s3 = _intake()
+    svc.today = lambda: _dt.datetime.now(_dt.timezone.utc).date()
+    ids = []
+    for _ in range(2):
+        up = _upload(svc, s3, ["a.jpg"])
+        s3.objects[f"inbox/{up['uploadId']}/a.jpg"] = b"x"
+        ids.append({"personDay": up["personDay"], "uploadId": up["uploadId"]})
+    return svc, s3, ids
+
+
+def test_intake_ready_holds_a_days_second_upload_and_queues_nothing():
+    svc, s3, (first, second) = _intake_two_uploads()
+    assert _call(svc, "/api/ready", first)[1]["status"] == "Pending"
+    code, body = _call(svc, "/api/ready", second)
+    assert code == 200 and body["status"] == "Held"
+    code, body = _call(svc, "/api/ready", second)                        # Ready again: still Held, no message
+    assert code == 200 and body["status"] == "Held"
+    assert [m["body"]["uploadId"] for m in svc.sqs.sent] == [first["uploadId"]]
+
+
+def test_intake_status_lists_a_held_upload_under_its_days_row():
+    svc, s3, (first, second) = _intake_two_uploads()
+    _call(svc, "/api/ready", first)
+    _call(svc, "/api/ready", second)
+    rows = _call(svc, "/api/status")[1]["folders"]
+    assert [(r["uploadId"], r["status"], r["uploads"]) for r in rows] == [
+        (first["uploadId"], "Pending", 2), (second["uploadId"], "Held", 2)]
+
+
+def test_intake_rerun_with_the_passphrase_uses_a_held_upload_only():
+    svc, s3, (first, second) = _intake_two_uploads()
+    _call(svc, "/api/ready", first)
+    _call(svc, "/api/ready", second)
+    assert _call(svc, "/api/rerun", second, passphrase="wrong guess here")[0] == 401
+    assert _call(svc, "/api/rerun", second, passphrase=None)[0] == 401
+    svc.status.begin_run(_RUN_PD, first["uploadId"], "run-1")
+    svc.status.finish(_RUN_PD, first["uploadId"])
+    svc.status.release_lease(_RUN_PD, "run-1")
+    code, body = _call(svc, "/api/rerun", first)                         # Done: only the Owner re-runs it
+    assert code == 409 and body["code"] == "not_requeueable" and body["args"]["status"] == "Done"
+    code, body = _call(svc, "/api/rerun", second)
+    assert code == 200 and body["status"] == "Pending" and body["images"] == 1
+    assert svc.sqs.sent[-1]["body"] == {"uploadId": second["uploadId"], "personDay": _RUN_PD, "mode": "process"}
+    assert svc.status.get(_RUN_PD, second["uploadId"])["status"] == "Pending"
+    assert _call(svc, "/api/rerun", {"personDay": _RUN_PD, "uploadId": "../x"})[0] == 400
+
+
+def test_intake_rerun_refuses_a_held_upload_whose_images_are_gone():
+    svc, s3, (first, second) = _intake_two_uploads()
+    _call(svc, "/api/ready", first)
+    _call(svc, "/api/ready", second)
+    del s3.objects[f"inbox/{second['uploadId']}/a.jpg"]      # expired after 30 days
+    code, body = _call(svc, "/api/rerun", second)
+    assert code == 409 and body["code"] == "images_gone"
+    assert svc.status.get(_RUN_PD, second["uploadId"])["status"] == "Held"
+
+
+def test_owner_rerun_also_takes_a_held_or_superseded_upload():
+    for state in ("Held", "Superseded"):
+        store, _ = _two_uploads("Pending")
+        if state == "Superseded":
+            store.requeue(_RUN_PD, _HELD_NEW)
+            store.client.items[("pd#" + _RUN_PD, "up#" + _HELD_OLD)]["status"] = "Superseded"
+            target = _HELD_OLD
+        else:
+            target = _HELD_NEW
+        sent = []
+        crequeue.requeue(naming.parse(_RUN_PD), target, status=store,
+                         list_images=lambda uid: ["a.jpg", "b.jpg"], send=sent.append)
+        assert store.get(_RUN_PD, target)["status"] == "Pending" and len(sent) == 1
+
+
+def test_enqueue_holds_a_days_second_folder_and_says_how_to_use_it():
+    cli = _FakeCli()
+    with tempfile.TemporaryDirectory() as d:
+        folder = _enqueue_folder(d, _RUN_PD, ["a.jpg"])
+        assert _enqueue([str(folder)], cli)[0] == 0
+        sent = cli.log.count("sqs send-message")
+        code, said = _enqueue([str(folder)], cli)
+    assert code == 0 and cli.log.count("sqs send-message") == sent == 1
+    assert "Held" in said and "--requeue" in said and "--upload-id" in said
+    assert sorted(i["status"] for i in cli.dynamo.items.values()) == ["Held", "Pending"]

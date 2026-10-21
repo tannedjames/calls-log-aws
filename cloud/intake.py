@@ -10,8 +10,12 @@ header, checked before any data is touched.
     POST /api/uploads  {"folder", "files"} -> a new upload (Uploading) and one
                        presigned POST per image, for its exact key
     POST /api/ready    {"personDay", "uploadId"} -> every image arrived:
-                       Pending and queued (Pending again: queued again)
-    POST /api/status   the newest upload of each Person-Day of the last 7 days
+                       Pending and queued (Pending again: queued again), or
+                       Held when the day already has an upload (Story 4.6)
+    POST /api/rerun    {"personDay", "uploadId"} -> a Held upload replaces the
+                       day's earlier one: Pending and queued
+    POST /api/status   the current upload of each Person-Day of the last 7
+                       days, and its Held uploads
     POST /api/sheets   {"name", "date"} -> matching Day Sheets, each with a
                        5-minute download link
 
@@ -337,6 +341,8 @@ def ready(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
     if item["status"] == Status.PENDING.value:   # Ready already, maybe without its message: queue it again
         _queue(svc, person_day, upload_id)
         return {"ok": True, "status": Status.PENDING.value, "queuedAgain": True}
+    if item["status"] == Status.HELD.value:      # Ready already, and held: nothing to queue
+        return {"ok": True, "status": Status.HELD.value}
     if item["status"] != Status.UPLOADING.value:
         raise Refused(409, f"This upload is already {item['status']}. To correct the day, "
                            "upload the whole folder again.", "already", {"status": item["status"]})
@@ -346,28 +352,69 @@ def ready(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
                            "Choose the folder and upload it again; the partial upload is deleted after 30 days.",
                       "partial", {"arrived": arrived, "declared": declared})
     try:
-        svc.status.mark_ready(person_day, upload_id)
+        now = svc.status.mark_ready(person_day, upload_id)["status"]
     except TransitionRefused:
         raise Refused(409, "This upload changed meanwhile; refresh the status.", "changed_meanwhile") from None
+    if now == Status.HELD.value:   # the day already has an upload (Story 4.6): it waits for a Re-run
+        return {"ok": True, "status": now}
     _queue(svc, person_day, upload_id)
     return {"ok": True, "status": Status.PENDING.value}
+
+
+def rerun(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Use a Held upload instead of the day's earlier one: Held -> Pending, one message (Story 4.6)."""
+    day, upload_id = _day(body), body.get("uploadId")
+    if not isinstance(upload_id, str) or not naming.is_upload_id(upload_id):
+        raise Refused(400, "That isn't an upload.", "not_an_upload")
+
+    def send(message: Dict[str, str]) -> None:
+        _send(svc, message, "rerun", "It is Pending, but it couldn't be queued. Click Re-run again.")
+
+    try:
+        upload_id, images = shared_requeue.requeue(day, upload_id, status=svc.status,
+                                                   list_images=svc.storage.list_images, send=send,
+                                                   allowed=(Status.HELD.value,))
+    except shared_requeue.Refused as e:
+        if e.code == "not_requeueable" and e.args_.get("status") == Status.PENDING.value:
+            send({"uploadId": e.args_["uploadId"], "personDay": day.key, "mode": "process"})
+            return {"ok": True, "uploadId": e.args_["uploadId"], "status": Status.PENDING.value, "queuedAgain": True}
+        raise Refused(409, str(e), e.code, e.args_) from None
+    return {"ok": True, "uploadId": upload_id, "images": images, "status": Status.PENDING.value}
 
 
 _SHOWN = ("personDay", "uploadId", "status", "imageCount", "attempts", "createdAt", "updatedAt",
           "lastRunAt", "lastError")
 
 
+def _rank(item: Dict[str, Any]) -> tuple:
+    """The day's row: an upload still in the running beats a Superseded one, then the latest chosen or started."""
+    return (item.get("status") != Status.SUPERSEDED.value, item.get("readyAt") or item.get("createdAt") or "",
+            item.get("uploadId") or "")
+
+
 def status(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    One row per Person-Day of the last 7 days: its current upload. Each Held
+    upload (a later one waiting for a Re-run, Story 4.6) follows as a row of
+    its own; a Superseded one is only counted.
+    """
     today = svc.today()
     latest: Dict[str, Dict[str, Any]] = {}
+    held: Dict[str, list] = {}
     uploads: Dict[str, int] = {}
     for back in range(STATUS_DAYS):
         for item in svc.status.recent((today - _dt.timedelta(days=back)).isoformat()):
             pd = item.get("personDay") or ""
             uploads[pd] = uploads.get(pd, 0) + 1
-            if pd not in latest or (item.get("uploadId") or "") > (latest[pd].get("uploadId") or ""):
+            if item.get("status") == Status.HELD.value:
+                held.setdefault(pd, []).append(item)
+            elif pd not in latest or _rank(item) > _rank(latest[pd]):
                 latest[pd] = item
-    rows = sorted(latest.values(), key=lambda i: i.get("uploadId") or "", reverse=True)
+    days = {pd: max([_rank(i) for i in held.get(pd, [])] + ([_rank(latest[pd])] if pd in latest else []))
+            for pd in set(latest) | set(held)}
+    rows = []
+    for pd in sorted(days, key=lambda d: days[d], reverse=True):
+        rows += ([latest[pd]] if pd in latest else []) + sorted(held.get(pd, []), key=_rank)
     return {"ok": True, "syncEnabled": _sync_switch(svc),
             "folders": [{**{k: i.get(k) for k in _SHOWN}, "uploads": uploads[i.get("personDay") or ""]}
                         for i in rows]}
@@ -427,7 +474,7 @@ def _sync_switch(svc: Services) -> Optional[bool]:
 
 ROUTES: Dict[str, Callable[[Services, Dict[str, Any]], Dict[str, Any]]] = {
     "/api/hello": hello, "/api/check": check, "/api/uploads": create_upload,
-    "/api/ready": ready, "/api/status": status, "/api/sheets": sheets,
+    "/api/ready": ready, "/api/rerun": rerun, "/api/status": status, "/api/sheets": sheets,
 }
 
 
@@ -456,7 +503,7 @@ def _day(body: Dict[str, Any]) -> naming.PersonDay:
 
 
 def owner_requeue(svc: Services, body: Dict[str, Any]) -> Dict[str, Any]:
-    """Run a stored upload again: Done, Failed or Parked -> Pending, one message (as enqueue.py --requeue)."""
+    """Run a stored upload again: Done, Failed, Parked, Held or Superseded -> Pending, one message (as enqueue.py --requeue)."""
     day, upload_id = _day(body), body.get("uploadId")
     if upload_id is not None and (not isinstance(upload_id, str) or not naming.is_upload_id(upload_id)):
         raise Refused(400, "That isn't an upload.", "not_an_upload")

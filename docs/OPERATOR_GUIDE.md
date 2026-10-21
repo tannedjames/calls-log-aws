@@ -15,7 +15,8 @@ English or Vietnamese; the browser remembers the choice.
 4. Click **Upload** and keep the page open until every folder says
    *Uploaded*.
 5. Click **Ready: start processing**. Only then does processing start. Once
-   every folder says *Waiting*, you can close the page.
+   every folder says *Waiting* (or *Waiting for Re-run*, below), you can close
+   the page.
 
 **Afterwards**
 
@@ -24,8 +25,12 @@ English or Vietnamese; the browser remembers the choice.
   itself every minute.
 - *Upload not finished* means some images never arrived: choose the folder
   again and upload it again.
-- To correct a day, upload the whole folder again. The new upload replaces the
-  day's results.
+- To correct a day, upload the whole folder again (every image, not only the
+  new ones: uploads are never combined). Because the day already has an
+  upload, the new one says *Waiting for Re-run* and nothing changes yet. Click
+  its **Re-run (use this upload)** on the Status tab: it then replaces the
+  day's results and, with sync on, the day's tab in the Sheet. Without that
+  click, the earlier upload stays (and is still sent if it wasn't yet).
 - *Failed* is retried by itself. *Stopped after 3 tries* means it failed 3
   times: the Owner gets an email and looks into it.
 - The **Day Sheets** tab finds a stored Day Sheet by name and/or date, to
