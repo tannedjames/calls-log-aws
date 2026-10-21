@@ -1,9 +1,10 @@
 """
 Re-queueing a stored upload (Story 3.8): the one rule that tools/enqueue.py
---requeue and the upload page's Owner tab share. Only a Done, Failed or Parked
-upload runs again, and only while all of its images are still in inbox/
-(kept 30 days). It becomes Pending with its attempts back at 0
-(cloud/status.py requeue), then one "process" message is sent.
+--requeue, the upload page's Owner tab and its Re-run of a Held upload share.
+Only a Done, Failed, Parked, Held or Superseded upload runs again, and only
+while all of its images are still in inbox/ (kept 30 days). It becomes Pending
+with its attempts back at 0 and so the day's choice (cloud/status.py requeue),
+then one "process" message is sent.
 
 The caller passes how to list an upload's images and how to send a message,
 so the PC (over the AWS CLI) and the page (boto3) run the same code.
@@ -16,7 +17,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from cloud import naming
 from cloud.status import FolderStatus, Status, TransitionRefused
 
-REQUEUEABLE = (Status.DONE.value, Status.FAILED.value, Status.PARKED.value)
+REQUEUEABLE = (Status.DONE.value, Status.FAILED.value, Status.PARKED.value,
+               Status.HELD.value, Status.SUPERSEDED.value)
 
 
 class Refused(Exception):
@@ -29,17 +31,29 @@ class Refused(Exception):
 
 def requeue(day: naming.PersonDay, upload_id: Optional[str], *, status: FolderStatus,
             list_images: Callable[[str], List[str]],
-            send: Callable[[Dict[str, str]], None]) -> Tuple[str, int]:
-    """Re-queue the newest stored upload of this Person-Day (or the one named); returns (uploadId, images)."""
+            send: Callable[[Dict[str, str]], None],
+            allowed: Tuple[str, ...] = REQUEUEABLE) -> Tuple[str, int]:
+    """
+    Re-queue the day's current upload (or the one named); returns (uploadId,
+    images). The current one is the day's choice: the one made Pending last
+    (cloud/status.py), never a Held or Superseded upload, which only runs when
+    named (Story 4.6). allowed narrows the states it starts from (the upload
+    passphrase may only re-run a Held upload).
+    """
     uploads = status.uploads(day.key)
-    found = [u for u in uploads if u.get("uploadId") == upload_id] if upload_id else uploads[-1:]
+    if upload_id:
+        found = [u for u in uploads if u.get("uploadId") == upload_id]
+    else:
+        current = [u for u in uploads if u.get("status") not in (Status.HELD.value, Status.SUPERSEDED.value)]
+        found = sorted(current, key=lambda u: (u.get("readyAt") or "", u.get("uploadId") or ""))[-1:]
     if not found:
         raise Refused(f"{day.key}: no stored upload" + (f" {upload_id}" if upload_id else ""), "no_upload")
     item = found[0]
     upload_id = item["uploadId"]
-    if item.get("status") not in REQUEUEABLE:
+    if item.get("status") not in allowed:
+        states = f"{', '.join(allowed[:-1])} or {allowed[-1]}" if len(allowed) > 1 else allowed[0]
         raise Refused(f"{day.key}: upload {upload_id} is {item.get('status')}; "
-                      "only a Done, Failed or Parked Folder can be re-queued",
+                      f"only a {states} Folder can be re-queued",
                       "not_requeueable", status=item.get("status"), uploadId=upload_id)
     images = list_images(upload_id)
     declared = int(item.get("imageCount") or 0)

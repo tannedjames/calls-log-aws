@@ -121,9 +121,11 @@ data "aws_iam_policy_document" "runner" {
     resources = ["${local.data_bucket_arn}/work/*", "${local.data_bucket_arn}/results/*"]
   }
 
+  # Query: a Run reads its day's other uploads, to step aside when a later
+  # one was chosen (Story 4.6). The table only, never an index; no Scan.
   statement {
     sid       = "FolderStatus"
-    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query"]
     resources = [local.arns.table]
   }
 

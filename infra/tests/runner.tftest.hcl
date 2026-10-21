@@ -82,6 +82,17 @@ run "function_roles_are_fenced" {
   }
 
   assert {
+    condition = (
+      toset(flatten([
+        for s in jsondecode(data.aws_iam_policy_document.runner.json).Statement : s.Resource
+        if contains(flatten([s.Action]), "dynamodb:Query")
+      ])) == toset(["arn:aws:dynamodb:ap-southeast-2:333596351215:table/calls-log-folders"]) &&
+      !contains(flatten([for s in jsondecode(data.aws_iam_policy_document.runner.json).Statement : s.Action]), "dynamodb:Scan")
+    )
+    error_message = "The runner queries its day's uploads in the Folder Status table only (Story 4.6); it never scans."
+  }
+
+  assert {
     condition = toset(flatten([
       for s in jsondecode(data.aws_iam_policy_document.runner.json).Statement : s.Resource
       if contains(flatten([s.Action]), "s3:PutObject")
@@ -114,12 +125,12 @@ run "function_roles_are_fenced" {
   }
 }
 
-run "a_runaway_is_stopped_under_fifty_cents" {
+run "a_runaway_is_stopped_under_the_cap" {
   command = plan
 
   assert {
-    condition     = local.runaway_worst_case_usd <= 0.5 && local.runaway_periods >= 2
-    error_message = "The runaway alarm must fire before a runaway costs 50 cents past the free tier."
+    condition     = local.runaway_worst_case_usd <= local.runaway_cap_usd && local.runaway_cap_usd == 1.05 && local.runaway_periods >= 2
+    error_message = "The runaway alarm must fire before a runaway costs $1.05 past the free tier (the Owner's 2026-10-21 cap)."
   }
 
   assert {
@@ -134,8 +145,8 @@ run "a_runaway_is_stopped_under_fifty_cents" {
   }
 
   assert {
-    condition     = aws_cloudwatch_metric_alarm.runaway.evaluation_periods == 7 && aws_cloudwatch_metric_alarm.runaway.threshold == 2
-    error_message = "At 2,048 MB: both slots busy for 7 quarter-hours in a row."
+    condition     = aws_cloudwatch_metric_alarm.runaway.evaluation_periods == 16 && aws_cloudwatch_metric_alarm.runaway.threshold == 2
+    error_message = "At 2,048 MB: both slots busy for 16 quarter-hours (4 hours) in a row."
   }
 }
 
@@ -147,8 +158,8 @@ run "bigger_memory_shortens_the_runaway_window" {
   }
 
   assert {
-    condition     = local.runaway_periods == 4 && local.runaway_worst_case_usd <= 0.5
-    error_message = "At 3,008 MB the alarm must fire after 4 quarter-hours to stay under 50 cents."
+    condition     = local.runaway_periods == 10 && local.runaway_worst_case_usd <= 1.05
+    error_message = "At 3,008 MB the alarm must fire after 10 quarter-hours to stay under $1.05."
   }
 }
 

@@ -49,7 +49,7 @@ from session_builder import build_sessions, dedupe
 from sheets_sync import sync_day
 
 from cloud import naming, settings as settings_mod
-from cloud.status import MAX_RUNS, Busy, FolderStatus, Status, TransitionRefused
+from cloud.status import MAX_RUNS, Busy, FolderStatus, Status, Superseded, TransitionRefused
 from cloud.storage import IMAGE_SUFFIXES, S3Storage, pc_order
 
 log = logging.getLogger("calls-log.runner")
@@ -66,7 +66,7 @@ class RunFailed(Exception):
 
 @dataclass
 class Outcome:
-    status: str            # Done | Failed | Parked | Busy | Skipped
+    status: str            # Done | Failed | Parked | Busy | Superseded | Skipped
     images: int = 0
     sessions: int = 0
     error: Optional[str] = None
@@ -141,6 +141,9 @@ def run_folder(upload_id: str, person_day: str, *, status: FolderStatus, storage
     except Busy:
         _event(**ids, status="Busy")
         return Outcome("Busy")
+    except Superseded as e:     # a later upload of the day was chosen (Story 4.6): no Day Sheet, no sync
+        _event(**ids, status="Superseded", error=str(e))
+        return Outcome("Superseded")
     except TransitionRefused:   # a duplicate delivery after Done, or never made Ready
         _event(**ids, status="Skipped", error="not in a startable state")
         return Outcome("Skipped")
@@ -358,7 +361,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         outcome = run_folder(args.upload_id, args.person_day, **_clients())
     except RunFailed:
         return 1
-    return 0 if outcome.status in ("Done", "Parked", "Skipped") else 1
+    return 0 if outcome.status in ("Done", "Parked", "Superseded", "Skipped") else 1
 
 
 if __name__ == "__main__":
