@@ -23,7 +23,8 @@ The runner takes it from there; the Day Sheet lands in results/ and, with the
 AWS Sync Switch on, in the Sheet. Nothing on the PC is moved or changed.
 
 --requeue runs a stored Folder again without uploading it (Story 3.8, FR-7):
-the newest upload of that Person-Day, or --upload-id, if it is Done, Failed,
+the day's current upload (the one chosen last, never a Held one), or
+--upload-id, if it is Done, Failed,
 Parked, Held or Superseded and its images are all still in inbox/ (kept 30
 days). It becomes Pending with its attempts back at 0, and the day's choice: an
 older upload of the day that hasn't run yet steps aside. One message is

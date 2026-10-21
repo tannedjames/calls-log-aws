@@ -869,7 +869,8 @@ Failed Folder, to redo a Done day, or to use a Held or Superseded upload.
 .\.venv\Scripts\python.exe -X utf8 tools\enqueue.py --requeue "Nguyen Van A & 2026-06-01" --upload-id 20260601T083005Z-0a1b2c3d
 ```
 
-It takes the newest upload of that day (or the one named), if it is Done, Failed,
+It takes the day's current upload (the one chosen last; a Held or Superseded
+upload only when named with `--upload-id`), if it is Done, Failed,
 Parked, Held or Superseded. It becomes Pending with its attempts back at 0 and
 the day's choice (an older upload of the day that hasn't run yet steps
 aside), and runs again. The

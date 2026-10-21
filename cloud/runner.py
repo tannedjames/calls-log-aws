@@ -361,7 +361,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         outcome = run_folder(args.upload_id, args.person_day, **_clients())
     except RunFailed:
         return 1
-    return 0 if outcome.status in ("Done", "Parked", "Skipped") else 1
+    return 0 if outcome.status in ("Done", "Parked", "Superseded", "Skipped") else 1
 
 
 if __name__ == "__main__":

@@ -34,12 +34,18 @@ def requeue(day: naming.PersonDay, upload_id: Optional[str], *, status: FolderSt
             send: Callable[[Dict[str, str]], None],
             allowed: Tuple[str, ...] = REQUEUEABLE) -> Tuple[str, int]:
     """
-    Re-queue the newest stored upload of this Person-Day (or the one named);
-    returns (uploadId, images). allowed narrows the states it starts from (the
-    upload passphrase may only re-run a Held upload).
+    Re-queue the day's current upload (or the one named); returns (uploadId,
+    images). The current one is the day's choice: the one made Pending last
+    (cloud/status.py), never a Held or Superseded upload, which only runs when
+    named (Story 4.6). allowed narrows the states it starts from (the upload
+    passphrase may only re-run a Held upload).
     """
     uploads = status.uploads(day.key)
-    found = [u for u in uploads if u.get("uploadId") == upload_id] if upload_id else uploads[-1:]
+    if upload_id:
+        found = [u for u in uploads if u.get("uploadId") == upload_id]
+    else:
+        current = [u for u in uploads if u.get("status") not in (Status.HELD.value, Status.SUPERSEDED.value)]
+        found = sorted(current, key=lambda u: (u.get("readyAt") or "", u.get("uploadId") or ""))[-1:]
     if not found:
         raise Refused(f"{day.key}: no stored upload" + (f" {upload_id}" if upload_id else ""), "no_upload")
     item = found[0]

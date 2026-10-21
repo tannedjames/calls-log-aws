@@ -4071,3 +4071,18 @@ def test_enqueue_holds_a_days_second_folder_and_says_how_to_use_it():
     assert code == 0 and cli.log.count("sqs send-message") == sent == 1
     assert "Held" in said and "--requeue" in said and "--upload-id" in said
     assert sorted(i["status"] for i in cli.dynamo.items.values()) == ["Held", "Pending"]
+
+
+def test_requeue_without_an_upload_takes_the_days_current_one_not_a_held_one():
+    for old in ("Done", "Parked"):
+        store, _ = _two_uploads(old)                                     # the later upload waits, Held
+        sent = []
+        uid, _n = crequeue.requeue(naming.parse(_RUN_PD), None, status=store,
+                                   list_images=lambda uid: ["a.jpg", "b.jpg"], send=sent.append)
+        assert uid == _HELD_OLD and store.get(_RUN_PD, _HELD_NEW)["status"] == "Held"
+
+
+def test_runner_command_line_counts_a_superseded_run_as_done():
+    with mock.patch.object(runner, "_clients", return_value={}), \
+            mock.patch.object(runner, "run_folder", return_value=runner.Outcome("Superseded")):
+        assert runner.main(["--upload-id", _RUN_UP, "--person-day", _RUN_PD]) == 0
