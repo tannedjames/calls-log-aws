@@ -537,6 +537,22 @@ def row_text(row: List[OcrLine]) -> str:
     return " ".join(ln.text for ln in row).strip()
 
 
+def row_line_spans(row: List[OcrLine]) -> List[Tuple[int, int, float]]:
+    """
+    (begin, end, confidence) of each line's text inside row_text(row), so the
+    parser can tell which OCR line a field was read from.
+    """
+    joined = " ".join(ln.text for ln in row)
+    lead = len(joined) - len(joined.lstrip())
+    spans: List[Tuple[int, int, float]] = []
+    pos = 0
+    for ln in row:
+        begin = max(0, pos - lead)
+        spans.append((begin, max(begin, pos + len(ln.text) - lead), ln.confidence))
+        pos += len(ln.text) + 1
+    return spans
+
+
 def row_confidence(row: List[OcrLine]) -> float:
     if not row:
         return 0.0
