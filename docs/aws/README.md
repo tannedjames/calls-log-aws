@@ -11,7 +11,8 @@ numbers. The CI privacy gate checks every file (Story 2.2).
 | | |
 |---|---|
 | [Architecture](architecture.md) | Route B: an upload page, a queue and a Lambda runner around the unchanged pipeline |
-| Decision records | [1 Route B](adr/0001-route-b-serverless-queue.md) · [2 No VPC](adr/0002-no-vpc.md) · [3 Guardrails](adr/0003-cost-guardrails-in-infrastructure.md) · [4 Single-flight lease](adr/0004-single-flight-lease.md) · [5 Checkpoints](adr/0005-per-image-checkpoints.md) · [6 Orientation fix](adr/0006-orientation-fix-in-the-shared-core.md) · [7 Hand-applied bootstrap](adr/0007-hand-applied-bootstrap-and-role-fence.md) · [8 Secrets out of state](adr/0008-secrets-out-of-terraform-state.md) |
+| Decision records | [1 Route B](adr/0001-route-b-serverless-queue.md) · [2 No VPC](adr/0002-no-vpc.md) · [3 Guardrails](adr/0003-cost-guardrails-in-infrastructure.md) · [4 Single-flight lease](adr/0004-single-flight-lease.md) · [5 Checkpoints](adr/0005-per-image-checkpoints.md) · [6 Orientation fix](adr/0006-orientation-fix-in-the-shared-core.md) · [7 Hand-applied bootstrap](adr/0007-hand-applied-bootstrap-and-role-fence.md) · [8 Secrets out of state](adr/0008-secrets-out-of-terraform-state.md) · [9 Data lake](adr/0009-call-rows-in-an-s3-data-lake.md) (proposed) |
+| [Data contract](data-contract.md) · [Data lake plan](data-lake-plan.md) | The call, session and upload rows the lake keeps, with no names; the phases from staged records to a public demo |
 | [Lessons from the first deploys](lessons-from-the-first-deploys.md) | What the documentation said, what AWS did, and the fix for each |
 | Runbook | `docs/TECHNICAL.md` §11: sending Folders, the upload page, the kill switch, re-queues and re-sends, the switch-over and the way back |
 | [Operator guide](../OPERATOR_GUIDE.md) | The one page the person who uploads needs |
