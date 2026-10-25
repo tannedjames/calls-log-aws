@@ -68,15 +68,15 @@ run "data_bucket_is_locked_down" {
   }
 }
 
-run "only_uploads_and_checkpoints_expire" {
+run "only_uploads_checkpoints_and_staged_records_expire" {
   command = plan
 
   # Explicit indexes, not for-expressions: Terraform 1.16.5 crashes while
   # printing a failed for-expression over these rules.
 
   assert {
-    condition     = local.expiring_prefixes == ["inbox/", "work/", "bench/"]
-    error_message = "Only inbox/, work/ and bench/ may expire: Day Sheets in results/ are kept forever."
+    condition     = local.expiring_prefixes == ["inbox/", "work/", "bench/", "staging/"]
+    error_message = "Only inbox/, work/, bench/ and staging/ may expire: Day Sheets in results/ are kept forever."
   }
 
   assert {
@@ -108,10 +108,19 @@ run "only_uploads_and_checkpoints_expire" {
 
   assert {
     condition = (
-      contains(["", "-"], try(coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[3].filter[0].prefix, "-"), "-")) &&
-      coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[3].expiration[0].days, 0) == 0 &&
-      aws_s3_bucket_lifecycle_configuration.data.rule[3].expiration[0].expired_object_delete_marker &&
-      length(aws_s3_bucket_lifecycle_configuration.data.rule[3].noncurrent_version_expiration) == 0
+      aws_s3_bucket_lifecycle_configuration.data.rule[3].filter[0].prefix == "staging/" &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[3].expiration[0].days == 30 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[3].noncurrent_version_expiration[0].noncurrent_days == 1
+    )
+    error_message = "staging/ (the data lake's hand-over, ADR 9) must expire after 30 days, and its noncurrent versions 1 day later."
+  }
+
+  assert {
+    condition = (
+      contains(["", "-"], try(coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[4].filter[0].prefix, "-"), "-")) &&
+      coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[4].expiration[0].days, 0) == 0 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[4].expiration[0].expired_object_delete_marker &&
+      length(aws_s3_bucket_lifecycle_configuration.data.rule[4].noncurrent_version_expiration) == 0
     )
     error_message = "The whole-bucket rule may only tidy delete markers and uploads: Day Sheets in results/ are kept forever."
   }
@@ -123,9 +132,9 @@ run "parameters_hold_only_placeholders" {
   assert {
     condition = toset(keys(aws_ssm_parameter.setting)) == toset([
       "webapp_url", "sync_secret", "sync_enabled", "name_prefixes", "intake_passphrase_hash",
-      "owner_passphrase_hash", "alert_email",
+      "owner_passphrase_hash", "alert_email", "lake_enabled", "person_salt",
     ])
-    error_message = "The seven /calls-log/ parameters (the spine's six and the Owner tab's password) must exist, and no others."
+    error_message = "The nine /calls-log/ parameters (the spine's six, the Owner tab's password and the data lake's two) must exist, and no others."
   }
 
   assert {
@@ -139,6 +148,11 @@ run "parameters_hold_only_placeholders" {
   assert {
     condition     = local.parameters["sync_enabled"] == "false"
     error_message = "The AWS Sync Switch must start off."
+  }
+
+  assert {
+    condition     = local.parameters["lake_enabled"] == "false"
+    error_message = "The data lake's switch must start off (ADR 9): nothing is staged until the Owner turns it on."
   }
 
   assert {

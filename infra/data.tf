@@ -1,8 +1,11 @@
 # ---------------------------------------------------------------------------
-# The data bucket (AD-8, AD-18). Three prefixes:
+# The data bucket (AD-8, AD-18). Four prefixes:
 #   inbox/<uploadId>/   uploaded screenshots      kept 30 days
 #   work/<uploadId>/    per-image checkpoints     kept 30 days
 #   results/            Day Sheets, every version kept, never expires
+#   staging/            a Done day's records for the data lake (ADR 9),
+#                       written only while /calls-log/lake_enabled is on;
+#                       kept 30 days
 # Never public, TLS only, encrypted, ACLs off. Versioned, so a Day Sheet that
 # is processed again keeps its earlier versions instead of (n) copies.
 # Cost: about 2.6 GB of 30-day screenshots at $0.025 per GB-month plus about
@@ -12,9 +15,10 @@
 locals {
   data_bucket     = "calls-log-data-${var.account_id}"
   data_bucket_arn = "arn:aws:s3:::${local.data_bucket}"
-  # Uploads, checkpoints and Story 3.1's benchmark images expire; results/
-  # has no rule, so nothing in it does.
-  expiring_prefixes = ["inbox/", "work/", "bench/"]
+  # Uploads, checkpoints, Story 3.1's benchmark images and the data lake's
+  # hand-over expire; results/ has no rule, so nothing in it does. staging/
+  # is last so the other rules keep their places.
+  expiring_prefixes = ["inbox/", "work/", "bench/", "staging/"]
 }
 
 resource "aws_s3_bucket" "data" {

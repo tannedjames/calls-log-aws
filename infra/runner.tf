@@ -115,10 +115,12 @@ data "aws_iam_policy_document" "runner" {
     resources = ["${local.data_bucket_arn}/inbox/*", "${local.data_bucket_arn}/work/*", "${local.data_bucket_arn}/results/*"]
   }
 
+  # staging/: a Done day's records for the data lake (ADR 9), only while
+  # /calls-log/lake_enabled is on.
   statement {
-    sid       = "WriteCheckpointsAndDaySheets"
+    sid       = "WriteCheckpointsDaySheetsAndLakeRecords"
     actions   = ["s3:PutObject"]
-    resources = ["${local.data_bucket_arn}/work/*", "${local.data_bucket_arn}/results/*"]
+    resources = ["${local.data_bucket_arn}/work/*", "${local.data_bucket_arn}/results/*", "${local.data_bucket_arn}/staging/*"]
   }
 
   # Query: a Run reads its day's other uploads, to step aside when a later

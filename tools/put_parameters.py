@@ -20,6 +20,12 @@ Owner's PC after `aws login`:
     python tools/put_parameters.py --owner-passphrase
         the same for the page's owner password (owner_passphrase_hash), which
         opens its Owner tab; keep it different from the upload passphrase
+    python tools/put_parameters.py --new-person-salt
+        a random person_salt for the data lake's person_key (ADR 9), set once:
+        refused when one is already set, since a new salt would split every
+        employee's history in the lake
+    python tools/put_parameters.py --lake-enabled true|false
+        the data lake's switch: whether a Done Run stages its records
 
 Values go to the AWS CLI through a temporary file, never the command line,
 and are never printed: the output names the parameters only.
@@ -40,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from secrets import token_hex
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -49,6 +56,7 @@ from cloud import passphrase as passphrase_mod  # noqa: E402  (standard library 
 
 REGION = "ap-southeast-2"
 PREFIX = "/calls-log/"
+PLACEHOLDER = "unset"   # what Terraform writes (infra/parameters.tf)
 TOPIC = "calls-log-alerts"
 
 
@@ -141,13 +149,16 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, ask=getpass.getpa
     ap.add_argument("--passphrase", action="store_true", help="set the upload page's passphrase (asked, not echoed)")
     ap.add_argument("--owner-passphrase", action="store_true",
                     help="set the page's owner password, for its Owner tab (asked, not echoed)")
+    ap.add_argument("--new-person-salt", action="store_true",
+                    help="set a random person_salt for the data lake, once (never shown)")
+    ap.add_argument("--lake-enabled", choices=["true", "false"])
     args = ap.parse_args(argv)
 
     if not (args.from_private_files or args.alert_email or args.sync_enabled or args.passphrase
-            or args.owner_passphrase):
+            or args.owner_passphrase or args.new_person_salt or args.lake_enabled):
         ap.print_usage(sys.stderr)
-        print("nothing to set: give --from-private-files, --alert-email, --sync-enabled, --passphrase "
-              "or --owner-passphrase", file=sys.stderr)
+        print("nothing to set: give --from-private-files, --alert-email, --sync-enabled, --passphrase, "
+              "--owner-passphrase, --new-person-salt or --lake-enabled", file=sys.stderr)
         return 2
     if args.alert_email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", args.alert_email):
         print("--alert-email doesn't look like an email address", file=sys.stderr)
@@ -180,6 +191,20 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, ask=getpass.getpa
         except ValueError as e:
             print(f"{e}; nothing written", file=sys.stderr)
             return 2
+    if args.new_person_salt:
+        try:
+            current = aws(["ssm", "get-parameter", "--query", "Parameter.Value"],
+                          {"Name": PREFIX + "person_salt", "WithDecryption": True}, run=run)
+        except CliError as e:
+            print(f"{e}; nothing written", file=sys.stderr)
+            return 1
+        if current != PLACEHOLDER:
+            print("person_salt is already set: a new one would split every employee's history in the "
+                  "data lake. Nothing written.", file=sys.stderr)
+            return 2
+        updates["person_salt"] = token_hex(32)
+    if args.lake_enabled:
+        updates["lake_enabled"] = args.lake_enabled
 
     try:
         for name, value in updates.items():
