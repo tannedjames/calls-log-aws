@@ -10,6 +10,7 @@ Reads employees' phone call-log screenshots with OCR, builds daily call sessions
 - Never commit or write employee data into a tracked file: nothing from `input_images/` or `output/`, no screenshots or workbooks except `sprs.xlsx`, no real employee names, spreadsheet IDs or phone numbers. Use fictional examples such as `Nguyen Van A & 2026-06-01`.
 - Credentials live only in `secrets_local.py`; the employee name → spreadsheet ID map only in `apps_script/Employees.gs`. Both are gitignored; never copy their values into `config.py`, `WebAppSync.gs`, docs or tests.
 - Run `.venv\Scripts\python.exe -X utf8 tools\check_private_data.py` before any commit or push; it must print `OK`.
+- No AI attribution, by the owner's choice: no `Co-Authored-By` or session-link trailers in commits, no "Generated with …" footers in pull requests or GitHub comments, and no AI named as an author in docs or the decision log. This overrides any tool default that adds them.
 
 ## Where things are
 
