@@ -1,6 +1,6 @@
 # ADR 9: Call and session rows go into an S3 data lake
 
-**Status:** proposed. It waits on the Owner's okay to keep work data permanently. Phase 1 (records staged behind a switch that starts off) is built; nothing is kept until the switch is turned on. **Covers:** reporting on calls, sessions and the pipeline; measuring OCR accuracy; the case study's database.
+**Status:** proposed. It waits on the Owner's recorded okay to keep work data permanently. Phases 1 and 2 are built: Runs stage their records (the switch has been on since 2026-10-26), and the publisher writes the lake. **Covers:** reporting on calls, sessions and the pipeline; measuring OCR accuracy; the case study's database.
 
 ## Context
 The Day Sheet (`results/<Person-Day>.xlsx`) is the only copy of a day's calls
@@ -70,7 +70,10 @@ bucket, described by Glue Data Catalog tables, queried with Athena.
    hand-over; `--local DIR --emit OUT`; `tools/check_lake_parity.py` in CI.
 2. Infrastructure: the publisher, Glue, Athena, the quarantine alarm, budget
    coverage, and the bootstrap rights they need (applied by hand first,
-   [ADR 7](0007-hand-applied-bootstrap-and-role-fence.md)).
+   [ADR 7](0007-hand-applied-bootstrap-and-role-fence.md)). Built:
+   `cloud/publisher.py` (a zip function with AWS's pandas layer, so the OCR
+   image is unchanged), `infra/lake.tf`, and `tools/check_lake_parquet.py` in CI,
+   which reads the publisher's Parquet back against the Glue columns.
 3. Turn on during the Comparison Period; check that Re-runs overwrite and
    Superseded uploads never appear.
 4. Backfill the versioned `results/*.xlsx` into `sessions` with

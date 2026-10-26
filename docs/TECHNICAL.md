@@ -36,7 +36,8 @@ above never import it.
 | File | What it does |
 |---|---|
 | `cloud/runner.py` | One Run: a queued Folder through the unchanged pipeline, its Day Sheet to `results/`, then the Sheet if the AWS Sync Switch is on, then the day's records to `staging/` if the data lake's switch is on. The Lambda handler, and a CLI for parity. |
-| `cloud/lake.py` | The data lake's records (ADR 9, `docs/aws/data-contract.md`): builds the staged envelope with no names (`person_key` is a salted HMAC) and runs its quality checks. |
+| `cloud/lake.py` | The data lake's records (ADR 9, `docs/aws/data-contract.md`): builds the staged envelope with no names (`person_key` is a salted HMAC), runs its quality checks, and holds the lake's column types. |
+| `cloud/publisher.py` | The data lake's publisher (a zip Lambda with AWS's pandas layer): keeps the day's Done choice, writes its three Parquet files to `lake/`, or puts a failed envelope in `quarantine/` (§11). |
 | `cloud/status.py` | Folder Status: the only writer of the `calls-log-folders` table (states, lease, attempts). |
 | `cloud/storage.py`, `cloud/naming.py`, `cloud/settings.py` | The data bucket, the one folder-name parser, and run-time settings and secrets. |
 | `cloud/intake.py`, `cloud/static/upload.html` | The upload and status page behind a public URL: checks folders, hands out presigned uploads, marks them Ready, shows Folder Status and finds Day Sheets; its Owner tab re-runs and re-sends days, stops and starts the runner and shows timings (§11). English and Vietnamese. |
@@ -51,6 +52,7 @@ above never import it.
 | `tools/compare_outputs.py`, `tools/switches.py`, `tools/turnaround.py`, `tools/check_secret.py` | From the PC, for the switch-over (§11): PC vs AWS Day Sheets by F-label, who writes to the Sheets, Ready-to-Done times, and which secret the Web App accepts. |
 | `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters and the page's passphrase, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
 | `tools/check_lake_parity.py` | CI, in the runner image: the records a Run would stage for the data lake match the Synthetic Set's ground truth. |
+| `tools/check_lake_parquet.py` | CI, with pyarrow only: the publisher's Parquet reads back with exactly the Glue tables' columns and types. |
 | `infra/`, `infra/bootstrap/` | Terraform: everything in AWS. `docs/AWS_SETUP.md` has the manual steps. |
 
 ---
@@ -446,12 +448,11 @@ plus `CALLS_LOG_RUNNER_FUNCTION` for the kill switch and the page's Owner tab. A
 **The data lake's records (ADR 9, `docs/aws/data-contract.md`).** While
 `/calls-log/lake_enabled` is `true`, a Done Run also writes the day's calls,
 sessions and upload to `staging/<Name> & <date>/<uploadId>.json` (kept 30
-days), for the publisher of the data lake's Phase 2. The envelope holds no
-name, phone number, OCR text or file name. A failure there is logged
-(`"lake": "failed"` on the Done line) and emailed, and the Run stays Done: the
-Day Sheet and the Sheet are never affected. It starts off; turning it on waits
-for the Owner's okay to keep work data. To see what a Run would stage, with no
-AWS: `python -m cloud.runner --local DIR --emit OUT`.
+days), and the publisher turns them into the lake's Parquet (§11, "The data
+lake"). The envelope holds no name, phone number, OCR text or file name. A
+failure there is logged (`"lake": "failed"` on the Done line) and emailed, and
+the Run stays Done: the Day Sheet and the Sheet are never affected. To see
+what a Run would stage, with no AWS: `python -m cloud.runner --local DIR --emit OUT`.
 
 **Speed.** `lang="japan"` makes PaddleOCR pick the heavy server models. With
 oneDNN disabled (mandatory on Windows), that meant ~60 s per screenshot and
@@ -999,6 +1000,46 @@ purpose:
 ```powershell
 aws lambda put-function-concurrency --function-name calls-log-intake --reserved-concurrent-executions 0 --region ap-southeast-2
 ```
+
+### The data lake (queries, quarantine, replays)
+
+What it holds and why: `docs/aws/data-contract.md` and ADR 9. It never feeds
+the Day Sheet or the Sheet, so nothing here is urgent for the Operator.
+
+- **Querying.** In the console, open Athena, choose the workgroup
+  **calls-log** (top right) and the database **calls_log**, then run, for example:
+  ```sql
+  SELECT work_date, count(*) AS calls, count_if(flagged) AS flagged
+  FROM calls_log.calls WHERE work_month = '2026-10'
+  GROUP BY 1 ORDER BY 1;
+  ```
+  The workgroup stops any query past 100 MB, and keeps results 7 days.
+- **"Records failed the data lake's checks"** (`calls-log-lake-quarantined`).
+  The envelope is in `quarantine/<Name> & <date>/<uploadId>.json`, with its
+  problems listed by row position. Read it from CloudShell:
+  ```bash
+  B="calls-log-data-$(aws sts get-caller-identity --query Account --output text)"
+  aws s3 ls "s3://$B/quarantine/" --recursive
+  aws s3 cp "s3://$B/quarantine/<Name> & <date>/<uploadId>.json" - | python3 -m json.tool | head -40
+  ```
+  A wrong Day Sheet is fixed the usual way (Re-run); the new envelope replaces
+  the day in the lake. A check that is wrong itself is a code change.
+- **"The data lake's publisher failed"** (`calls-log-publisher-errors`). Read
+  `/aws/lambda/calls-log-publisher` in CloudWatch Logs; once fixed, replay.
+- **Replaying `staging/`.** After a publisher fix, or once after Phase 2 is
+  first deployed, so days staged before it reach the lake. Copying each staged
+  envelope onto itself makes S3 call the publisher again; it rewrites the same
+  files, so a replay never duplicates a day:
+  ```bash
+  B="calls-log-data-$(aws sts get-caller-identity --query Account --output text)"
+  aws s3 cp "s3://$B/staging/" "s3://$B/staging/" --recursive \
+    --metadata-directive REPLACE --content-type application/json
+  aws s3 ls "s3://$B/lake/" --recursive | tail
+  ```
+  Envelopes older than 30 days have expired; those days come back only from
+  the Day Sheets (Phase 4's backfill).
+- **Stopping it.** `put_parameters.py --lake-enabled false`: Runs stop staging.
+  What is already in `lake/` stays.
 
 ### Who writes to the Sheets (the two switches)
 

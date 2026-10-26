@@ -103,7 +103,10 @@ Seven phases; only Phase 3 touches the live flow, and only best-effort.
 
 Note: the bootstrap rights move into the Phase 2 pull request, so they match
 the resources exactly. Phase 1 needs none: the workload boundary already lets
-the runner write to the data bucket and read `/calls-log/*`.
+the runner write to the data bucket and read `/calls-log/*`. Phase 2 turned
+out not to need a boundary change either, only deploy-role and plan-role
+rights: the publisher's needs (the data bucket, the folders table, its own
+logs) are already inside the boundary, and its metrics are log lines.
 
 ### Phase 1: Emit records (switch off)
 
@@ -111,7 +114,7 @@ the runner write to the data bucket and read `/calls-log/*`.
 - [x] `--local DIR` writes the JSON locally (`--emit OUT`)
 - [x] Parity test: emitted calls and sessions equal Synthetic Set ground truth (`tools/check_lake_parity.py`, run by CI in the runner image)
 - [x] `run_tests.py` and the privacy gate pass
-- [ ] PR merged and deployed (the switch stays off)
+- [x] PR merged and deployed (#29, 2026-10-26)
 
 Built with it: `/calls-log/lake_enabled` (starts `false`) and
 `/calls-log/person_salt` (set once with `put_parameters.py --new-person-salt`),
@@ -119,13 +122,16 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 
 ### Phase 2: Infrastructure
 
-- [ ] Terraform for the prefixes, publisher, Glue database and tables, Athena workgroup, quarantine alarm, budget coverage
-- [ ] `.tftest.hcl` tests pinning the publisher's least-privilege IAM, read via `_infra_text()`
+- [x] Terraform for the prefixes, publisher, Glue database and tables, Athena workgroup, quarantine alarm, budget coverage (`infra/lake.tf`; the $2 budget has no filter, so it already covers Glue, Athena and the publisher)
+- [x] `.tftest.hcl` tests pinning the publisher's least-privilege IAM (`infra/tests/lake.tftest.hcl`), plus `tests.py` checks via `_infra_text()` that the Glue columns equal `lake.COLUMN_TYPES`
+- [x] `tools/check_lake_parquet.py` in CI: the publisher's Parquet reads back with the Glue tables' exact columns and types
+- [ ] Bootstrap applied by hand in CloudShell (1 to add, 3 to change)
 - [ ] Deploy through the PR; no drift
+- [ ] Replay `staging/` once, so the days staged before the publisher reach the lake
 
 ### Phase 3: Turn on
 
-- [ ] `lake_enabled = true` during the Comparison Period
+- [x] `lake_enabled = true` (set 2026-10-26, with the salt)
 - [ ] Verify Re-runs overwrite and Superseded uploads never appear
 
 ### Phase 4: Backfill

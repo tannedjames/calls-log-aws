@@ -22,6 +22,10 @@ flowchart LR
         KILL["calls-log-killswitch"]
         SNS["SNS email"]
         BUD["$2 budget"]
+        STG[("S3 staging/<br/>30-day expiry")]
+        PUB["calls-log-publisher<br/>zip Lambda + pandas layer"]
+        LAKE[("S3 lake/ Parquet<br/>no names")]
+        ATH["Glue calls_log<br/>+ Athena workgroup"]
     end
     WA["Apps Script Web App<br/>(unchanged)"] --> GS[("Employees'<br/>Google Sheets")]
     OP -->|"check folders,<br/>get presigned POSTs"| URL
@@ -41,6 +45,12 @@ flowchart LR
     KILL -->|"queue trigger off,<br/>or the page to 0"| RUN
     KILL --> SNS
     BUD --> SNS
+    RUN -->|"if the lake switch is on"| STG
+    STG -->|"S3 event"| PUB
+    PUB -->|"the day's Done choice"| DDB
+    PUB --> LAKE
+    LAKE --> ATH
+    PUB -->|"quarantine alarm"| SNS
 ```
 
 ## One Folder's path
@@ -58,6 +68,15 @@ flowchart LR
    stores the Day Sheet as a new version in `results/`, syncs it if the AWS
    switch is on, and marks the Folder Done. A failure returns the message; the
    fourth start parks the Folder and emails the Owner.
+5. **Lake** ([ADR 9](adr/0009-call-rows-in-an-s3-data-lake.md)). If the lake's
+   switch is on, the Done Run also writes the day's calls, sessions and upload
+   to `staging/`, with no names. S3 calls the publisher, which checks that the
+   upload is still the day's Done choice and that the records pass the
+   [contract's](data-contract.md) checks, then writes three Parquet files at
+   fixed keys under `lake/`. Glue tables with partition projection describe
+   them, and Athena queries them in a workgroup capped at 100 MB per query.
+   Records that fail a check go to `quarantine/` and email the Owner; nothing
+   here can touch the Day Sheet or the Sheet.
 
 ## Fences
 
