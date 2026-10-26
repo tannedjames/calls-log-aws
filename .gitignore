@@ -134,6 +134,14 @@ crash.log
 override.tf
 *_override.tf
 
+# --- OCR-accuracy label samples (tools/label_calls.py) ----------------------
+# Worksheets and the employees' screenshots zipped with them; they live in
+# ~/calls-log-labels, never in the repo.
+calls-log-labels/
+labels-*.csv
+labels-*.json
+labels-*.zip
+
 # --- graphify knowledge graph (local build output) --------------------------
 # Rebuilt by `graphify update .`; holds extraction caches and machine paths.
 # Remove this line if the team decides to share graph.json.

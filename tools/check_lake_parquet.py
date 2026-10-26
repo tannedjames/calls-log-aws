@@ -4,8 +4,9 @@ Does the publisher's Parquet match the Glue tables? (ADR 9, Phase 2)
 Athena reads a Parquet file through its Glue table: a column whose type
 differs between the two fails every query on that partition. This builds a
 made-up day the way the runner stages one (cloud/lake.py), turns it into the
-publisher's three files (cloud/publisher.py), reads them back with pyarrow,
-and checks each file against infra/lake.tf's columns and types, row for row.
+publisher's three files (cloud/publisher.py) and the labels file
+tools/label_calls.py writes, reads them back with pyarrow, and checks each
+file against infra/lake.tf's columns and types, row for row.
 
 Needs pyarrow at the AWS SDK for pandas layer's version (CI pins it); not the
 OCR stack. Writes nothing. Exit code 0 = every table matches, 1 = a difference.
@@ -66,6 +67,27 @@ def made_up_day() -> dict:
                         upload=upload, salt=lake.LOCAL_SALT, staged_at="2026-06-01T02:03:01Z")
 
 
+def made_up_labels(envelope: dict, ingested_at: _dt.datetime) -> list:
+    """Labels for the made-up day's calls, as tools/label_calls.py imports them: the last batch
+    finds two OCR misreads (a start, a duration) and one row that isn't a call; an older batch
+    labelled the first call differently, and the views count only its latest label."""
+    from tools import label_calls
+
+    calls = envelope["calls"]
+    snaps = {label_calls.ref(c): label_calls.snapshot(c) for c in calls}
+    truth = {0: (calls[0]["start_ts"][11:16], str(calls[0]["duration_s"])),
+             1: (calls[1]["start_ts"][11:16], "6"),                        # the OCR read 0 seconds
+             2: ("08:24", str(calls[2]["duration_s"])),                    # the OCR read 08:23
+             3: (calls[3]["start_ts"][11:16], "")}                         # a missed call: no duration
+    filled = [{"ref": label_calls.ref(c), "true_start": truth[i][0] if i in truth else "",
+               "true_duration": truth[i][1] if i in truth else "", "not_a_call": "" if i in truth else "x"}
+              for i, c in enumerate(calls)]
+    older = [{"ref": label_calls.ref(calls[0]), "true_start": "07:00", "true_duration": "", "not_a_call": ""}]
+    rows = label_calls.label_rows(older, snaps, "labels-20260601T030000Z", "2026-06-01T03:00:00")[0]
+    rows += label_calls.label_rows(filled, snaps, "labels-20260602T030000Z", "2026-06-02T03:00:00")[0]
+    return publisher.typed_rows("labels", rows, ingested_at)
+
+
 def main() -> int:
     envelope = made_up_day()
     problems = [f"the made-up day fails lake.check(): {p}" for p in lake.check(envelope)]
@@ -73,6 +95,7 @@ def main() -> int:
     if set(glue) != set(lake.COLUMN_TYPES):
         problems.append(f"infra/lake.tf has tables {sorted(glue)}, cloud/lake.py {sorted(lake.COLUMN_TYPES)}")
     rows = publisher.tables(envelope, _dt.datetime(2026, 6, 1, 2, 3, 2))
+    rows["labels"] = made_up_labels(envelope, _dt.datetime(2026, 6, 1, 2, 3, 2))
     for table, columns in glue.items():
         # One thread: pyarrow's reader pool can hang the interpreter's exit
         # (seen with 24.0.0). The publisher only writes, so Lambda is unaffected.

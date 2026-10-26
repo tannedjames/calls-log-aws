@@ -76,12 +76,14 @@ bucket, described by Glue Data Catalog tables, queried with Athena.
    which reads the publisher's Parquet back against the Glue columns.
 3. Turn on during the Comparison Period; check that Re-runs overwrite and
    Superseded uploads never appear. Turned on 2026-10-26; a Re-run of a real
-   day reached Athena the same morning.
+   day reached Athena the same morning. `tools/check_lake_choice.py` lists any
+   day whose lake file isn't its chosen Done upload.
 4. Backfill the current `results/*.xlsx` into `sessions` with
    `source = 'xlsx_backfill'`. Built: `tools/backfill_lake.py`, run once from
    CloudShell; it never overwrites a day the publisher wrote. Then OCR
    accuracy (4.5): its label-free half is the `ocr_quality` view; the
-   exact-match half waits for labelled calls.
+   exact-match half is the `ocr_accuracy` view over a private `labels` table,
+   filled weekly with `tools/label_calls.py`.
 5. Gold views, sample SQL and the case-study numbers. Built: `sql/views/`
    (`day_summary`, `weekly_attendance`, `pipeline_metrics`, `ocr_quality`),
    created by `tools/lake_views.py`; `sql/examples/`; CI runs both on DuckDB

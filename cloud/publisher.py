@@ -94,7 +94,7 @@ def typed_rows(table: str, rows: List[Dict[str, Any]], ingested_at: _dt.datetime
 
 def tables(envelope: Dict[str, Any], ingested_at: _dt.datetime) -> Dict[str, List[Dict[str, Any]]]:
     """The envelope's rows per table, typed, with exactly lake.COLUMN_TYPES' columns."""
-    return {table: typed_rows(table, envelope[table], ingested_at) for table in lake.COLUMN_TYPES}
+    return {table: typed_rows(table, envelope[table], ingested_at) for table in lake.ENVELOPE_TABLES}
 
 
 def parquet_bytes(table: str, rows: List[Dict[str, Any]]) -> bytes:

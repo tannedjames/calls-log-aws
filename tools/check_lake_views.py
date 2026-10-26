@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))   # run as a script from tools/: the pipeline live
 import duckdb  # noqa: E402
 
 from cloud import lake, naming, publisher  # noqa: E402
-from tools.check_lake_parquet import made_up_day  # noqa: E402
+from tools.check_lake_parquet import made_up_day, made_up_labels  # noqa: E402
 from tools.lake_views import VIEWS, VIEWS_DIR, statement  # noqa: E402
 
 EXAMPLES_DIR = ROOT / "sql" / "examples"
@@ -42,7 +42,7 @@ BACKFILLED_PAIRS = [("08:00", "09:30"), ("13:00", "14:00")]
 def write_lake(folder: Path) -> tuple:
     runner_day = made_up_day()
     backfilled = lake.backfill_rows(BACKFILLED, BACKFILLED_UPLOAD, BACKFILLED_PAIRS, salt=lake.LOCAL_SALT)
-    sources = [publisher.tables(runner_day, INGESTED),
+    sources = [{**publisher.tables(runner_day, INGESTED), "labels": made_up_labels(runner_day, INGESTED)},
                {t: publisher.typed_rows(t, rows, INGESTED) for t, rows in backfilled.items()}]
     for n, tables in enumerate(sources):
         for table, rows in tables.items():
@@ -100,6 +100,12 @@ def main() -> int:
                      sum(1 for c in calls if c["duration_conf"] is not None and c["duration_conf"] < 0.85))]
         if got_ocr != want_ocr:
             problems.append(f"ocr_quality: {got_ocr} != {want_ocr}")
+        # made_up_labels: 5 calls labelled, the 5th not a call; 1 start and 1 duration (off by 6 s) misread
+        want_acc = [("high", 5, 1, 4, 3, 3, 2, 0.75, 0.75, 1.5)]
+        got_acc = rows("SELECT conf_band, labelled, not_a_call, calls, start_exact, duration_exact, both_exact, "
+                       "start_exact_rate, duration_exact_rate, duration_mean_error_s FROM calls_log.ocr_accuracy")
+        if [tuple(r) for r in got_acc] != want_acc:
+            problems.append(f"ocr_accuracy: {got_acc} != {want_acc}")
         for view in VIEWS:
             print(f"calls_log.{view}: " + ("OK" if not any(p.startswith(view) for p in problems) else "DIFFERENT"))
     for line in problems:

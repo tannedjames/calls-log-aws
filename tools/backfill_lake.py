@@ -94,6 +94,19 @@ def parquet_bytes(table: str, rows: List[Dict[str, Any]]) -> bytes:
     return publisher.parquet_bytes(table, rows)
 
 
+def parquet_rows(path: Path) -> List[Dict[str, Any]]:
+    """A lake file's rows. One thread: pyarrow 24's reader pool can hang the interpreter's exit."""
+    import pyarrow.parquet as pq
+
+    return pq.read_table(path, use_threads=False).to_pylist()
+
+
+def fetch(bucket: str, key: str, path: Path, *, run=subprocess.run) -> Path:
+    """Download one object to path."""
+    run_cli(["s3api", "get-object", "--output", "json", str(path)], {"Bucket": bucket, "Key": key}, run=run)
+    return path
+
+
 def backfill(bucket: str, *, dry_run: bool, run=subprocess.run, write: Optional[Writer] = None,
              read_pairs: Optional[Callable[[Path], list]] = None, now: Optional[_dt.datetime] = None) -> Dict[str, int]:
     from cloud import publisher   # typed_rows needs no pyarrow
@@ -122,9 +135,7 @@ def backfill(bucket: str, *, dry_run: bool, run=subprocess.run, write: Optional[
             continue
         with tempfile.TemporaryDirectory() as tmp:
             sheet = Path(tmp) / "day-sheet.xlsx"
-            run_cli(["s3api", "get-object", "--output", "json", str(sheet)],
-                    {"Bucket": bucket, "Key": obj["Key"]}, run=run)
-            pairs = read_pairs(sheet)
+            pairs = read_pairs(fetch(bucket, obj["Key"], sheet, run=run))
         rows = lake.backfill_rows(day, upload, pairs, salt=secret["salt"], prefixes=secret["prefixes"])
         problems = lake.check_sessions(rows["sessions"]) or ([] if pairs else ["the Day Sheet has no sessions"])
         if problems:

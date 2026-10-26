@@ -45,6 +45,13 @@ SESSION_COLUMNS = ("person_key", "work_date", "upload_id", "session_no", "start_
                    "span_min", "call_count", "source")
 UPLOAD_COLUMNS = ("upload_id", "person_key", "work_date", "image_count", "attempts", "ready_at",
                   "started_at", "finished_at", "status", "runner_memory_mb")
+# Hand labels for OCR accuracy (Phase 4.5, tools/label_calls.py): not in the
+# envelope; the Owner writes them from CloudShell. What the OCR read is copied
+# in, so a Re-run that replaces the call keeps its label's meaning.
+LABEL_COLUMNS = ("person_key", "work_date", "upload_id", "image_key", "call_seq", "ocr_start_ts",
+                 "ocr_duration_s", "row_conf", "start_conf", "duration_conf", "flagged", "parser_version",
+                 "ocr_model", "real_call", "true_start_ts", "true_duration_s", "batch", "labelled_at")
+ENVELOPE_TABLES = ("calls", "sessions", "uploads")
 
 # The lake's columns and their Athena types, in file order: the publisher's
 # Parquet schema and the Glue tables (infra/lake.tf) both follow it, and tests
@@ -59,11 +66,14 @@ _TYPES = {
     "image_count": "int", "attempts": "int", "ready_at": "timestamp", "started_at": "timestamp",
     "finished_at": "timestamp", "status": "string", "runner_memory_mb": "int",
     "ingested_at": "timestamp",
+    "ocr_start_ts": "timestamp", "ocr_duration_s": "int", "real_call": "boolean",
+    "true_start_ts": "timestamp", "true_duration_s": "int", "batch": "string", "labelled_at": "timestamp",
 }
 COLUMN_TYPES = {
     "calls": {c: _TYPES[c] for c in CALL_COLUMNS + ("ingested_at",)},
     "sessions": {c: _TYPES[c] for c in SESSION_COLUMNS + ("ingested_at",)},
     "uploads": {c: _TYPES[c] for c in UPLOAD_COLUMNS},
+    "labels": {c: _TYPES[c] for c in LABEL_COLUMNS},
 }
 
 # Warning code -> the field it is about. parser.py and session_builder.py

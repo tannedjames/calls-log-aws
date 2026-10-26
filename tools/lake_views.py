@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
 from tools.aws_cli import AwsError, call  # noqa: E402
 
 VIEWS_DIR = ROOT / "sql" / "views"
-VIEWS = ["day_summary", "weekly_attendance", "pipeline_metrics", "ocr_quality"]   # dependency order
+VIEWS = ["day_summary", "weekly_attendance", "pipeline_metrics", "ocr_quality", "ocr_accuracy"]   # dependency order
 WORKGROUP = "calls-log"
 DATABASE = "calls_log"
 _DONE = ("SUCCEEDED", "FAILED", "CANCELLED")

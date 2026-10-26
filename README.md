@@ -276,7 +276,9 @@ Why a lake of Parquet files and not a database server: it costs nothing while
 idle, needs no network setup, and still answers in SQL
 ([ADR 9](docs/aws/adr/0009-call-rows-in-an-s3-data-lake.md)). What it holds,
 column by column: [the data contract](docs/aws/data-contract.md). More queries:
-[`sql/examples/`](sql/examples/).
+[`sql/examples/`](sql/examples/). How often the reader gets a call exactly
+right is measured from a small sample checked by hand each week
+(`calls_log.ocr_accuracy`).
 
 ---
 

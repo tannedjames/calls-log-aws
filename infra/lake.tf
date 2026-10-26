@@ -52,6 +52,14 @@ locals {
       ["attempts", "int"], ["ready_at", "timestamp"], ["started_at", "timestamp"], ["finished_at", "timestamp"],
       ["status", "string"], ["runner_memory_mb", "int"],
     ]
+    labels = [
+      ["person_key", "string"], ["work_date", "date"], ["upload_id", "string"], ["image_key", "string"],
+      ["call_seq", "int"], ["ocr_start_ts", "timestamp"], ["ocr_duration_s", "int"], ["row_conf", "double"],
+      ["start_conf", "double"], ["duration_conf", "double"], ["flagged", "boolean"],
+      ["parser_version", "string"], ["ocr_model", "string"], ["real_call", "boolean"],
+      ["true_start_ts", "timestamp"], ["true_duration_s", "int"], ["batch", "string"],
+      ["labelled_at", "timestamp"],
+    ]
   }
 }
 

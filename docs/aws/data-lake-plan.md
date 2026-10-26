@@ -133,7 +133,8 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 
 - [x] `lake_enabled = true` (set 2026-10-26, with the salt)
 - [x] A Re-run of a real day (2026-10-21) reached Athena: 95 calls, 8 flagged
-- [ ] Over a week: check that Re-runs overwrite and Superseded uploads never appear
+- [x] `tools/check_lake_choice.py`: lists every day whose lake file isn't its chosen Done upload (stale, missing, quarantined, orphan); read-only, from CloudShell
+- [ ] Over a week: check that Re-runs overwrite and Superseded uploads never appear (run the check above after a week of Re-runs)
 
 ### Phase 4: Backfill
 
@@ -143,9 +144,11 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 
 ### Phase 4.5: OCR accuracy
 
-- [ ] Ground truth: Synthetic Set, Reference Set, weekly spot-check of about 20 real calls in a private `labels` table, optional Superseded vs. chosen pairs
+- [x] The private `labels` table (Glue, `lake/labels/`) and `tools/label_calls.py`: `sample` zips a worksheet of 20 recent calls (half flagged or low-confidence) with their screenshots, numbered rather than named; `import` checks the filled worksheet and writes the labels
+- [ ] Ground truth: weekly spot-check of about 20 real calls (needs someone to label them); the Synthetic Set is already exact in CI (`check_lake_parity.py`), the Reference Set stays on the PC
 - [x] `ocr_quality` view, label-free half: flagged and low-confidence counts per field, by day, person, model and parser version
-- [ ] Exact-match rate per field, mean error in seconds, calibration of the 0.85 threshold (needs the labels)
+- [x] `ocr_accuracy` view: exact-match rate per field and mean duration error, by model, parser version and confidence band; `sql/examples/threshold_calibration.sql` shows the exact rate per 0.05 of confidence
+- [ ] Calibrate the 0.85 threshold and the 30% low-confidence limit (needs a few weeks of labels)
 - [ ] Report: `docs/aws/ocr-accuracy.md`
 
 ### Phase 5: Gold layer and portfolio

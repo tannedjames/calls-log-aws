@@ -4377,7 +4377,8 @@ def test_contract_doc_lists_exactly_the_lake_columns_and_codes():
     assert "`schema_version = 1`" in text
     for table, columns, publisher in (("calls", lake.CALL_COLUMNS, ["ingested_at"]),
                                       ("sessions", lake.SESSION_COLUMNS, ["ingested_at"]),
-                                      ("uploads", lake.UPLOAD_COLUMNS, [])):
+                                      ("uploads", lake.UPLOAD_COLUMNS, []),
+                                      ("labels", lake.LABEL_COLUMNS, [])):
         section = text.split(f"### `{table}`")[1].split("\n### ")[0].split("\n## ")[0]
         listed = _re.findall(r"^\| `([a-z_]+)` \| (\w+) \|", section, _re.M)
         assert [c for c, _ in listed] == list(columns) + publisher, (table, listed)
@@ -4533,7 +4534,7 @@ def test_publisher_quarantines_what_fails_the_checks_without_naming_anyone():
 
 def test_publisher_tables_type_every_contract_column():
     rows = publisher.tables(_lake_payload(), _dt.datetime(2026, 6, 1, 2, 3, 5))
-    assert {t: list(r[0]) for t, r in rows.items()} == {t: list(c) for t, c in lake.COLUMN_TYPES.items()}
+    assert {t: list(r[0]) for t, r in rows.items()} == {t: list(lake.COLUMN_TYPES[t]) for t in lake.ENVELOPE_TABLES}
     call, missed, session, upload = rows["calls"][0], rows["calls"][3], rows["sessions"][0], rows["uploads"][0]
     assert call["work_date"] == _dt.date(2026, 6, 1) and call["start_ts"] == _dt.datetime(2026, 6, 1, 8, 0)
     assert call["countable"] is True and isinstance(call["row_conf"], float) and call["duration_s"] == 1200
@@ -4787,3 +4788,188 @@ def test_lake_sql_creates_only_views_and_reads_only_the_lake():
             assert sql.count("CREATE") == 1, path
         else:
             assert sql.upper().startswith("SELECT"), path
+
+
+# ---------------------------------------------------------------------------
+# Checking the lake's choice (Phase 3) and hand labels for OCR accuracy
+# (Phase 4.5): tools/check_lake_choice.py and tools/label_calls.py. AWS is
+# the fake CLI above; Parquet is a JSON stand-in. All values are fictional.
+# ---------------------------------------------------------------------------
+
+import csv
+import zipfile
+
+from tools import check_lake_choice, label_calls
+
+
+def _json_rows(path):
+    return json.loads(Path(path).read_bytes())
+
+
+def test_status_chosen_is_the_upload_made_ready_last():
+    done_old = {"uploadId": "20260601T010000Z-00000001", "status": "Done", "readyAt": "2026-06-01T01:00:00Z"}
+    imported = {"uploadId": "20260520T000000Z-00000002", "status": "Done"}
+    held = {"uploadId": "20260601T090000Z-00000003", "status": "Held", "readyAt": "2026-06-01T09:00:00Z"}
+    rerun = {"uploadId": "20260601T020000Z-00000004", "status": "Pending", "readyAt": "2026-06-01T05:00:00Z"}
+    assert fstatus.chosen([imported, done_old, held]) is done_old       # Held isn't chosen; an import ranks last
+    assert fstatus.chosen([imported, done_old, held, rerun]) is rerun  # a Re-run takes over before it is Done
+    assert fstatus.chosen([held]) is None and fstatus.chosen([]) is None
+
+
+def test_check_lake_choice_reports_each_day_by_key_never_by_name():
+    dyn, _objects = _bf_world()
+    store = FolderStatus(dyn, "calls-log-folders", lambda: 1_780_000_000.0)
+    store.record_import("Tran Thi B & 2026-06-05", "20260520T000000Z-00000005")   # Done, never reached the lake
+    key_a = lake.person_key("Nguyen Van A", _BF_SALT, _LAKE_PREFIXES)
+    key_b = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
+    rows = lambda upload: json.dumps([{"upload_id": upload, "source": "xlsx_backfill"}]).encode("utf-8")
+    objects = {f"results/{d} & 2026-06-0{n}.xlsx": b"sheet" for d, n in (
+        ("Nguyen Van A", 1), ("Tran Thi B", 2), ("Nguyen Van A", 3), ("Tran Thi B", 4), ("Tran Thi B", 5))}
+    objects.update({
+        # day 1: the lake still holds the PC's copy, though the Run's Re-run is Done
+        f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet": rows("20260520T000000Z-00000001"),
+        f"lake/sessions/work_month=2026-06/{key_b}_2026-06-02.parquet": rows("20260520T000000Z-00000002"),
+        "quarantine/Tran Thi B & 2026-06-04/20260520T000000Z-00000004.json": b"{}",
+        "lake/sessions/work_month=2026-06/0123456789abcdef_2026-06-09.parquet": rows(_RUN_UP)})
+    cli = _FakeBackfillCli(dyn, objects)
+    with redirect_stdout(io.StringIO()) as out:
+        code = check_lake_choice.main([], run=cli, read=_json_rows)
+    said = out.getvalue()
+    assert code == 1, said
+    assert json.loads(said.strip().splitlines()[-2]) == {
+        "ok": 1, "waiting": 1, "stale": 1, "missing": 1, "quarantined": 1, "orphan": 1}
+    assert f"stale {key_a}_2026-06-01: the lake holds 20260520T000000Z-00000001 (Done); " \
+           f"the day's choice is {_RUN_UP} (Done)" in said
+    assert f"quarantined {key_b}_2026-06-04" in said and f"missing {key_b}_2026-06-05" in said
+    assert "orphan lake/sessions/work_month=2026-06/0123456789abcdef_2026-06-09.parquet" in said
+    for private in ("Nguyen", "Tran", _BF_SALT):
+        assert private not in said, private
+    assert cli.puts == {} and not any(op.endswith(("put-object", "put-item", "update-item")) for op in cli.log)
+    fixed = _FakeBackfillCli(dyn, {**objects,
+                               f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet": rows(_RUN_UP)})
+    del fixed.objects["lake/sessions/work_month=2026-06/0123456789abcdef_2026-06-09.parquet"]
+    del fixed.objects["results/Tran Thi B & 2026-06-04.xlsx"], fixed.objects["results/Tran Thi B & 2026-06-05.xlsx"]
+    with redirect_stdout(io.StringIO()) as out:
+        assert check_lake_choice.main([], run=fixed, read=_json_rows) == 0, out.getvalue()
+
+
+def test_label_values_read_what_a_person_types():
+    for text, want in (("8:05", "08:05"), ("08:05", "08:05"), ("8:05 PM", "20:05"), ("12:10am", "00:10"),
+                       ("23:59", "23:59"), ("8:05:00", "08:05")):
+        assert label_calls.clock(text) == want, text
+    for text in ("25:00", "8.05", "13:00 PM", "", "8:60"):
+        try:
+            label_calls.clock(text)
+        except label_calls.LabelError:
+            continue
+        raise AssertionError(text)
+    for text, want in (("", 0), ("83", 83), ("1:23", 83), ("1:02:03", 3723), ("1m 23s", 83), ("2h", 7200),
+                       ("45s", 45), ("20m 00s", 1200)):
+        assert label_calls.seconds(text) == want, text
+    for text in ("1.5", "abc", "1:2"):
+        try:
+            label_calls.seconds(text)
+        except label_calls.LabelError:
+            continue
+        raise AssertionError(text)
+    assert label_calls.shown(83) == "1m 23s" and label_calls.shown(None) == "none"
+    assert label_calls.seconds(label_calls.shown(1200)) == 1200
+
+
+_SHOTS = {"A.png": b"image A", "b.png": b"image b", "c.png": b"image c"}   # the PC's order, case folded
+_BATCH = "labels-20260603T010203Z"
+_NOW = _dt.datetime(2026, 6, 3, 1, 2, 3, tzinfo=_dt.timezone.utc)
+
+
+def _label_world():
+    calls = _lake_payload()["calls"]
+    key = calls[0]["person_key"]
+    objects = {f"lake/calls/work_month=2026-06/{key}_2026-06-01.parquet": json.dumps(calls).encode("utf-8"),
+               f"inbox/{_RUN_UP}/notes.txt": b"",
+               **{f"inbox/{_RUN_UP}/{name}": body for name, body in _SHOTS.items()}}
+    return calls, _FakeBackfillCli(_FakeDynamo(), objects)
+
+
+def _sample(cli, folder, argv=("--count", "3", "--seed", "1"), now=_NOW):
+    with redirect_stdout(io.StringIO()) as out:
+        code = label_calls.main(["sample", *argv], run=cli, read=_json_rows, now=now, out_dir=folder)
+    return code, out.getvalue()
+
+
+def test_label_calls_sample_zips_a_worksheet_with_its_screenshots():
+    calls, cli = _label_world()
+    with tempfile.TemporaryDirectory() as d:
+        code, said = _sample(cli, Path(d))
+        with zipfile.ZipFile(Path(d) / f"{_BATCH}.zip") as z:
+            names = sorted(z.namelist())
+            text = z.read(f"{_BATCH}/{_BATCH}.csv").decode("utf-8-sig")
+            shots = {n.rsplit("/", 1)[1]: z.read(n) for n in names if not n.endswith(".csv")}
+        side = json.loads((Path(d) / f"{_BATCH}.json").read_text(encoding="utf-8"))
+    assert code == 0 and f"download: {Path(d) / _BATCH}.zip" in said, said
+    rows = list(csv.DictReader(io.StringIO(text)))
+    assert len(rows) == 3 and tuple(rows[0]) == label_calls.WORKSHEET
+    by_ref = {label_calls.ref(c): c for c in calls}
+    for row in rows:
+        call = by_ref[row["ref"]]
+        assert shots[row["image"]] == list(_SHOTS.values())[int(call["image_key"]) - 1], row
+        assert row["ocr_start"] == call["start_ts"][11:16] and row["true_start"] == ""
+        assert side["calls"][row["ref"]]["ocr_duration_s"] == call["duration_s"]
+    assert all(_re.fullmatch(rf"{_BATCH}/(\d{{2}}\.png|{_BATCH}\.csv)", n) for n in names), names   # no file names
+    assert len(shots) == len({r["image"] for r in rows})                                            # each image once
+    assert side["batch"] == _BATCH and set(side["calls"]) == {r["ref"] for r in rows}
+    assert any(by_ref[r["ref"]]["flagged"] for r in rows)   # the doubtful half
+    for private in ("Nguyen", "Tran", _PHONE):
+        assert private not in text and private not in json.dumps(side), private
+    assert not any(op.endswith("put-object") for op in cli.log)
+    with tempfile.TemporaryDirectory() as d:
+        later = _NOW + _dt.timedelta(days=30)
+        assert _sample(cli, Path(d), argv=(), now=later)[0] == 0
+        with zipfile.ZipFile(Path(d) / later.strftime("labels-%Y%m%dT%H%M%SZ.zip")) as z:
+            assert z.namelist() == [later.strftime("labels-%Y%m%dT%H%M%SZ/labels-%Y%m%dT%H%M%SZ.csv")]   # too old
+
+
+def test_label_calls_import_writes_checked_labels_and_nothing_on_a_mistake():
+    calls, cli = _label_world()
+    write = lambda table, rows: json.dumps(rows, default=str).encode("utf-8")
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d) / "calls-log-labels"
+        _sample(cli, folder, argv=("--count", "4", "--seed", "2"))
+        rows = list(csv.DictReader(io.StringIO((folder / _BATCH / f"{_BATCH}.csv").read_text(encoding="utf-8-sig"))))
+        sheet = Path(d) / f"{_BATCH} (1).csv"   # downloaded, filled in and uploaded back: a browser renamed it
+
+        def fill(values):
+            with open(sheet, "w", encoding="utf-8-sig", newline="") as f:   # as a spreadsheet saves it
+                w = csv.DictWriter(f, fieldnames=label_calls.WORKSHEET)
+                w.writeheader()
+                w.writerows({**r, **v} for r, v in zip(rows, values))
+
+        def run(argv):
+            with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+                code = label_calls.main(argv, run=cli, write=write, now=_NOW, out_dir=folder)
+            return code, out.getvalue() + err.getvalue()
+
+        fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
+              {"true_start": "25:00"}, {}])
+        code, said = run(["import", str(sheet)])
+        assert code == 2 and "line 4: '25:00' is not a time of day" in said and cli.puts == {}, said
+        fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
+              {"true_start": "9:31 AM", "true_duration": ""}, {}])
+        code, said = run(["import", str(sheet), "--dry-run"])
+        assert code == 0 and cli.puts == {} and "would write" in said, said
+        assert (folder / f"{_BATCH}.zip").is_file()
+        code, said = run(["import", str(sheet)])
+        assert code == 0, said
+        assert not (folder / f"{_BATCH}.zip").exists() and not (folder / _BATCH).exists()   # screenshots gone
+        assert (folder / f"{_BATCH}.json").is_file()
+        assert run(["import", str(Path(d) / "nowhere.csv")])[0] == 2
+    assert json.loads(said.strip().splitlines()[-1]) == {"labelled": 3, "not_a_call": 1, "unlabelled": 1}
+    [(key, labels)] = cli.puts.items()
+    assert key == f"lake/labels/work_month=2026-06/{_BATCH}.parquet"
+    assert [list(r) for r in labels] == [list(lake.LABEL_COLUMNS)] * 3
+    first, second, third = labels
+    assert (first["real_call"], first["true_start_ts"], first["true_duration_s"]) == (True, "2026-06-01 08:00:00", 1200)
+    assert (second["real_call"], second["true_start_ts"], second["true_duration_s"]) == (False, None, None)
+    assert third["true_start_ts"] == "2026-06-01 09:31:00" and third["true_duration_s"] == 0
+    assert all(r["batch"] == _BATCH and r["labelled_at"] == "2026-06-03 01:02:03" for r in labels)
+    for private in ("Nguyen", "Tran", _PHONE):
+        assert private not in json.dumps(labels), private
