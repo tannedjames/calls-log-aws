@@ -1078,8 +1078,9 @@ def _pp_private_files(folder):
 class _FakeAws:
     """Stands in for subprocess.run: records each call and its JSON input file."""
 
-    def __init__(self, fail_with=""):
+    def __init__(self, fail_with="", current="unset"):
         self.calls, self.inputs, self.files, self.fail_with = [], [], [], fail_with
+        self.current = current   # what ssm get-parameter answers
 
     def __call__(self, cmd, capture_output, text):
         self.calls.append(cmd)
@@ -1089,6 +1090,8 @@ class _FakeAws:
             self.inputs.append(json.loads(path.read_text(encoding="utf-8")))
         if cmd[1:3] == ["sts", "get-caller-identity"]:
             return SimpleNamespace(returncode=0, stdout="123456789012\n", stderr="")
+        if cmd[1:3] == ["ssm", "get-parameter"] and not self.fail_with:
+            return SimpleNamespace(returncode=0, stdout=self.current + "\n", stderr="")
         if self.fail_with:
             return SimpleNamespace(returncode=254, stdout="", stderr=self.fail_with)
         return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
@@ -1356,9 +1359,9 @@ _ST_URL = "https://script.google.com/macros/s/FICTIONAL-DEPLOYMENT/exec"
 
 
 class _FakeSsm:
-    def __init__(self, values, switch="false"):
-        self.values, self.switch = values, switch
-        self.batch_calls = self.switch_calls = 0
+    def __init__(self, values, switch="false", lake="false"):
+        self.values, self.switch, self.lake = values, switch, lake
+        self.batch_calls = self.switch_calls = self.lake_calls = 0
 
     def get_parameters(self, Names, WithDecryption):
         assert WithDecryption is True
@@ -1369,7 +1372,10 @@ class _FakeSsm:
                 "InvalidParameters": [n for n in Names if n.removeprefix("/calls-log/") not in self.values]}
 
     def get_parameter(self, Name, WithDecryption):
-        assert Name == "/calls-log/sync_enabled" and WithDecryption is True
+        assert Name in ("/calls-log/sync_enabled", "/calls-log/lake_enabled") and WithDecryption is True
+        if Name == "/calls-log/lake_enabled":
+            self.lake_calls += 1
+            return {"Parameter": {"Name": Name, "Value": self.lake}}
         self.switch_calls += 1
         return {"Parameter": {"Name": Name, "Value": self.switch}}
 
@@ -1803,10 +1809,10 @@ for _recs in _BY_IMAGE.values():
 class _Rig:
     """Everything one Run touches, faked, with the upload Pending."""
 
-    def __init__(self, by_image=None, switch="false"):
+    def __init__(self, by_image=None, switch="false", lake="false"):
         self.by_image = dict(_BY_IMAGE if by_image is None else by_image)
         self.s3, self.sns = _FakeS3(), _FakeSns()
-        self.ssm = _FakeSsm({}, switch=switch)
+        self.ssm = _FakeSsm({}, switch=switch, lake=lake)
         self.status = FolderStatus(_FakeDynamo(), "calls-log-folders", lambda: 1_780_000_000.0)
         self.status.create(_RUN_PD, _RUN_UP, len(self.by_image))
         self.status.mark_ready(_RUN_PD, _RUN_UP)
@@ -4086,3 +4092,315 @@ def test_runner_command_line_counts_a_superseded_run_as_done():
     with mock.patch.object(runner, "_clients", return_value={}), \
             mock.patch.object(runner, "run_folder", return_value=runner.Outcome("Superseded")):
         assert runner.main(["--upload-id", _RUN_UP, "--person-day", _RUN_PD]) == 0
+
+
+# ---------------------------------------------------------------------------
+# The data lake's records (cloud/lake.py, ADR 9, Data System Plan Phase 1):
+# per-field confidences in the shared core, the staged envelope and its
+# checks, and the runner's best-effort hand-over. All values are fictional.
+# ---------------------------------------------------------------------------
+
+from cloud import lake
+from ocr import OcrLine, row_line_spans, row_text
+from parser import parse_duration_ex, parse_start_time_ex
+from tools import check_lake_parity as lake_parity
+
+_LAKE_SALT = "fictional-salt-for-tests"
+_LAKE_PREFIXES = ("nguyen van a", "tran thi b")
+
+
+def _row(*parts):
+    return [OcrLine(text, conf, (0.0, 0.0, 1.0, 1.0)) for text, conf in parts]
+
+
+def _lake_rec(src, *parts):
+    """One call row as OCR lines (a fictional phone number first), parsed like extract_calls does."""
+    row = _row((_PHONE, 0.9), *parts)
+    return parse_row(src, row_text(row), ocr.row_confidence(row), line_spans=row_line_spans(row))
+
+
+_LAKE_BY_IMAGE = {
+    "Shot_01.jpg": [_lake_rec("Shot_01.jpg", ("08:00AM", 0.97), ("発信", 0.95), ("20分0秒", 0.93)),
+                    _lake_rec("Shot_01.jpg", ("08:21AM", 0.97), ("発信", 0.95), ("0秒", 0.93)),
+                    _lake_rec("Shot_01.jpg", ("08:23AM", 0.97), ("発信", 0.95), ("37分0秒", 0.93))],
+    "shot_02.jpg": [_lake_rec("shot_02.jpg", ("09:30AM", 0.96), ("不在着信", 0.95)),
+                    _lake_rec("shot_02.jpg", ("10:00AM", 0.97), ("発信", 0.95), ("30分0秒", 0.62))],
+    "shot_03.png": [_lake_rec("shot_03.png", ("10:33AM", 0.97), ("発信", 0.95), ("27分0秒", 0.93))],
+}
+
+
+def _lake_payload(**changes):
+    recs = [copy.deepcopy(r) for rs in _LAKE_BY_IMAGE.values() for r in rs]
+    kept, sessions, _stats = runner.calls_and_sessions(recs)
+    upload = {"image_count": 3, "attempts": 1, "ready_at": "2026-06-01T02:00:00Z",
+              "started_at": "2026-06-01T02:01:00Z", "finished_at": "2026-06-01T02:03:00Z",
+              "status": "Done", "runner_memory_mb": 2048}
+    return lake.payload(naming.PersonDay("Nguyen Van A", "2026-06-01"), _RUN_UP, image_names=list(_LAKE_BY_IMAGE),
+                        records=kept, sessions=sessions, sheet={"sessions": 2, "span_min": 120},
+                        upload=upload, salt=_LAKE_SALT, prefixes=_LAKE_PREFIXES,
+                        staged_at="2026-06-01T02:03:01Z", **changes)
+
+
+def _lake_rig(lake_on="true", **settings_changes):
+    rig = _Rig(by_image=_LAKE_BY_IMAGE, lake=lake_on)
+    rig.settings = dataclasses.replace(rig.settings, **{"person_salt": _LAKE_SALT, "name_prefixes": _LAKE_PREFIXES,
+                                                        **settings_changes})
+    return rig
+
+
+def _staged(rig):
+    return {k: json.loads(v) for k, v in rig.s3.objects.items() if k.startswith("staging/")}
+
+
+def test_row_line_spans_point_at_each_line_in_the_row_text():
+    for row in (_row(("03:08 PM", 0.9), ("発信", 0.8), ("1分25秒", 0.7)),
+                _row((" 08:00", 0.9), ("x", 0.5)), _row(("only", 0.6))):
+        text = row_text(row)
+        assert [text[a:b] for a, b, _ in row_line_spans(row)] == [ln.text.strip() for ln in row]
+        assert [c for _, _, c in row_line_spans(row)] == [ln.confidence for ln in row]
+
+
+def test_parse_duration_ex_points_at_the_duration_it_read():
+    for text, secs, read in (("03:08PM発信(32秒)", 32, "32秒"), ("8:00 AM 1 min 25 sec outgoing", 85, "1 min 25 sec"),
+                             ("03:08 PM 発信 01:25", 85, "01:25"), ("10:15 発信 0秒", 0, "0秒"),
+                             ("09:00 発信 00:01:05", 65, "00:01:05"), ("02:23 発信", None, None)):
+        start, _w, span = parse_start_time_ex(text)
+        got, warnings, at = parse_duration_ex(text, start, span)
+        assert (got, at and text[at[0]:at[1]]) == (secs, read), text
+        assert parse_duration(text, start, span) == (got, warnings)   # the old function is unchanged
+    assert parse_duration_ex("8:00 AM 1 min", "08:00")[2] is None     # the value-only path has no span
+
+
+def test_parse_row_gives_each_field_the_confidence_of_its_own_line():
+    rec = _lake_rec("a.jpg", ("03:08PM", 0.97), ("発信", 0.95), ("1分25秒", 0.62))
+    assert (rec.start_time, rec.raw_duration_seconds, rec.start_conf, rec.duration_conf) == ("15:08", 85, 0.97, 0.62)
+    plain = parse_row("a.jpg", rec.raw_text, rec.ocr_confidence)
+    assert (plain.start_conf, plain.duration_conf) == (None, None)
+    assert plain.to_dict() == rec.to_dict()   # to_dict (processing_log.json) leaves them out
+    recovered = _lake_rec("a.jpg", ("03:08PM", 0.97), ("発信", 0.95))
+    assert recovered.raw_duration_seconds == 0 and recovered.duration_conf is None
+
+
+def test_person_key_is_salted_one_per_employee_and_names_nobody():
+    key = lake.person_key("Nguyen Van A", _LAKE_SALT, _LAKE_PREFIXES)
+    assert _re.fullmatch(r"[0-9a-f]{16}", key)
+    assert lake.person_key("Nguyễn Văn  A", _LAKE_SALT, _LAKE_PREFIXES) == key        # accents and spaces
+    assert lake.person_key("Nguyen Van A sales", _LAKE_SALT, _LAKE_PREFIXES) == key   # the Web App's prefix match
+    assert lake.person_key("Tran Thi B", _LAKE_SALT, _LAKE_PREFIXES) != key
+    assert lake.person_key("Nguyen Van A", "another salt", _LAKE_PREFIXES) != key
+    try:
+        lake.person_key("Nguyen Van A", "", _LAKE_PREFIXES)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an unset salt must never hash a name")
+
+
+def test_every_warning_the_parser_writes_has_a_lake_code():
+    root = Path(__file__).resolve().parent
+    text = (root / "parser.py").read_text(encoding="utf-8") + (root / "session_builder.py").read_text(encoding="utf-8")
+    written = set(_re.findall(r'(?:append\(\s*|\[\s*)f?"([a-z]+(?:_[a-z0-9]+)+_?)', text))
+    written |= {"possible_fuzzy_duplicate_with_"}
+    written -= {"overlap_with_"}   # a session's warning, not a call's
+    assert len(written) > 15, written
+    for code in written:
+        assert lake.flag_code(code + "x" if code.endswith("_") else code) != "other", code
+    assert lake.flag_code("low_ocr_confidence_0.72") == "low_ocr_confidence"
+    assert lake.flag_code("possible_fuzzy_duplicate_with_shot_02.jpg@08:01") == "possible_fuzzy_duplicate"
+    assert lake.flag_code(f"something new about {_PHONE}") == "other"
+
+
+def test_lake_payload_passes_its_checks_and_holds_codes_not_text():
+    p = _lake_payload()
+    assert lake.check(p) == []
+    assert tuple(p) == lake.ENVELOPE_KEYS and p["schema_version"] == 1
+    assert p["person_key"] == lake.person_key("Nguyen Van A", _LAKE_SALT, _LAKE_PREFIXES)
+    assert [(c["call_seq"], c["image_key"], c["start_ts"][11:16], c["end_ts"] and c["end_ts"][11:16],
+             c["duration_s"], c["countable"]) for c in p["calls"]] == [
+        (1, "01", "08:00", "08:20", 1200, True), (2, "01", "08:21", "08:21", 0, True),   # 0 s: end == start
+        (3, "01", "08:23", "09:00", 2220, True), (4, "02", "09:30", None, None, False),
+        (5, "02", "10:00", "10:30", 1800, True), (6, "03", "10:33", "11:00", 1620, True)]
+    assert [(s["session_no"], s["start_ts"], s["end_ts"], s["span_min"], s["call_count"], s["source"])
+            for s in p["sessions"]] == [
+        (1, "2026-06-01T08:00:00", "2026-06-01T09:00:00", 60, 3, "runner"),
+        (2, "2026-06-01T10:00:00", "2026-06-01T11:00:00", 60, 2, "runner")]
+    missed, weak = p["calls"][3], p["calls"][4]
+    assert (missed["flagged"], missed["flag_field"], missed["flag_reason"]) == (True, "duration", "duration_not_found")
+    assert (weak["flagged"], weak["flag_field"], weak["flag_reason"], weak["duration_conf"]) == (
+        True, "duration", "low_field_confidence", 0.62)
+    assert p["calls"][0]["flagged"] is False and p["calls"][0]["flag_reason"] is None
+    assert {c["parser_version"] for c in p["calls"]} == {lake.parser_version()}
+    text = json.dumps(p, ensure_ascii=False)
+    for private in (_PHONE, "Nguyen Van A", "nguyen van a", "Shot_01.jpg", "発信", _LAKE_SALT):
+        assert private not in text, private
+
+
+def test_lake_check_names_each_fault_by_position_only():
+    def broken(change):
+        p = _lake_payload()
+        change(p)
+        return "\n".join(lake.check(p))
+
+    faults = [
+        (lambda p: p["calls"][0].update(end_ts="2026-06-01T07:59:00"), "calls[0]: end_ts before start_ts"),
+        (lambda p: p["calls"][0].update(duration_s=60), "calls[0]: end_ts - start_ts disagrees"),
+        (lambda p: p["calls"][0].update(flag_reason=f"call from {_PHONE}"), "calls[0]: flag columns"),
+        (lambda p: p["calls"][0].update(name="Nguyen Van A"), "calls[0]: columns"),
+        (lambda p: p["calls"][0].update(image_key="Shot_01.jpg"), "calls[0]: image_key"),
+        (lambda p: p["sessions"][1].update(start_ts="2026-06-01T08:30:00"), "sessions[1]: overlaps"),
+        (lambda p: p["sessions"][0].update(call_count=0), "sessions[0]: no calls"),
+        (lambda p: p["sessions"][0].update(span_min=59), "sessions[0]: span_min disagrees"),
+        (lambda p: p["sessions"].pop(), "call_count total"),
+        (lambda p: p["day_sheet"].update(span_min=119), "Day Sheet"),
+        (lambda p: [c.update(row_conf=0.5) for c in p["calls"]], "below the confidence threshold"),
+        (lambda p: p["uploads"][0].update(status="Failed"), "not a Done upload"),
+        (lambda p: p.update(person_key="Nguyen Van A"), "person_key"),
+        (lambda p: p.update(schema_version=2), "schema_version"),
+        (lambda p: p.pop("day_sheet"), "envelope keys"),
+        (lambda p: p.update(calls=[None]), "malformed envelope"),
+    ]
+    for change, said in faults:
+        found = broken(change)
+        assert said in found, (said, found)
+        assert _PHONE not in found and "Nguyen Van A" not in found
+
+
+def test_lake_switch_off_stages_nothing():
+    rig = _lake_rig("false")
+    assert rig.run().status == "Done"
+    assert _staged(rig) == {} and rig.sns.sent == [] and rig.ssm.lake_calls == 1
+    assert rig.events()[-1]["lake"] == "off"
+
+
+def test_lake_a_done_run_stages_its_records_once_after_done():
+    rig = _lake_rig()
+    states = []
+    real_put = rig.s3.put_object
+
+    def put(**kw):
+        if kw["Key"].startswith("staging/"):
+            states.append(rig.item()["status"])
+        return real_put(**kw)
+
+    rig.s3.put_object = put
+    with mock.patch.dict(os.environ, {"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": "2048"}):
+        assert rig.run().status == "Done"
+    staged = _staged(rig)
+    assert list(staged) == [f"staging/{_RUN_PD}/{_RUN_UP}.json"] and states == ["Done"]
+    p = staged[f"staging/{_RUN_PD}/{_RUN_UP}.json"]
+    assert lake.check(p) == [] and p["upload_id"] == _RUN_UP and p["work_date"] == "2026-06-01"
+    assert p["day_sheet"] == {"sessions": 2, "span_min": 120}   # read back from the stored Day Sheet
+    up = p["uploads"][0]
+    assert (up["status"], up["image_count"], up["attempts"], up["runner_memory_mb"]) == ("Done", 3, 1, 2048)
+    assert up["ready_at"] and up["started_at"] and up["finished_at"]
+    text = json.dumps(p, ensure_ascii=False)
+    assert _PHONE not in text and "Nguyen Van A" not in text and _LAKE_SALT not in text
+    assert rig.events()[-1]["lake"] == "staged" and rig.sns.sent == []
+
+
+def test_lake_failure_leaves_the_run_done_and_emails_once():
+    for case in ("no salt", "put refused", "alert fails too"):
+        rig = _lake_rig(**({"person_salt": ""} if case == "no salt" else {}))
+        if case != "no salt":
+            real_put = rig.s3.put_object
+
+            def put(real_put=real_put, **kw):
+                if kw["Key"].startswith("staging/"):
+                    raise RuntimeError(f"AccessDenied near {_LAKE_SALT} and {_ST_SECRET}")
+                return real_put(**kw)
+
+            rig.s3.put_object = put
+        if case == "alert fails too":
+            rig.sns.publish = mock.Mock(side_effect=RuntimeError("SNS down"))
+        outcome = rig.run(holder=f"run-{case}")
+        assert outcome.status == "Done" and rig.item()["status"] == "Done", case
+        assert len(rig.s3.versions[f"results/{_RUN_PD}.xlsx"]) == 1 and _staged(rig) == {}
+        done = rig.events()[-1]
+        assert (done["status"], done["lake"]) == ("Done", "failed") and done["lakeError"], case
+        text = "\n".join(rig.logs)
+        assert _LAKE_SALT not in text and _ST_SECRET not in text
+        if case == "alert fails too":
+            assert rig.sns.publish.call_count == 1
+        else:
+            assert len(rig.sns.sent) == 1 and "data lake" in rig.sns.sent[0]["Subject"]
+            assert _LAKE_SALT not in rig.sns.sent[0]["Message"]
+
+
+def test_runner_reads_checkpoints_written_before_or_after_its_own_version():
+    rig = _Rig(by_image=_LAKE_BY_IMAGE)
+    for i, (name, recs) in enumerate(_LAKE_BY_IMAGE.items()):
+        rows = [dataclasses.asdict(r) for r in recs]
+        if i == 0:   # an older checkpoint: no per-field confidences
+            rows = [{k: v for k, v in r.items() if k not in ("start_conf", "duration_conf")} for r in rows]
+        else:        # a newer one: a field this version doesn't know
+            rows = [{**r, "added_later": 1} for r in rows]
+        rig.s3.objects[f"work/{_RUN_UP}/{name}.json"] = json.dumps(rows, ensure_ascii=False).encode("utf-8")
+    assert rig.run().status == "Done" and rig.ocr_calls == []
+    assert rig.written == [[("08:00", "09:00"), ("10:00", "11:00")]]
+
+
+def test_settings_keep_the_person_salt_private_and_read_the_lake_switch_fresh():
+    ssm = _FakeSsm({**_ST_VALUES, "person_salt": _LAKE_SALT}, lake="true")
+    current = settings.read(ssm, _ST_ENV)
+    assert current.person_salt == _LAKE_SALT and _LAKE_SALT not in repr(current)
+    assert settings.read(_FakeSsm({**_ST_VALUES, "person_salt": "unset"}), _ST_ENV).person_salt == ""
+    assert settings.lake_enabled(ssm) is True and ssm.lake_calls == 1
+    ssm.lake = "false"
+    assert settings.lake_enabled(ssm) is False and ssm.lake_calls == 2 and ssm.switch_calls == 0
+
+
+def test_put_parameters_sets_the_person_salt_once_and_never_shows_it():
+    fake = _FakeAws()
+    code, said = _pp_main(["--new-person-salt", "--lake-enabled", "false"], fake)
+    assert code == 0, said
+    assert [i["Name"] for i in fake.inputs] == [
+        "/calls-log/person_salt", "/calls-log/person_salt", "/calls-log/lake_enabled"]   # read, then two writes
+    salt = fake.inputs[1]["Value"]
+    assert _re.fullmatch(r"[0-9a-f]{64}", salt) and salt not in said and fake.inputs[2]["Value"] == "false"
+    refused = _FakeAws(current="0" * 64)
+    code, said = _pp_main(["--new-person-salt", "--lake-enabled", "true"], refused)
+    assert code == 2 and "already set" in said and not any("Value" in i for i in refused.inputs)
+
+
+def test_contract_doc_lists_exactly_the_lake_columns_and_codes():
+    doc = Path(__file__).resolve().parent / "docs" / "aws" / "data-contract.md"
+    if not doc.is_file():   # docs/ isn't in the runner image
+        return
+    text = doc.read_text(encoding="utf-8")
+    assert "`schema_version = 1`" in text
+    for table, columns, publisher in (("calls", lake.CALL_COLUMNS, ["ingested_at"]),
+                                      ("sessions", lake.SESSION_COLUMNS, ["ingested_at"]),
+                                      ("uploads", lake.UPLOAD_COLUMNS, [])):
+        section = text.split(f"### `{table}`")[1].split("\n### ")[0].split("\n## ")[0]
+        listed = _re.findall(r"^\| `([a-z_]+)` \|", section, _re.M)
+        assert listed == list(columns) + publisher, (table, listed)
+    for code in lake.FLAG_REASONS:
+        assert f"`{code}`" in text, code
+
+
+def test_check_lake_parity_compares_staged_calls_with_the_truth():
+    rig = _Rig(by_image=_LAKE_BY_IMAGE)
+    truth = [{"start": "08:00", "kind": "out", "secs": 1200}, {"start": "08:21", "kind": "out", "secs": 0},
+             {"start": "08:23", "kind": "out", "secs": 2220}, {"start": "09:30", "kind": "miss", "secs": 0},
+             {"start": "10:00", "kind": "out", "secs": 1800}, {"start": "10:33", "kind": "out", "secs": 1620}]
+    with tempfile.TemporaryDirectory() as d, \
+            mock.patch.object(runner.pipeline, "extract_calls", rig.extract_calls), \
+            mock.patch.object(excel_writer, "log"):
+        folder = Path(d) / _RUN_PD
+        folder.mkdir()
+        for name in _LAKE_BY_IMAGE:
+            (folder / name).write_bytes(b"x")
+        assert lake_parity.check_folder(folder, truth) == ([], [])
+        problems, _notes = lake_parity.check_folder(folder, truth[1:])
+        assert problems == ["calls differ from the truth: 0 missing, 1 extra"]
+        (Path(d) / "truth.json").write_text(json.dumps({"sets": {"screenshots": {"dir": _RUN_PD, "calls": truth}}}),
+                                            encoding="utf-8")
+        with redirect_stdout(io.StringIO()) as out:
+            assert lake_parity.main(["--dir", d]) == 0
+            assert lake_parity.main(["--dir", str(folder)]) == 2
+        assert "screenshots: 6 calls -> OK" in out.getvalue()
+        emitted = Path(d) / "emitted"
+        runner.run_local(folder, [], None, emit=emitted)
+        staged = json.loads((emitted / f"{_RUN_PD}.json").read_text(encoding="utf-8"))
+        assert lake.check(staged) == [] and staged["person_key"] != lake.person_key(
+            "Nguyen Van A", _LAKE_SALT, _LAKE_PREFIXES)   # the local salt matches no real key

@@ -8,8 +8,9 @@ call this module, so they can never disagree about whose day a Folder is.
 * An employee name is allowed when it matches a NAME_TO_ID key the way the
   Web App matches it: norm_() of the name equals a key or starts with it, and
   the first matching key wins (apps_script/WebAppSync.gs, matchId_).
-* S3 keys: inbox/<uploadId>/<file>, work/<uploadId>/<file>.json and
-  results/<Person-Day>.xlsx, with uploadId <UTC yyyymmddTHHMMSSZ>-<8 hex>.
+* S3 keys: inbox/<uploadId>/<file>, work/<uploadId>/<file>.json,
+  results/<Person-Day>.xlsx and staging/<Person-Day>/<uploadId>.json, with
+  uploadId <UTC yyyymmddTHHMMSSZ>-<8 hex>.
 
 Standard library only, apart from main (imported when a name is parsed).
 """
@@ -115,3 +116,8 @@ def work_key(upload_id: str, file_name: str) -> str:
 
 def result_key(day: PersonDay) -> str:
     return f"results/{day.key}.xlsx"
+
+
+def staging_key(day: PersonDay, upload_id: str) -> str:
+    """The data lake's hand-over of one Done upload (cloud/lake.py)."""
+    return f"staging/{day.key}/{upload_id}.json"

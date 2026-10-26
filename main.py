@@ -35,7 +35,7 @@ from typing import List, Optional, Tuple
 
 from config import CONFIG
 from image_preprocess import preprocess
-from ocr import run_ocr, group_lines_into_rows, row_text, row_confidence
+from ocr import run_ocr, group_lines_into_rows, row_text, row_confidence, row_line_spans
 from parser import CallRecord, parse_row
 from session_builder import dedupe, build_sessions
 from excel_writer import write_sessions
@@ -135,7 +135,7 @@ def extract_calls(files: List[Path]) -> tuple:
             # Vertical centre of the row as a fraction of image height, so the
             # parser can tell a call row from the status-bar clock.
             y_frac = (min(l.box[1] for l in row) + max(l.box[3] for l in row)) / 2.0 / img_h
-            rec = parse_row(path.name, text, conf, y_frac=y_frac)
+            rec = parse_row(path.name, text, conf, y_frac=y_frac, line_spans=row_line_spans(row))
             if rec.start_time is None and rec.raw_duration_seconds is None:
                 continue
             records.append(rec)

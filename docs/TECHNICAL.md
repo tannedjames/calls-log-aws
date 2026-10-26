@@ -35,7 +35,8 @@ above never import it.
 
 | File | What it does |
 |---|---|
-| `cloud/runner.py` | One Run: a queued Folder through the unchanged pipeline, its Day Sheet to `results/`, then the Sheet if the AWS Sync Switch is on. The Lambda handler, and a CLI for parity. |
+| `cloud/runner.py` | One Run: a queued Folder through the unchanged pipeline, its Day Sheet to `results/`, then the Sheet if the AWS Sync Switch is on, then the day's records to `staging/` if the data lake's switch is on. The Lambda handler, and a CLI for parity. |
+| `cloud/lake.py` | The data lake's records (ADR 9, `docs/aws/data-contract.md`): builds the staged envelope with no names (`person_key` is a salted HMAC) and runs its quality checks. |
 | `cloud/status.py` | Folder Status: the only writer of the `calls-log-folders` table (states, lease, attempts). |
 | `cloud/storage.py`, `cloud/naming.py`, `cloud/settings.py` | The data bucket, the one folder-name parser, and run-time settings and secrets. |
 | `cloud/intake.py`, `cloud/static/upload.html` | The upload and status page behind a public URL: checks folders, hands out presigned uploads, marks them Ready, shows Folder Status and finds Day Sheets; its Owner tab re-runs and re-sends days, stops and starts the runner and shows timings (§11). English and Vietnamese. |
@@ -49,6 +50,7 @@ above never import it.
 | `tools/import_outputs.py` | From the PC, once: the PC's past Day Sheets into AWS, every `(n)` copy as a version (§11). |
 | `tools/compare_outputs.py`, `tools/switches.py`, `tools/turnaround.py`, `tools/check_secret.py` | From the PC, for the switch-over (§11): PC vs AWS Day Sheets by F-label, who writes to the Sheets, Ready-to-Done times, and which secret the Web App accepts. |
 | `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters and the page's passphrase, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
+| `tools/check_lake_parity.py` | CI, in the runner image: the records a Run would stage for the data lake match the Synthetic Set's ground truth. |
 | `infra/`, `infra/bootstrap/` | Terraform: everything in AWS. `docs/AWS_SETUP.md` has the manual steps. |
 
 ---
@@ -432,12 +434,24 @@ plus `CALLS_LOG_RUNNER_FUNCTION` for the kill switch and the page's Owner tab. A
 `infra/` sets a name it doesn't read. It is also the only reader of the `/calls-log/` parameters (docs/AWS_SETUP.md
 §5).
 - **Once per container:** it reads the Web App URL and secret, the allowed name
-  prefixes, the upload passphrase and owner password hashes and the alert address. A parameter
-  still holding Terraform's placeholder `unset` counts as empty.
-- **At the start of every Run:** it reads the AWS Sync Switch
-  `/calls-log/sync_enabled`; only `true` turns it on.
-- **What it hands the core:** only the URL, the secret and the switch.
-- **Logs:** never the secret, the URL, names or the address.
+  prefixes, the upload passphrase and owner password hashes, the alert address
+  and the data lake's `person_salt`. A parameter still holding Terraform's
+  placeholder `unset` counts as empty.
+- **Once per Run:** it reads the AWS Sync Switch `/calls-log/sync_enabled`,
+  and, once the Run is Done, the data lake's switch `/calls-log/lake_enabled`.
+  Only `true` turns either on.
+- **What it hands the core:** only the URL, the secret and the sync switch.
+- **Logs:** never the secret, the URL, names, the address or the salt.
+
+**The data lake's records (ADR 9, `docs/aws/data-contract.md`).** While
+`/calls-log/lake_enabled` is `true`, a Done Run also writes the day's calls,
+sessions and upload to `staging/<Name> & <date>/<uploadId>.json` (kept 30
+days), for the publisher of the data lake's Phase 2. The envelope holds no
+name, phone number, OCR text or file name. A failure there is logged
+(`"lake": "failed"` on the Done line) and emailed, and the Run stays Done: the
+Day Sheet and the Sheet are never affected. It starts off; turning it on waits
+for the Owner's okay to keep work data. To see what a Run would stage, with no
+AWS: `python -m cloud.runner --local DIR --emit OUT`.
 
 **Speed.** `lang="japan"` makes PaddleOCR pick the heavy server models. With
 oneDNN disabled (mandatory on Windows), that meant ~60 s per screenshot and

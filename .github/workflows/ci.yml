@@ -111,6 +111,12 @@ jobs:
           "${run[@]}" python3 tools/check_runner_parity.py --dir /synth
           "${run[@]}" python3 -m cloud.runner --local "/synth/Nguyen Van A & 2026-06-01" | grep '^PARITY_RESULT '
 
+      - name: The data lake's records match the Synthetic Set's ground truth (ADR 9)
+        run: |
+          run=(docker run --rm --network none --read-only --tmpfs /tmp --cpus 2
+               --user 1000:1000 -v "$RUNNER_TEMP/synth:/synth:ro" "$IMAGE")
+          "${run[@]}" python3 tools/check_lake_parity.py --dir /synth
+
       - name: Record the image size and OS release
         run: |
           bytes=$(docker image inspect "$IMAGE" --format '{{.Size}}')

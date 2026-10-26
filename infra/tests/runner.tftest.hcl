@@ -96,8 +96,8 @@ run "function_roles_are_fenced" {
     condition = toset(flatten([
       for s in jsondecode(data.aws_iam_policy_document.runner.json).Statement : s.Resource
       if contains(flatten([s.Action]), "s3:PutObject")
-    ])) == toset(["arn:aws:s3:::calls-log-data-333596351215/work/*", "arn:aws:s3:::calls-log-data-333596351215/results/*"])
-    error_message = "The runner writes checkpoints and Day Sheets only, never uploads."
+    ])) == toset(["arn:aws:s3:::calls-log-data-333596351215/work/*", "arn:aws:s3:::calls-log-data-333596351215/results/*", "arn:aws:s3:::calls-log-data-333596351215/staging/*"])
+    error_message = "The runner writes checkpoints, Day Sheets and the data lake's staged records only, never uploads."
   }
 
   assert {

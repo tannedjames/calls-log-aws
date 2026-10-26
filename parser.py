@@ -44,6 +44,11 @@ class CallRecord:
     ocr_confidence: float = 0.0
     warnings: List[str] = field(default_factory=list)
     needs_review: bool = False
+    # Confidence of the OCR line each field was read from (the lowest, if it
+    # spans lines), or None when unknown. For the data lake only: to_dict()
+    # and every Excel or Sheets output leave them out.
+    start_conf: Optional[float] = None
+    duration_conf: Optional[float] = None
 
     def to_dict(self) -> dict:
         return {
@@ -267,9 +272,25 @@ def parse_duration(
     regenerating the pattern from the 24-hour value, which silently failed for
     zero-padded 12-hour times like "03:08 PM".
     """
+    value, warnings, _span = parse_duration_ex(text, start_time_str, start_span)
+    return value, warnings
+
+
+def parse_duration_ex(
+    text: str,
+    start_time_str: Optional[str],
+    start_span: Optional[Tuple[int, int]] = None,
+) -> Tuple[Optional[int], List[str], Optional[Tuple[int, int]]]:
+    """
+    parse_duration, plus where in `text` the duration was read: (begin, end),
+    or None. parse_row uses the span to give the duration the confidence of
+    the OCR line it came from. The legacy value-only path has no span.
+    """
     warnings: List[str] = []
 
     work = text
+    cut: Optional[Tuple[int, int]] = None   # text[begin:end] became work[begin] == " "
+    legacy = False
     if start_span is not None:
         begin, end = start_span
         # Also swallow a trailing AM/PM the time regex may not have captured.
@@ -277,7 +298,9 @@ def parse_duration(
         if tail:
             end += tail.end()
         work = work[:begin] + " " + work[end:]
+        cut = (begin, end)
     elif start_time_str:
+        legacy = True
         # Legacy path (kept for direct callers/tests that pass only the value).
         h, m = start_time_str.split(":")
         h12 = int(h) % 12 or 12
@@ -288,17 +311,27 @@ def parse_duration(
         ):
             work = re.sub(pattern, " ", work)
 
+    def span_of(m: "re.Match[str]") -> Optional[Tuple[int, int]]:
+        """The match's non-space characters, as offsets in `text`."""
+        if legacy:
+            return None
+        at = [i for i in range(m.start(), m.end()) if not work[i].isspace()]
+        if cut is not None:
+            shift = cut[1] - cut[0] - 1
+            at = [i if i < cut[0] else i + shift for i in at]
+        return (at[0], at[-1] + 1) if at else None
+
     # 1) Explicit "X min Y sec" form (highest confidence)
     m = RE_DUR_MIN_SEC.search(work)
     if m:
         mins = int(m.group("m"))
         secs = int(m.group("s")) if m.group("s") else 0
-        return mins * 60 + secs, warnings
+        return mins * 60 + secs, warnings, span_of(m)
 
     # 2) Seconds-only form
     m = RE_DUR_SEC_ONLY.search(work)
     if m:
-        return int(m.group("s")), warnings
+        return int(m.group("s")), warnings, span_of(m)
 
     # 3) Colon form: 00:01:25 always means H:M:S. 01:25 is ambiguous (m:s vs h:m).
     matches = list(RE_DUR_COLON.finditer(work))
@@ -307,19 +340,20 @@ def parse_duration(
         for hm in matches:
             if hm.group(3) is not None:
                 h, mi, s = int(hm.group(1)), int(hm.group(2)), int(hm.group(3))
-                return h * 3600 + mi * 60 + s, warnings
+                return h * 3600 + mi * 60 + s, warnings, span_of(hm)
         # Fall back to mm:ss (the documented common case)
         hm = matches[0]
         a, b = int(hm.group(1)), int(hm.group(2))
         # In call logs short durations dominate. Treat NN:NN as mm:ss but warn.
         warnings.append("duration_format_ambiguous_assumed_mm_ss")
-        return a * 60 + b, warnings
+        return a * 60 + b, warnings, span_of(hm)
 
     # 4) Explicit zero
-    if RE_ZERO_SEC.search(work):
-        return 0, warnings
+    m = RE_ZERO_SEC.search(work)
+    if m:
+        return 0, warnings, span_of(m)
 
-    return None, ["duration_not_found"]
+    return None, ["duration_not_found"], None
 
 
 # ---------------------------------------------------------------------------
@@ -467,8 +501,18 @@ def add_minutes(time_str: str, minutes: int) -> str:
 # Row-level entry point
 # ---------------------------------------------------------------------------
 
+def _field_conf(span: Optional[Tuple[int, int]],
+                line_spans: Optional[List[Tuple[int, int, float]]]) -> Optional[float]:
+    """The lowest confidence among the OCR lines a field's characters came from."""
+    if span is None or not line_spans:
+        return None
+    confs = [conf for begin, end, conf in line_spans if begin < span[1] and span[0] < end]
+    return min(confs) if confs else None
+
+
 def parse_row(source_file: str, raw_text: str, ocr_confidence: float,
-              y_frac: Optional[float] = None) -> CallRecord:
+              y_frac: Optional[float] = None,
+              line_spans: Optional[List[Tuple[int, int, float]]] = None) -> CallRecord:
     """
     Parse one OCR row into a CallRecord.
 
@@ -478,6 +522,10 @@ def parse_row(source_file: str, raw_text: str, ocr_confidence: float,
     very top of the screen it is the status-bar clock. Without this, "8:32"
     from the status bar would become an 08:32 call whenever OCR failed to
     group it with the carrier name. Pass None when position is unknown.
+
+    `line_spans` is ocr.row_line_spans(row): where each OCR line sits in
+    `raw_text`, with its confidence. With it, the record gets start_conf and
+    duration_conf; nothing else changes.
     """
     rec = CallRecord(
         source_file=source_file,
@@ -504,10 +552,12 @@ def parse_row(source_file: str, raw_text: str, ocr_confidence: float,
     start, w1, start_span = parse_start_time_ex(raw_text)
     rec.start_time = start
     rec.warnings.extend(w1)
+    rec.start_conf = _field_conf(start_span, line_spans)
 
-    raw_secs, w2 = parse_duration(raw_text, start, start_span)
+    raw_secs, w2, duration_span = parse_duration_ex(raw_text, start, start_span)
     rec.raw_duration_seconds = raw_secs
     rec.warnings.extend(w2)
+    rec.duration_conf = _field_conf(duration_span, line_spans)
 
     direction, status, w3 = detect_direction_and_status(raw_text, raw_secs)
     rec.direction = direction

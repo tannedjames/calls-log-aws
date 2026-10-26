@@ -6,10 +6,11 @@ on, syncs it.
     handler(event, context)    Lambda, one SQS message per Folder
     python -m cloud.runner --upload-id ID --person-day "<Name> & <yyyy-mm-dd>"
                                ECS or a shell: the same Run, same code
-    python -m cloud.runner --local DIR [--ignore NAME ...] [--out DIR]
+    python -m cloud.runner --local DIR [--ignore NAME ...] [--out DIR] [--emit DIR]
                                no AWS: a local folder through the same
                                extraction; prints PARITY_RESULT like
-                               tools/parity_check.py expects
+                               tools/parity_check.py expects; --emit also
+                               writes the records a Run would stage
 
 A Run, in main.py's order (AD-7):
   1. begin_run: take the Person-Day's lease, then count the attempt; at the
@@ -19,6 +20,9 @@ A Run, in main.py's order (AD-7):
   4. write_sessions -> results/<Person-Day>.xlsx, a new version;
   5. sync_day (unchanged, 3 tries) if the AWS Sync Switch is on;
   6. Done. Any exception leaves the Folder Failed and the message returns.
+  7. If the data lake's switch is on, the day's records go to
+     staging/<Person-Day>/<uploadId>.json (ADR 9, cloud/lake.py). Best
+     effort: the Run is already Done, so a failure is logged and emailed.
 One JSON log line per transition. Never OCR text, image content or secrets.
 
 A "resync" message (Story 3.8, FR-13) re-sends the stored Day Sheet of one
@@ -33,11 +37,13 @@ import runtime_env  # noqa: F401  -- first: sets OpenMP variables before numpy/c
 import argparse
 import json
 import logging
+import os
 import shutil
 import sys
+import tempfile
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -48,7 +54,7 @@ from parser import CallRecord
 from session_builder import build_sessions, dedupe
 from sheets_sync import sync_day
 
-from cloud import naming, settings as settings_mod
+from cloud import lake, naming, settings as settings_mod
 from cloud.status import MAX_RUNS, Busy, FolderStatus, Status, Superseded, TransitionRefused
 from cloud.storage import IMAGE_SUFFIXES, S3Storage, pc_order
 
@@ -58,6 +64,7 @@ TEMPLATE = Path(__file__).resolve().parent.parent / "sprs.xlsx"
 WORKDIR = Path("/tmp/calls-log")
 RESYNC_TRIES = 3   # deliveries of one resync message before it is dropped with an email
 _ERROR_LIMIT = 500
+_RECORD_FIELDS = frozenset(f.name for f in fields(CallRecord))
 
 
 class RunFailed(Exception):
@@ -103,7 +110,8 @@ def extract(files: List[Path], checkpoints: Checkpoints = None) -> Tuple[List[Ca
     for path in files:
         saved = checkpoints[0](path.name) if checkpoints else None
         if saved is not None:
-            records.extend(CallRecord(**r) for r in saved)
+            # Fields a later version added are dropped, so an older image still reads them.
+            records.extend(CallRecord(**{k: v for k, v in r.items() if k in _RECORD_FIELDS}) for r in saved)
             continue
         got, _meta, stats = pipeline.extract_calls([path])
         totals["ocr_failures"] += stats["ocr_failures"]
@@ -114,9 +122,16 @@ def extract(files: List[Path], checkpoints: Checkpoints = None) -> Tuple[List[Ca
     return records, totals
 
 
-def sessions_from(records: List[CallRecord]):
+def calls_and_sessions(records: List[CallRecord]):
+    """(the deduped records, the sessions, build_sessions' stats)."""
     kept, _dups = dedupe(records)
-    return build_sessions(kept)
+    sessions, stats = build_sessions(kept)
+    return kept, sessions, stats
+
+
+def sessions_from(records: List[CallRecord]):
+    _kept, sessions, stats = calls_and_sessions(records)
+    return sessions, stats
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +184,7 @@ def run_folder(upload_id: str, person_day: str, *, status: FolderStatus, storage
         checkpoints = (lambda n: storage.get_checkpoint(upload_id, n),
                        lambda n, recs: storage.put_checkpoint(upload_id, n, recs))
         records, ocr = extract(files, checkpoints)
-        sessions, _stats = sessions_from(records)
+        kept, sessions, _stats = calls_and_sessions(records)
         if not sessions:
             raise RuntimeError(
                 f"no sessions extracted from {len(files)} image(s) "
@@ -182,9 +197,12 @@ def run_folder(upload_id: str, person_day: str, *, status: FolderStatus, storage
         settings_mod.configure_core(settings, sync_on=sync_on)
         if sync_on:
             sync_day(day.name, day.date, sessions)
-        status.finish(day.key, upload_id)
+        done = status.finish(day.key, upload_id)
+        lake_state, lake_error = _emit(day, upload_id, started=item, done=done, names=names, records=kept,
+                                       sessions=sessions, xlsx=xlsx, storage=storage, settings=settings,
+                                       ssm=ssm, sns=sns)
         _event(**ids, status="Done", attempt=attempt, durationMs=elapsed(), images=images,
-               sessions=len(sessions), synced=sync_on)
+               sessions=len(sessions), synced=sync_on, lake=lake_state, lakeError=lake_error)
         return Outcome("Done", images=images, sessions=len(sessions))
     except Exception as e:
         error = _short(e, (settings.sync_secret, settings.webapp_url))
@@ -211,6 +229,61 @@ def _alert_parked(sns: Any, settings: settings_mod.Settings, day: naming.PersonD
         Message=(f"The Folder {day.key} (upload {upload_id}) failed {MAX_RUNS} Runs and is Parked: "
                  f"it won't run again until it is re-queued.\n\nLast error: {last_error or 'unknown'}\n\n"
                  "Fix the cause, then re-queue it (docs/TECHNICAL.md, Runbook)."))
+
+
+# ---------------------------------------------------------------------------
+# The data lake's hand-over (ADR 9, Data System Plan Phase 1).
+# ---------------------------------------------------------------------------
+
+def _day_sheet(xlsx: Path) -> Dict[str, int]:
+    """Sessions and B2 total of the written Day Sheet, read back the way the PC reads one."""
+    from resync_output import read_sessions
+
+    return lake.day_sheet([(s.start_time, s.end_time) for s in read_sessions(xlsx)])
+
+
+def _emit(day: naming.PersonDay, upload_id: str, *, started: Dict[str, Any], done: Dict[str, Any],
+          names: List[str], records: List[CallRecord], sessions: list, xlsx: Path, storage: S3Storage,
+          settings: settings_mod.Settings, ssm: Any, sns: Any) -> Tuple[str, Optional[str]]:
+    """
+    The day's records to staging/ when the lake's switch is on: ("off" | "staged"
+    | "failed", error). Never raises: the Run is already Done, so a failure is
+    logged and emailed, and the Day Sheet and the Sheet are unaffected.
+    """
+    try:
+        if not settings_mod.lake_enabled(ssm):
+            return "off", None
+        memory = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+        upload = {"image_count": len(names), "attempts": started.get("attempts"),
+                  "ready_at": started.get("readyAt"), "started_at": started.get("lastRunAt"),
+                  "finished_at": done.get("updatedAt"), "status": done.get("status"),
+                  "runner_memory_mb": int(memory) if memory else None}
+        storage.put_staging(day, upload_id, lake.payload(
+            day, upload_id, image_names=names, records=records, sessions=sessions, sheet=_day_sheet(xlsx),
+            upload=upload, salt=settings.person_salt, prefixes=settings.name_prefixes,
+            staged_at=lake.utc_now()))
+        return "staged", None
+    except Exception as e:
+        error = _short(e, (settings.sync_secret, settings.webapp_url, settings.person_salt))
+        _alert_lake(sns, settings, day, upload_id, error)
+        return "failed", error
+
+
+def _alert_lake(sns: Any, settings: settings_mod.Settings, day: naming.PersonDay,
+                upload_id: str, error: str) -> None:
+    try:
+        if not (sns and settings.alerts_topic_arn):
+            log.error("records of %s not staged for the data lake, and no alert topic is configured", upload_id)
+            return
+        sns.publish(
+            TopicArn=settings.alerts_topic_arn,
+            Subject="calls-log: a day's records missed the data lake",
+            Message=(f"The Run of {day.key} (upload {upload_id}) is Done, but its records weren't staged "
+                     f"for the data lake.\n\nError: {error}\n\nThe Day Sheet and the Google Sheet are "
+                     "not affected. Fix the cause; a Re-run of the upload stages the day again "
+                     "(docs/aws/data-contract.md)."))
+    except Exception as e:   # the alert is best effort too
+        log.error("could not send the data lake alert: %s", type(e).__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -328,18 +401,47 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 # Command line.
 # ---------------------------------------------------------------------------
 
-def run_local(folder: Path, ignore: List[str], out: Optional[Path]) -> Dict[str, Any]:
-    """A local folder through the same extraction and session rules; nothing synced or stored."""
+def run_local(folder: Path, ignore: List[str], out: Optional[Path],
+              emit: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    A local folder through the same extraction and session rules; nothing
+    synced or stored. With emit, also writes <emit>/<folder>.json: what a Run
+    would stage for the data lake, keyed with lake.LOCAL_SALT.
+    """
     names = pc_order([p.name for p in folder.iterdir()
                       if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES and p.name not in set(ignore)])
     files = [folder / n for n in names]
     records, _ocr = extract(files)
-    sessions, stats = sessions_from(records)
+    kept, sessions, stats = calls_and_sessions(records)
     if out and sessions:
         out.mkdir(parents=True, exist_ok=True)
         write_sessions(TEMPLATE, out / f"{folder.name}.xlsx", sessions)
+    if emit:
+        emit.mkdir(parents=True, exist_ok=True)
+        staged = local_payload(folder.name, names, kept, sessions)
+        (emit / f"{folder.name}.json").write_text(
+            json.dumps(staged, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return {"images": len(files), "records": len(records), "countable": stats["countable_calls"],
             "sessions": [[s.start_time, s.end_time] for s in sessions]}
+
+
+def local_payload(folder_name: str, names: List[str], records: List[CallRecord],
+                  sessions: list) -> Dict[str, Any]:
+    """The envelope a Run of this folder would stage, as a fresh upload, with no AWS."""
+    day = naming.parse(folder_name)
+    if day is None:
+        raise ValueError("the folder name is not '<Name> & <yyyy-mm-dd>'")
+    with tempfile.TemporaryDirectory() as tmp:
+        sheet = lake.day_sheet([])
+        if sessions:
+            xlsx = Path(tmp) / "day-sheet.xlsx"
+            write_sessions(TEMPLATE, xlsx, sessions)
+            sheet = _day_sheet(xlsx)
+    now = lake.utc_now()
+    upload = {"image_count": len(names), "attempts": 1, "ready_at": now, "started_at": now,
+              "finished_at": now, "status": "Done", "runner_memory_mb": None}
+    return lake.payload(day, naming.new_upload_id(), image_names=names, records=records, sessions=sessions,
+                        sheet=sheet, upload=upload, salt=lake.LOCAL_SALT, staged_at=now)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -349,11 +451,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--local", type=Path, help="a local folder: no AWS, prints PARITY_RESULT")
     ap.add_argument("--ignore", action="append", default=[], help="with --local: a file to skip")
     ap.add_argument("--out", type=Path, help="with --local: also write the Day Sheet here")
+    ap.add_argument("--emit", type=Path, help="with --local: also write the data lake records here")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     if args.local:
-        print("PARITY_RESULT " + json.dumps(run_local(args.local, args.ignore, args.out)))
+        print("PARITY_RESULT " + json.dumps(run_local(args.local, args.ignore, args.out, args.emit)))
         return 0
     if not (args.upload_id and args.person_day):
         ap.error("give --upload-id and --person-day, or --local")

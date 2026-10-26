@@ -189,7 +189,7 @@ A higher limit costs nothing; Lambda bills per use.
 - **Forks.** The repo setting "Run workflows from fork pull requests" stays
   off. A fork's own runs carry the fork's IDs in their subject, so STS refuses
   them too.
-- **Parameter values** (Story 2.4): Terraform creates the seven `/calls-log/`
+- **Parameter values** (Story 2.4): Terraform creates the nine `/calls-log/`
   parameters with placeholders only (`infra/parameters.tf`). Set the real
   values from this PC, where the private files are. The tool reads them
   itself and prints only parameter names, so no value lands in the shell
@@ -258,3 +258,15 @@ A higher limit costs nothing; Lambda bills per use.
 - **AWS Sync Switch** (AD-10): off until the Owner turns it on.
   `tools\put_parameters.py --sync-enabled true` (or `false`). The PC's own
   switch stays in `config.py`.
+- **The data lake's records** (ADR 9, Phase 3 of `docs/aws/data-lake-plan.md`):
+  `/calls-log/lake_enabled` starts `false`, so a Run stages nothing. Turn it on
+  only after the Owner agrees to keep work data, and set the salt first: it is
+  set once and never shown, and the tool refuses to replace it, because a new
+  salt would split every employee's history in the lake:
+  ```powershell
+  .\.venv\Scripts\python.exe tools\put_parameters.py --new-person-salt
+  .\.venv\Scripts\python.exe tools\put_parameters.py --lake-enabled true      # or false to stop
+  ```
+  A warm runner picks up a new salt within 15 minutes, so wait that long after
+  setting it before turning the switch on. Until the publisher exists
+  (Phase 2), staged envelopes only wait in `staging/` and expire after 30 days.

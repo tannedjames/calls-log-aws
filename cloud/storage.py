@@ -1,8 +1,9 @@
 """
 The data bucket (AD-8): uploaded screenshots in inbox/<uploadId>/, per-image
-checkpoints in work/<uploadId>/ and Day Sheets in results/<Person-Day>.xlsx.
+checkpoints in work/<uploadId>/, Day Sheets in results/<Person-Day>.xlsx and
+the data lake's hand-over in staging/<Person-Day>/<uploadId>.json (ADR 9).
 Objects are never moved or deleted to signal state (AD-4); lifecycle rules
-expire inbox/ and work/ (infra/data.tf).
+expire inbox/, work/ and staging/ (infra/data.tf).
 
 Uses the S3 client passed in (boto3.client("s3")), so this module imports no
 AWS library and tests can fake the bucket.
@@ -75,6 +76,12 @@ class S3Storage:
             raise
         target.write_bytes(out["Body"].read())
         return True
+
+    def put_staging(self, day: naming.PersonDay, upload_id: str, payload: Dict[str, Any]) -> None:
+        """One Done upload's records for the data lake (cloud/lake.py)."""
+        self.client.put_object(Bucket=self.bucket, Key=naming.staging_key(day, upload_id),
+                               Body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                               ContentType="application/json")
 
     # ----- per-image checkpoints (AD-16) -------------------------------------
 

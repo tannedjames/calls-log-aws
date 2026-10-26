@@ -25,6 +25,8 @@ locals {
     intake_passphrase_hash = "unset" # the upload page's passphrase hash (Story 4.1)
     owner_passphrase_hash  = "unset" # the page's owner password hash: its Owner tab
     alert_email            = "unset" # where alerts go; also subscribed to calls-log-alerts
+    lake_enabled           = "false" # the data lake's switch (ADR 9): off until the Owner turns it on
+    person_salt            = "unset" # the lake's person_key salt; set once, never rotated
   }
 }
 

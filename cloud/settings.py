@@ -8,15 +8,16 @@ switches set out of band, infra/parameters.tf):
 * load() reads both once per container and caches them for 15 minutes, so a
   rotated Web App secret or a new employee list reaches warm containers
   without a deploy (Story 5.4);
-* sync_enabled() reads the AWS Sync Switch fresh, once per Run, so the Owner
-  can turn it on or off between Runs;
+* sync_enabled() and lake_enabled() read the AWS Sync Switch and the data
+  lake's switch fresh, once per Run, so the Owner can turn them on or off
+  between Runs;
 * configure_core() hands the pipeline core exactly three values: the Web App
   URL, the secret and the switch. Nothing else in config.py can be changed
   from here, so ocr_strict_engine, paddle_enable_mkldnn and
   post_9am_exception_limit stay as the PC has them.
 
-Secrets, the Web App URL, employee names and the alert address never appear in
-a repr or a log line. A parameter still holding Terraform's placeholder
+Secrets, the Web App URL, employee names, the alert address and the lake's
+person salt never appear in a repr or a log line. A parameter still holding Terraform's placeholder
 ("unset") counts as empty.
 """
 
@@ -35,8 +36,9 @@ log = logging.getLogger("calls-log.settings")
 PARAMETER_PREFIX = "/calls-log/"
 PLACEHOLDER = "unset"
 SYNC_SWITCH = PARAMETER_PREFIX + "sync_enabled"
+LAKE_SWITCH = PARAMETER_PREFIX + "lake_enabled"
 _CACHED_PARAMETERS = ("webapp_url", "sync_secret", "name_prefixes", "intake_passphrase_hash",
-                      "owner_passphrase_hash", "alert_email")
+                      "owner_passphrase_hash", "alert_email", "person_salt")
 # Settings field -> environment variable (Terraform builds the function
 # environment from one locals map with these names).
 ENVIRONMENT = {
@@ -64,6 +66,7 @@ class Settings:
     intake_passphrase_hash: str = field(default="", repr=False)
     owner_passphrase_hash: str = field(default="", repr=False)   # the page's Owner tab
     alert_email: str = field(default="", repr=False)
+    person_salt: str = field(default="", repr=False)   # the data lake's person_key (cloud/lake.py)
 
 
 CACHE_SECONDS = 900
@@ -98,6 +101,7 @@ def read(ssm: Any, environ: Mapping[str, str] = os.environ) -> Settings:
         intake_passphrase_hash=_value(values.get("intake_passphrase_hash")),
         owner_passphrase_hash=_value(values.get("owner_passphrase_hash")),
         alert_email=_value(values.get("alert_email")),
+        person_salt=_value(values.get("person_salt")),
     )
 
 
@@ -121,10 +125,19 @@ def reset_cache() -> None:
     _cache = None
 
 
+def _switch(name: str, ssm: Any = None) -> bool:
+    response = (ssm or _ssm_client()).get_parameter(Name=name, WithDecryption=True)
+    return response["Parameter"]["Value"].strip().lower() == "true"
+
+
 def sync_enabled(ssm: Any = None) -> bool:
     """The AWS Sync Switch, read now. Only "true" turns it on; an error raises."""
-    response = (ssm or _ssm_client()).get_parameter(Name=SYNC_SWITCH, WithDecryption=True)
-    return response["Parameter"]["Value"].strip().lower() == "true"
+    return _switch(SYNC_SWITCH, ssm)
+
+
+def lake_enabled(ssm: Any = None) -> bool:
+    """The data lake's switch (ADR 9), read now. Only "true" turns it on; an error raises."""
+    return _switch(LAKE_SWITCH, ssm)
 
 
 def configure_core(settings: Settings, *, sync_on: bool, config: Any = None) -> None:
