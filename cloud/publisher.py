@@ -52,7 +52,8 @@ class Outcome:
 
 
 def lake_key(table: str, envelope: Dict[str, Any]) -> str:
-    """The one key a person's day has in a table: a Re-run overwrites it."""
+    """The one key a person's day has in a table: a Re-run overwrites it (and tools/backfill_lake.py
+    writes there only when it is empty)."""
     date = envelope["work_date"]
     return f"lake/{table}/work_month={date[:7]}/{envelope['person_key']}_{date}.parquet"
 
@@ -84,13 +85,16 @@ def _value(kind: str, value: Any) -> Any:
     return str(value)
 
 
+def typed_rows(table: str, rows: List[Dict[str, Any]], ingested_at: _dt.datetime) -> List[Dict[str, Any]]:
+    """One table's rows, typed, with exactly lake.COLUMN_TYPES' columns (ingested_at added)."""
+    types = lake.COLUMN_TYPES[table]
+    return [{column: ingested_at if column == "ingested_at" else _value(kind, row[column])
+             for column, kind in types.items()} for row in rows]
+
+
 def tables(envelope: Dict[str, Any], ingested_at: _dt.datetime) -> Dict[str, List[Dict[str, Any]]]:
     """The envelope's rows per table, typed, with exactly lake.COLUMN_TYPES' columns."""
-    out = {}
-    for table, types in lake.COLUMN_TYPES.items():
-        out[table] = [{column: ingested_at if column == "ingested_at" else _value(kind, row[column])
-                       for column, kind in types.items()} for row in envelope[table]]
-    return out
+    return {table: typed_rows(table, envelope[table], ingested_at) for table in lake.COLUMN_TYPES}
 
 
 def parquet_bytes(table: str, rows: List[Dict[str, Any]]) -> bytes:

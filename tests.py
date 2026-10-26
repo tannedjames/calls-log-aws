@@ -4581,3 +4581,209 @@ def test_glue_tables_in_infra_match_the_lake_columns():
               for t, body in _re.findall(r"(\w+) = \[(.*?)\n    \]", block, _re.S)}
     assert tables == {t: list(c.items()) for t, c in lake.COLUMN_TYPES.items()}, tables
 
+
+
+# ---------------------------------------------------------------------------
+# The data lake's history and views (ADR 9 Phases 4 and 5): the backfill
+# from stored Day Sheets, the Athena views tool and the SQL files. AWS is a
+# fake CLI; Parquet is a JSON stand-in (tools/check_lake_views.py runs the
+# real SQL on DuckDB in CI). All values are fictional.
+# ---------------------------------------------------------------------------
+
+from tools import backfill_lake, lake_views
+
+_BF_SALT = "fictional-backfill-salt"
+_BF_TEMPLATE = Path(__file__).resolve().parent / "sprs.xlsx"
+
+
+def _day_sheet_bytes(pairs):
+    sessions = [Session(i, a, b, (int(b[:2]) * 60 + int(b[3:])) - (int(a[:2]) * 60 + int(a[3:])), 1)
+                for i, (a, b) in enumerate(pairs, 1)]
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(excel_writer, "log"):
+        path = Path(d) / "day.xlsx"
+        excel_writer.write_sessions(_BF_TEMPLATE, path, sessions)
+        return path.read_bytes()
+
+
+class _FakeBackfillCli:
+    """subprocess.run under the AWS CLI: SSM, S3 objects and Folder Status in memory."""
+
+    def __init__(self, status_dynamo, objects, salt=_BF_SALT):
+        self.dynamo, self.objects, self.salt = status_dynamo, dict(objects), salt
+        self.puts, self.log = {}, []
+
+    def __call__(self, cmd, capture_output, text, encoding, errors):
+        payload = None
+        if "--cli-input-json" in cmd:
+            payload = json.loads(Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://")).read_bytes())
+        op = f"{cmd[1]} {cmd[2]}"
+        self.log.append(op)
+        if op == "sts get-caller-identity":
+            return _ok('{"Account": "123456789012"}')
+        if op == "ssm get-parameters":
+            return _ok(json.dumps({"Parameters": [
+                {"Name": "/calls-log/person_salt", "Value": self.salt},
+                {"Name": "/calls-log/name_prefixes", "Value": json.dumps(list(_LAKE_PREFIXES))}]}))
+        if cmd[1] == "dynamodb":
+            return _ok(json.dumps(getattr(self.dynamo, cmd[2].replace("-", "_"))(**payload), ensure_ascii=False))
+        assert payload is None or payload.get("Bucket") == "calls-log-data-123456789012", payload
+        if op == "s3api list-objects-v2":
+            return _ok(json.dumps({"Contents": [{"Key": k} for k in sorted(self.objects)
+                                                if k.startswith(payload["Prefix"])]}, ensure_ascii=False))
+        if op == "s3api get-object":
+            Path(cmd[5]).write_bytes(self.objects[payload["Key"]])
+            return _ok("{}")
+        if op == "s3api head-object":
+            if payload["Key"] in self.objects or payload["Key"] in self.puts:
+                return _ok("{}")
+            return SimpleNamespace(returncode=254, stdout="", stderr=(
+                "An error occurred (404) when calling the HeadObject operation: Not Found"))
+        if op == "s3api put-object":
+            self.puts[payload["Key"]] = json.loads(Path(cmd[cmd.index("--body") + 1]).read_bytes())
+            return _ok("{}")
+        raise AssertionError(f"unexpected AWS call {cmd}")
+
+
+def _bf_world():
+    dyn = _FakeDynamo()
+    store = FolderStatus(dyn, "calls-log-folders", lambda: 1_780_000_000.0)
+    a, b, c, d = ("Nguyen Van A & 2026-06-01", "Tran Thi B & 2026-06-02",
+                  "Nguyen Van A & 2026-06-03", "Tran Thi B & 2026-06-04")
+    store.record_import(a, "20260520T000000Z-00000001")          # the PC's copy, older
+    store.create(a, _RUN_UP, 3)                                  # then an upload: Held, the day has one
+    store.mark_ready(a, _RUN_UP)
+    store.requeue(a, _RUN_UP)                                    # its Re-run makes it the day's choice
+    store.begin_run(a, _RUN_UP, "h")
+    store.finish(a, _RUN_UP)
+    store.release_lease(a, "h")
+    store.record_import(b, "20260520T000000Z-00000002")          # a PC day only
+    store.create(c, "20260603T080000Z-0c0c0c0c", 2)              # never Done
+    store.mark_ready(c, "20260603T080000Z-0c0c0c0c")
+    store.record_import(d, "20260520T000000Z-00000004")          # already in the lake
+    key_d = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
+    objects = {f"results/{a}.xlsx": _day_sheet_bytes([("08:00", "09:00"), ("10:00", "11:30")]),
+               f"results/{b}.xlsx": _day_sheet_bytes([("09:00", "12:00")]),
+               f"results/{c}.xlsx": _day_sheet_bytes([("08:00", "08:30")]),
+               f"results/{d}.xlsx": _day_sheet_bytes([("08:00", "08:30")]),
+               "results/notes.txt": b"not a Day Sheet",
+               f"lake/sessions/work_month=2026-06/{key_d}_2026-06-04.parquet": b"published"}
+    return dyn, objects
+
+
+def _bf_run(argv, cli):
+    write = lambda table, rows: json.dumps(rows, default=str).encode("utf-8")
+    with redirect_stdout(io.StringIO()) as out:
+        code = backfill_lake.main(argv, run=cli, write=write)
+    return code, out.getvalue()
+
+
+def test_lake_check_sessions_allows_backfill_rows_and_catches_faults():
+    rows = lake.backfill_rows(naming.PersonDay("Nguyen Van A", "2026-06-01"), {"uploadId": _RUN_UP, "imported": "true"},
+                              [("08:00", "09:00"), ("10:00", "11:30")], salt=_BF_SALT)
+    assert rows["uploads"] == [] and lake.check_sessions(rows["sessions"]) == []
+    assert {(s["source"], s["call_count"]) for s in rows["sessions"]} == {("xlsx_backfill", None)}
+    assert [s["span_min"] for s in rows["sessions"]] == [60, 90]
+    overlap = copy.deepcopy(rows["sessions"])
+    overlap[1]["start_ts"] = "2026-06-01T08:30:00"
+    assert any("overlaps" in p for p in lake.check_sessions(overlap))
+    assert any("span_min" in p for p in lake.check_sessions([{**rows["sessions"][0], "span_min": 59}]))
+    p = _lake_payload()
+    p["sessions"][0]["call_count"] = None   # a runner envelope must still count its calls
+    assert any("no calls" in x for x in lake.check(p))
+
+
+def test_backfill_writes_history_once_without_overwriting_or_naming_anyone():
+    dyn, objects = _bf_world()
+    cli = _FakeBackfillCli(dyn, objects)
+    code, said = _bf_run([], cli)
+    key_a = lake.person_key("Nguyen Van A", _BF_SALT, _LAKE_PREFIXES)
+    key_b = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
+    assert code == 0, said
+    assert sorted(cli.puts) == sorted([
+        f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet",
+        f"lake/uploads/work_month=2026-06/{key_a}_2026-06-01.parquet",   # a Run: its upload row too
+        f"lake/sessions/work_month=2026-06/{key_b}_2026-06-02.parquet"])  # a PC import: sessions only
+    a_sessions = cli.puts[f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet"]
+    assert [(s["upload_id"], s["source"], s["call_count"], s["span_min"]) for s in a_sessions] == [
+        (_RUN_UP, "xlsx_backfill", None, 60), (_RUN_UP, "xlsx_backfill", None, 90)]   # the Run, not the import
+    assert list(a_sessions[0]) == list(lake.COLUMN_TYPES["sessions"])
+    assert json.loads(said.strip().splitlines()[-1]) == {
+        "written": 2, "in_lake": 1, "no_upload": 1, "failed_check": 0, "not_a_day_sheet": 1}
+    for private in ("Nguyen", "Tran", _BF_SALT):
+        assert private not in said and not any(private in k for k in cli.puts), private
+    assert not any(k.startswith("results/") for k in cli.puts)   # the Day Sheets are only read
+    again = _FakeBackfillCli(dyn, {**objects, **{k: b"x" for k in cli.puts}})
+    assert _bf_run([], again)[0] == 0 and again.puts == {}       # a second run writes nothing
+    dry = _FakeBackfillCli(dyn, objects)
+    code, said = _bf_run(["--dry-run"], dry)
+    assert code == 0 and dry.puts == {} and "would write" in said
+
+
+def test_backfill_needs_the_salt_and_reports_aws_failures():
+    dyn, objects = _bf_world()
+    try:
+        _bf_run([], _FakeBackfillCli(dyn, objects, salt="unset"))
+    except SystemExit as e:
+        assert "person_salt is unset" in str(e)
+    else:
+        raise AssertionError("no salt must stop the backfill")
+    broken = _FakeBackfillCli(dyn, objects)
+    real = broken.__call__
+
+    def refuse_lists(cmd, **kw):
+        if cmd[1:3] == ["s3api", "list-objects-v2"]:
+            return SimpleNamespace(returncode=254, stdout="", stderr="An error occurred (AccessDenied) when calling")
+        return real(cmd, **kw)
+
+    with redirect_stderr(io.StringIO()):
+        assert backfill_lake.main([], run=refuse_lists, write=lambda t, r: b"") == 1
+
+
+def test_lake_views_creates_each_view_in_order_and_reads_it():
+    if not lake_views.VIEWS_DIR.is_dir():   # sql/ isn't in the runner image
+        return
+    sent, states = [], {}
+
+    def run(cmd, capture_output, text, encoding, errors):
+        payload = json.loads(Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://")).read_bytes())
+        if cmd[1:3] == ["athena", "start-query-execution"]:
+            assert (payload["WorkGroup"], payload["QueryExecutionContext"]["Database"]) == ("calls-log", "calls_log")
+            sent.append(payload["QueryString"])
+            qid = f"q{len(sent)}"
+            states[qid] = ("FAILED", "line 1: Column 'x' cannot be resolved") if "ocr_quality LIMIT" in sent[-1] \
+                else ("SUCCEEDED", "")
+            return _ok(json.dumps({"QueryExecutionId": qid}))
+        if cmd[1:3] == ["athena", "get-query-execution"]:
+            state, why = states[payload["QueryExecutionId"]]
+            return _ok(json.dumps({"QueryExecution": {"Status": {"State": state, "StateChangeReason": why}}}))
+        raise AssertionError(cmd)
+
+    with redirect_stdout(io.StringIO()) as out:
+        code = lake_views.main([], run=run, sleep=lambda s: None)
+    creates = [q for q in sent if q.startswith("CREATE")]
+    assert [q.split()[4] for q in creates] == [f"calls_log.{v}" for v in lake_views.VIEWS]
+    assert all(not q.lstrip().startswith("--") and not q.endswith(";") for q in sent)
+    assert code == 1 and "calls_log.ocr_quality: FAILED: line 1" in out.getvalue()
+    assert "calls_log.day_summary: created, reads OK" in out.getvalue()
+    with redirect_stdout(io.StringIO()) as listed:
+        assert lake_views.main(["--list"], run=lambda *a, **k: (_ for _ in ()).throw(AssertionError())) == 0
+    assert "calls_log.weekly_attendance" in listed.getvalue()
+
+
+def test_lake_sql_creates_only_views_and_reads_only_the_lake():
+    root = Path(__file__).resolve().parent / "sql"
+    if not root.is_dir():   # sql/ isn't in the runner image
+        return
+    views = sorted(p.stem for p in (root / "views").glob("*.sql"))
+    assert views == sorted(lake_views.VIEWS)
+    known = set(lake.COLUMN_TYPES) | set(lake_views.VIEWS)
+    forbidden = _re.compile(r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|MERGE|MSCK|UNLOAD|GRANT)\b", _re.I)
+    for path in sorted(root.glob("*/*.sql")):
+        sql = lake_views.statement(path)
+        assert not forbidden.search(sql), path
+        assert set(_re.findall(r"calls_log\.(\w+)", sql)) <= known, path
+        if path.parent.name == "views":
+            assert sql.startswith(f"CREATE OR REPLACE VIEW calls_log.{path.stem} AS\n"), path
+            assert sql.count("CREATE") == 1, path
+        else:
+            assert sql.upper().startswith("SELECT"), path
