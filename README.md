@@ -255,6 +255,31 @@ internet. After that it works offline, apart from the Google Sheets step.
 
 ---
 
+## The cloud version and its data lake
+
+The same reader also runs in AWS: folders go in through an upload page instead
+of `input_images`, and the results reach the same Excel files and Google
+Sheets ([how it is built](docs/aws/architecture.md)).
+
+Each finished day is also kept in a small **data lake**, for reports across
+days: calls, working sessions and how long each upload took, with every person
+replaced by a code (no names, no phone numbers). It is queried with Athena in
+the AWS console (workgroup `calls-log`, database `calls_log`), for example:
+
+```sql
+SELECT person_key, week_start, days_worked, hours
+FROM calls_log.weekly_attendance
+ORDER BY week_start DESC, person_key;
+```
+
+Why a lake of Parquet files and not a database server: it costs nothing while
+idle, needs no network setup, and still answers in SQL
+([ADR 9](docs/aws/adr/0009-call-rows-in-an-s3-data-lake.md)). What it holds,
+column by column: [the data contract](docs/aws/data-contract.md). More queries:
+[`sql/examples/`](sql/examples/).
+
+---
+
 ## Glossary
 
 | Word | Meaning |

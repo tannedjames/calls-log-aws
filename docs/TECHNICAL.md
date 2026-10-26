@@ -53,6 +53,8 @@ above never import it.
 | `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters and the page's passphrase, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
 | `tools/check_lake_parity.py` | CI, in the runner image: the records a Run would stage for the data lake match the Synthetic Set's ground truth. |
 | `tools/check_lake_parquet.py` | CI, with pyarrow only: the publisher's Parquet reads back with exactly the Glue tables' columns and types. |
+| `tools/backfill_lake.py`, `tools/lake_views.py` | From CloudShell: the stored Day Sheets' history into the data lake (once), and the lake's Athena views from `sql/views/` (§11). |
+| `tools/check_lake_views.py` | CI, with pyarrow and DuckDB: every `sql/` view and example runs, and the views compute what they should. |
 | `infra/`, `infra/bootstrap/` | Terraform: everything in AWS. `docs/AWS_SETUP.md` has the manual steps. |
 
 ---
@@ -1040,6 +1042,27 @@ the Day Sheet or the Sheet, so nothing here is urgent for the Operator.
   the Day Sheets (Phase 4's backfill).
 - **Stopping it.** `put_parameters.py --lake-enabled false`: Runs stop staging.
   What is already in `lake/` stays.
+- **Backfilling history (once).** Days that finished before the lake was on
+  exist only as Day Sheets in `results/`. This reads each one and writes its
+  sessions (and its upload's times, for days AWS ran) to the lake, where no
+  file exists yet. It never changes a Day Sheet, a Sheet or Folder Status, and
+  prints person keys, never names. In CloudShell, from the unzipped `main`:
+  ```bash
+  pip3 install --user openpyxl pyarrow==24.0.0
+  python3 tools/backfill_lake.py --dry-run     # what it would write
+  python3 tools/backfill_lake.py
+  ```
+  A second run writes nothing new. A day that has a Day Sheet but no Done
+  upload in Folder Status is skipped and listed.
+- **Creating or updating the views.** The views (`day_summary`,
+  `weekly_attendance`, `pipeline_metrics`, `ocr_quality`) are SQL files in
+  `sql/views/`; this creates or replaces them in Athena and reads one row from
+  each. Run it once, and again whenever `sql/views/` changes:
+  ```bash
+  python3 tools/lake_views.py
+  ```
+  Then, for example: `SELECT * FROM calls_log.day_summary WHERE work_month = '2026-10' ORDER BY work_date`.
+  More examples are in `sql/examples/`.
 
 ### Who writes to the Sheets (the two switches)
 

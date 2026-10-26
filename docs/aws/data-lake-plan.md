@@ -8,7 +8,7 @@ first draft.
 ## 1. Store decision (ADR 9)
 
 Call and session rows go into an S3 data lake (Parquet + Glue Data Catalog +
-Athena). Status: proposed, pending the Owner's okay.
+Athena). Status: accepted (the Owner agreed on 2026-10-26).
 
 - DynamoDB `calls-log-folders` stays the status store.
 - Excel and Google Sheets stay the Owner's official record; the lake is additive only.
@@ -98,7 +98,7 @@ Seven phases; only Phase 3 touches the live flow, and only best-effort.
 ### Phase 0: Decide
 
 - [x] ADR 0009 and the data contract
-- [ ] Owner's okay on permanent storage of work data
+- [x] Owner's okay on permanent storage of work data (2026-10-26)
 - [ ] Add Glue, Athena and publisher IAM rights to the bootstrap boundary (CloudShell, by hand)
 
 Note: the bootstrap rights move into the Phase 2 pull request, so they match
@@ -132,24 +132,28 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 ### Phase 3: Turn on
 
 - [x] `lake_enabled = true` (set 2026-10-26, with the salt)
-- [ ] Verify Re-runs overwrite and Superseded uploads never appear
+- [x] A Re-run of a real day (2026-10-21) reached Athena: 95 calls, 8 flagged
+- [ ] Over a week: check that Re-runs overwrite and Superseded uploads never appear
 
 ### Phase 4: Backfill
 
-- [ ] Read-only script parses versioned `results/*.xlsx` (rows 7–22, columns B–D) into `sessions` with `source = 'xlsx_backfill'`
-- [ ] Never runs `main.py`, never touches the Sheets
+- [x] Read-only script parses the current `results/*.xlsx` (rows 7–22, columns B–C) into `sessions` with `source = 'xlsx_backfill'` (`tools/backfill_lake.py`); never overwrites a day the publisher wrote
+- [x] Never runs `main.py`, never touches the Sheets
+- [ ] Run once from CloudShell (docs/TECHNICAL.md §11)
 
 ### Phase 4.5: OCR accuracy
 
 - [ ] Ground truth: Synthetic Set, Reference Set, weekly spot-check of about 20 real calls in a private `labels` table, optional Superseded vs. chosen pairs
-- [ ] `ocr_quality` view: exact-match rate per field, mean error in seconds, low-confidence rate by day and person, calibration of the 0.85 threshold
+- [x] `ocr_quality` view, label-free half: flagged and low-confidence counts per field, by day, person, model and parser version
+- [ ] Exact-match rate per field, mean error in seconds, calibration of the 0.85 threshold (needs the labels)
 - [ ] Report: `docs/aws/ocr-accuracy.md`
 
 ### Phase 5: Gold layer and portfolio
 
-- [ ] Views: `day_summary`, `weekly_attendance`, `pipeline_metrics` (turnaround p50/p95, images per day, cost per image)
-- [ ] `sql/` folder of example queries, ERD, lake diagram in `docs/aws/architecture.md`
-- [ ] README section with real aggregate production numbers (cost, turnaround, failure rate, OCR accuracy)
+- [x] Views: `day_summary`, `weekly_attendance`, `pipeline_metrics` (turnaround p50/p95, images per day, estimated GB-s per image) in `sql/views/`, created by `tools/lake_views.py`, checked in CI on DuckDB
+- [x] `sql/` folder of example queries, ERD (data contract), lake diagram in `docs/aws/architecture.md`
+- [x] README section on the data lake
+- [ ] Real aggregate production numbers (cost, turnaround, failure rate, OCR accuracy) after a month
 - [ ] Stretch: dbt-athena with dbt tests
 
 ### Phase 6: Demo environment and public dashboard
@@ -183,7 +187,7 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 
 **Open items**
 
-- [ ] Owner's okay on permanent storage
+- [x] Owner's okay on permanent storage (2026-10-26)
 - [ ] Whether to backfill PC-era history (needs the Owner's go-ahead)
 - [ ] Who does the weekly spot-check labeling
 - [ ] Demo URL: AWS default or a custom domain

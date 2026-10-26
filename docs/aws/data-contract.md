@@ -80,8 +80,8 @@ One row per Day Sheet row (7 to 22), as `build_sessions` made it.
 | `start_ts` | timestamp | no | Column B, local |
 | `end_ts` | timestamp | no | Column C, local |
 | `span_min` | int | no | Column D in minutes; B2 is their sum |
-| `call_count` | int | no | Countable calls merged into it |
-| `source` | string | no | `runner`; `xlsx_backfill` for rows read from stored Day Sheets (Phase 4) |
+| `call_count` | int | yes | Countable calls merged into it; null for `xlsx_backfill` rows (a Day Sheet doesn't record it) |
+| `source` | string | no | `runner`; `xlsx_backfill` for rows read from stored Day Sheets (`tools/backfill_lake.py`) |
 | `ingested_at` | timestamp | no | Added by the publisher, UTC |
 
 ### `uploads`
@@ -178,6 +178,74 @@ FROM calls_log.sessions
 WHERE work_month = '2026-10'
 GROUP BY 1, 2
 ORDER BY 2, 1;
+```
+
+## History from stored Day Sheets (backfill)
+
+`tools/backfill_lake.py` runs once from CloudShell. For each current
+`results/<Person-Day>.xlsx` it finds the day's chosen Done upload in Folder
+Status (made Ready last; a PC import counts only when nothing else is Done),
+reads the sheet's session rows with the PC's own reader, and writes:
+
+- `sessions` rows with `source = 'xlsx_backfill'` and `call_count` null;
+- the `uploads` row when the upload was a Run (a PC import has no times), with
+  `runner_memory_mb` null;
+- no `calls` rows: a Day Sheet doesn't hold them.
+
+It writes to the publisher's fixed keys, and only where no file exists yet. A
+day the publisher already wrote keeps its richer rows, and a later Re-run's
+publish replaces a backfilled file. Rows pass the same session checks
+(numbered, start before end, `span_min` agreeing, sorted, no overlap); a day
+that fails is skipped and reported by person_key, never by name.
+
+## Views
+
+Plain SQL in `sql/views/`, created in the `calls_log` database by
+`tools/lake_views.py` (in this order, since `weekly_attendance` reads
+`day_summary`). CI runs them, and every `sql/examples/` query, on DuckDB over
+real Parquet (`tools/check_lake_views.py`).
+
+| View | One row per | Columns |
+|---|---|---|
+| `day_summary` | person and day | `work_month`, `person_key`, `work_date`, `source`, `sessions`, `span_min`, `hours`, `first_start`, `last_end`, `calls`, `countable_calls`, `flagged_calls` (the last three null for backfilled days) |
+| `weekly_attendance` | person and week (from Monday) | `person_key`, `week_start`, `days_worked`, `span_min`, `hours`, `avg_hours_per_day` |
+| `pipeline_metrics` | day a Run finished | `finished_date`, `uploads`, `images`, `retried`, `turnaround_p50_s`, `turnaround_p95_s`, `run_p50_s`, `est_gb_s`, `est_gb_s_per_image` (GB-s are estimates: Run seconds × memory; a resumed Run counts its last start only) |
+| `ocr_quality` | day, person, model and parser version | `work_month`, `work_date`, `person_key`, `ocr_model`, `parser_version`, `calls`, `flagged`, `low_row_conf`, `low_start_conf`, `low_duration_conf`, `mean_row_conf`, `min_start_conf`, `min_duration_conf` (the label-free half of OCR accuracy) |
+
+```mermaid
+erDiagram
+    uploads ||--o{ calls : "upload_id"
+    uploads ||--o{ sessions : "upload_id"
+    sessions }o--|| day_summary : "person_key, work_date"
+    calls }o--|| day_summary : "person_key, work_date"
+    day_summary }o--|| weekly_attendance : "person_key, week"
+    uploads }o--|| pipeline_metrics : "finished date"
+    calls }o--|| ocr_quality : "person_key, work_date"
+    uploads {
+        string upload_id
+        string person_key
+        date work_date
+        int image_count
+        timestamp ready_at
+        timestamp finished_at
+    }
+    calls {
+        string person_key
+        date work_date
+        int call_seq
+        timestamp start_ts
+        int duration_s
+        double row_conf
+        boolean flagged
+    }
+    sessions {
+        string person_key
+        date work_date
+        int session_no
+        timestamp start_ts
+        int span_min
+        string source
+    }
 ```
 
 ## Changing the contract
