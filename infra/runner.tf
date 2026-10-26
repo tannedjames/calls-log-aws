@@ -20,11 +20,13 @@ locals {
     runner     = "calls-log-runner"
     killswitch = "calls-log-killswitch"
     intake     = "calls-log-intake"
+    publisher  = "calls-log-publisher"
     runs       = "calls-log-runs"
     table      = "calls-log-folders"
   }
   arns = {
     runner_logs     = "arn:aws:logs:${var.region}:${var.account_id}:log-group:/aws/lambda/${local.names.runner}"
+    publisher_logs  = "arn:aws:logs:${var.region}:${var.account_id}:log-group:/aws/lambda/${local.names.publisher}"
     killswitch_logs = "arn:aws:logs:${var.region}:${var.account_id}:log-group:/aws/lambda/${local.names.killswitch}"
     intake_logs     = "arn:aws:logs:${var.region}:${var.account_id}:log-group:/aws/lambda/${local.names.intake}"
     runner          = "arn:aws:lambda:${var.region}:${var.account_id}:function:${local.names.runner}"

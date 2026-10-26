@@ -11,6 +11,11 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 6.56"
     }
+    # Zips the data lake's publisher from cloud/ (infra/lake.tf).
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.8"
+    }
   }
 
   # Backends can't read variables, so the values are written out. The lock is

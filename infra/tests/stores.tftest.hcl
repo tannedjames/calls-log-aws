@@ -68,15 +68,15 @@ run "data_bucket_is_locked_down" {
   }
 }
 
-run "only_uploads_checkpoints_and_staged_records_expire" {
+run "only_uploads_checkpoints_and_lake_hand_overs_expire" {
   command = plan
 
   # Explicit indexes, not for-expressions: Terraform 1.16.5 crashes while
   # printing a failed for-expression over these rules.
 
   assert {
-    condition     = local.expiring_prefixes == ["inbox/", "work/", "bench/", "staging/"]
-    error_message = "Only inbox/, work/, bench/ and staging/ may expire: Day Sheets in results/ are kept forever."
+    condition     = local.expiring_prefixes == ["inbox/", "work/", "bench/", "staging/", "quarantine/"]
+    error_message = "Only inbox/, work/, bench/, staging/ and quarantine/ expire after 30 days: Day Sheets in results/ and the lake/ are kept forever."
   }
 
   assert {
@@ -117,10 +117,28 @@ run "only_uploads_checkpoints_and_staged_records_expire" {
 
   assert {
     condition = (
-      contains(["", "-"], try(coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[4].filter[0].prefix, "-"), "-")) &&
-      coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[4].expiration[0].days, 0) == 0 &&
-      aws_s3_bucket_lifecycle_configuration.data.rule[4].expiration[0].expired_object_delete_marker &&
-      length(aws_s3_bucket_lifecycle_configuration.data.rule[4].noncurrent_version_expiration) == 0
+      aws_s3_bucket_lifecycle_configuration.data.rule[4].filter[0].prefix == "quarantine/" &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[4].expiration[0].days == 30 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[4].noncurrent_version_expiration[0].noncurrent_days == 1
+    )
+    error_message = "quarantine/ (envelopes that failed the lake's checks) must expire after 30 days, and its noncurrent versions 1 day later."
+  }
+
+  assert {
+    condition = (
+      aws_s3_bucket_lifecycle_configuration.data.rule[5].filter[0].prefix == "athena-results/" &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[5].expiration[0].days == 7 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[5].noncurrent_version_expiration[0].noncurrent_days == 1
+    )
+    error_message = "athena-results/ must expire after 7 days, and its noncurrent versions 1 day later."
+  }
+
+  assert {
+    condition = (
+      contains(["", "-"], try(coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[6].filter[0].prefix, "-"), "-")) &&
+      coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[6].expiration[0].days, 0) == 0 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[6].expiration[0].expired_object_delete_marker &&
+      length(aws_s3_bucket_lifecycle_configuration.data.rule[6].noncurrent_version_expiration) == 0
     )
     error_message = "The whole-bucket rule may only tidy delete markers and uploads: Day Sheets in results/ are kept forever."
   }

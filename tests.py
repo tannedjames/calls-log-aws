@@ -2293,12 +2293,16 @@ def test_function_environments_name_only_what_settings_reads():
 def test_every_function_waits_for_the_repository_policy():
     # CreateFunction is refused until the repository policy lets Lambda pull
     # the image (infra/ecr.tf); Terraform would otherwise create both at once.
+    # The data lake's publisher is a zip (infra/lake.tf) and pulls no image.
     text = _infra_text()
     if text is None:
         return
     blocks = _re.findall(r'resource "aws_lambda_function" "(\w+)" \{(.*?)\n\}', text, _re.S)
     assert blocks, "no functions found"
     for name, body in blocks:
+        if not _re.search(r'package_type\s*=\s*"Image"', body):
+            assert "image_uri" not in body, name
+            continue
         m = _re.search(r"depends_on\s*=\s*\[([^\]]*)\]", body)
         assert m and "aws_ecr_repository_policy.runner" in m.group(1), name
 
@@ -2309,6 +2313,9 @@ def test_every_function_command_names_a_real_handler():
         return
     handlers = set(_re.findall(r'"/lambda-entrypoint\.sh",\s*"([\w.]+)"', text))
     assert handlers == {"cloud.runner.handler", "cloud.killswitch.handler", "cloud.bench.handler", "cloud.intake.handler"}
+    zipped = set(_re.findall(r'^\s*handler\s*=\s*"([\w.]+)"', text, _re.M))   # zip functions (infra/lake.tf)
+    assert zipped == {"cloud.publisher.handler"}
+    handlers |= zipped
     for dotted in handlers:
         module, _, name = dotted.rpartition(".")
         assert callable(getattr(_importlib.import_module(module), name)), dotted
@@ -4372,8 +4379,9 @@ def test_contract_doc_lists_exactly_the_lake_columns_and_codes():
                                       ("sessions", lake.SESSION_COLUMNS, ["ingested_at"]),
                                       ("uploads", lake.UPLOAD_COLUMNS, [])):
         section = text.split(f"### `{table}`")[1].split("\n### ")[0].split("\n## ")[0]
-        listed = _re.findall(r"^\| `([a-z_]+)` \|", section, _re.M)
-        assert listed == list(columns) + publisher, (table, listed)
+        listed = _re.findall(r"^\| `([a-z_]+)` \| (\w+) \|", section, _re.M)
+        assert [c for c, _ in listed] == list(columns) + publisher, (table, listed)
+        assert dict(listed) == lake.COLUMN_TYPES[table], (table, listed)   # the types the Glue tables use
     for code in lake.FLAG_REASONS:
         assert f"`{code}`" in text, code
 
@@ -4404,3 +4412,172 @@ def test_check_lake_parity_compares_staged_calls_with_the_truth():
         staged = json.loads((emitted / f"{_RUN_PD}.json").read_text(encoding="utf-8"))
         assert lake.check(staged) == [] and staged["person_key"] != lake.person_key(
             "Nguyen Van A", _LAKE_SALT, _LAKE_PREFIXES)   # the local salt matches no real key
+
+
+# ---------------------------------------------------------------------------
+# The data lake's publisher (cloud/publisher.py, ADR 9 Phase 2). S3 and
+# DynamoDB are faked, and Parquet is replaced by a JSON stand-in: pyarrow is
+# in the Lambda layer, not here (tools/check_lake_parquet.py covers it in CI).
+# ---------------------------------------------------------------------------
+
+from cloud import publisher
+
+_STAGED_KEY = f"staging/{_RUN_PD}/{_RUN_UP}.json"
+
+
+def _pub_status():
+    """Folder Status with _RUN_UP Done, as the runner leaves it before staging."""
+    store = FolderStatus(_FakeDynamo(), "calls-log-folders", lambda: 1_780_000_000.0)
+    store.create(_RUN_PD, _RUN_UP, 3)
+    store.mark_ready(_RUN_PD, _RUN_UP)
+    store.begin_run(_RUN_PD, _RUN_UP, "run-1")
+    store.finish(_RUN_PD, _RUN_UP)
+    store.release_lease(_RUN_PD, "run-1")
+    return store
+
+
+def _publish(status, s3, key=_STAGED_KEY, envelope=None, body=None, minute=3):
+    if body is None:
+        body = json.dumps(_lake_payload() if envelope is None else envelope, ensure_ascii=False).encode("utf-8")
+    s3.objects[key] = body
+    written = {}
+
+    def write(table, rows):
+        written[table] = rows
+        return json.dumps(rows, default=str).encode("utf-8")
+
+    with redirect_stdout(io.StringIO()) as out:
+        outcome = publisher.publish(key, s3=s3, bucket="calls-log-data-123456789012", status=status, write=write,
+                                    now=lambda: _dt.datetime(2026, 6, 1, 2, minute, 5, 123456, tzinfo=_dt.timezone.utc))
+    lines = [json.loads(line) for line in out.getvalue().splitlines()]
+    return outcome, written, lines
+
+
+def _lake_objects(s3):
+    return sorted(k for k in s3.objects if k.startswith(("lake/", "quarantine/")))
+
+
+def test_publisher_writes_the_days_choice_to_three_fixed_keys_and_rewrites_them():
+    status, s3 = _pub_status(), _FakeS3()
+    outcome, written, lines = _publish(status, s3)
+    key = lake.person_key("Nguyen Van A", _LAKE_SALT, _LAKE_PREFIXES)
+    want = [f"lake/{t}/work_month=2026-06/{key}_2026-06-01.parquet" for t in ("calls", "sessions", "uploads")]
+    assert (outcome.status, list(outcome.keys)) == ("published", want) and _lake_objects(s3) == sorted(want)
+    assert {t: len(rows) for t, rows in written.items()} == {"calls": 6, "sessions": 2, "uploads": 1}
+    assert written["calls"][0]["ingested_at"] == _dt.datetime(2026, 6, 1, 2, 3, 5, 123000)   # UTC, milliseconds
+    assert lines == [{**lines[0], "Published": 1, "Dropped": 0, "Quarantined": 0, "outcome": "published",
+                      "uploadId": _RUN_UP, "reason": None, "problems": []}]
+    metrics = lines[0]["_aws"]["CloudWatchMetrics"][0]
+    assert (metrics["Namespace"], metrics["Dimensions"], lines[0]["Function"]) == (
+        "calls-log/lake", [["Function"]], "calls-log-publisher")
+    text = _infra_text()
+    if text is not None:   # the alarm watches exactly this metric
+        assert 'dimensions          = { Function = local.names.publisher }' in text
+        assert 'publisher  = "calls-log-publisher"' in text
+    again, _written, _lines = _publish(status, s3, minute=9)   # a replay or a Re-run: same keys, new versions
+    assert again.keys == outcome.keys and all(len(s3.versions[k]) == 2 for k in want)
+    for k in want:
+        assert "Nguyen" not in k and "nguyen" not in k
+
+
+def test_publisher_drops_what_is_not_the_days_done_choice():
+    later = "20260601T090000Z-0b1c2d3e"
+    cases = {}
+    fresh = FolderStatus(_FakeDynamo(), "calls-log-folders", lambda: 1_780_000_000.0)
+    fresh.create(_RUN_PD, _RUN_UP, 3)
+    cases["Uploading"] = fresh
+    cases["no item"] = FolderStatus(_FakeDynamo(), "calls-log-folders", lambda: 1_780_000_000.0)
+    rerun = _pub_status()
+    rerun.create(_RUN_PD, later, 2)
+    rerun.mark_ready(_RUN_PD, later)              # Held: it waits for a Re-run, so ours stays the choice
+    assert _publish(rerun, _FakeS3())[0].status == "published"
+    chosen = _pub_status()
+    chosen.create(_RUN_PD, later, 2)
+    chosen.mark_ready(_RUN_PD, later)
+    chosen.requeue(_RUN_PD, later)                # its Re-run makes it the day's choice
+    cases["chosen later"] = chosen
+    for name, store in cases.items():
+        s3 = _FakeS3()
+        outcome, written, lines = _publish(store, s3)
+        assert outcome.status == "dropped" and written == {} and _lake_objects(s3) == [], name
+        assert lines[0]["Dropped"] == 1, name
+    s3 = _FakeS3()
+    for key in ("staging/notes.json", f"staging/{_RUN_PD}/not-an-upload.json", f"lake/{_RUN_PD}/{_RUN_UP}.json",
+                f"staging/{_RUN_PD}/{_RUN_UP}.json.bak"):
+        assert _publish(_pub_status(), s3, key=key)[0].reason == "not a staged envelope's key", key
+    assert not [k for k in s3.objects if k.endswith(".parquet") or k.startswith("quarantine/")]
+    # The held upload itself is still Held, and never published either.
+    assert _publish(rerun, _FakeS3(), key=f"staging/{_RUN_PD}/{later}.json")[0].status == "dropped"
+
+
+def test_publisher_quarantines_what_fails_the_checks_without_naming_anyone():
+    bad = _lake_payload()
+    bad["day_sheet"]["span_min"] += 1
+    other = _lake_payload()
+    other["upload_id"] = other["calls"][0]["upload_id"] = "20260601T090000Z-0b1c2d3e"
+    for c in other["calls"] + other["sessions"] + other["uploads"]:
+        c["upload_id"] = other["upload_id"]
+    for name, kwargs, said in (("fails a check", {"envelope": bad}, "Day Sheet"),
+                               ("not JSON", {"body": b"\xff not json"}, "not a JSON object"),
+                               ("another upload", {"envelope": other}, "differs from the staged key")):
+        status, s3 = _pub_status(), _FakeS3()
+        outcome, written, lines = _publish(status, s3, **kwargs)
+        assert outcome.status == "quarantined" and written == {}, name
+        assert _lake_objects(s3) == [f"quarantine/{_RUN_PD}/{_RUN_UP}.json"], name
+        held = json.loads(s3.objects[f"quarantine/{_RUN_PD}/{_RUN_UP}.json"])
+        assert any(said in p for p in held["problems"]), (name, held["problems"])
+        assert lines[0]["Quarantined"] == 1 and any(said in p for p in lines[0]["problems"]), name
+        text = json.dumps(lines)
+        assert "Nguyen" not in text and _PHONE not in text, name
+
+
+def test_publisher_tables_type_every_contract_column():
+    rows = publisher.tables(_lake_payload(), _dt.datetime(2026, 6, 1, 2, 3, 5))
+    assert {t: list(r[0]) for t, r in rows.items()} == {t: list(c) for t, c in lake.COLUMN_TYPES.items()}
+    call, missed, session, upload = rows["calls"][0], rows["calls"][3], rows["sessions"][0], rows["uploads"][0]
+    assert call["work_date"] == _dt.date(2026, 6, 1) and call["start_ts"] == _dt.datetime(2026, 6, 1, 8, 0)
+    assert call["countable"] is True and isinstance(call["row_conf"], float) and call["duration_s"] == 1200
+    assert (missed["end_ts"], missed["duration_s"], missed["duration_conf"]) == (None, None, None)
+    assert session["end_ts"] == _dt.datetime(2026, 6, 1, 9, 0) and session["span_min"] == 60
+    assert upload["ready_at"] == _dt.datetime(2026, 6, 1, 2, 0) and upload["ready_at"].tzinfo is None   # UTC, naive
+    assert upload["runner_memory_mb"] == 2048 and "ingested_at" not in upload
+
+
+def test_publisher_handler_decodes_s3_keys_and_ignores_other_buckets():
+    status, s3 = _pub_status(), _FakeS3()
+    s3.objects[_STAGED_KEY] = json.dumps(_lake_payload(), ensure_ascii=False).encode("utf-8")
+    encoded = "staging/Nguyen+Van+A+%26+2026-06-01/" + _RUN_UP + ".json"
+    records = [{"s3": {"bucket": {"name": "calls-log-data-123456789012"}, "object": {"key": encoded}}},
+               {"s3": {"bucket": {"name": "someone-else"}, "object": {"key": encoded}}}]
+    with mock.patch.dict(publisher._aws, {"bucket": "calls-log-data-123456789012", "s3": s3, "status": status}), \
+            mock.patch.object(publisher, "parquet_bytes", lambda table, rows: b"parquet"), \
+            redirect_stdout(io.StringIO()):
+        out = publisher.handler({"Records": records}, None)
+    assert out == {"outcomes": ["published"]} and len(_lake_objects(s3)) == 3
+
+
+def test_publisher_zip_holds_everything_it_imports():
+    infra = Path(__file__).resolve().parent / "infra" / "lake.tf"
+    if not infra.is_file():   # infra/ isn't in the runner image
+        return
+    files = _re.findall(r'"([\w/]+\.py)"', infra.read_text(encoding="utf-8").split("publisher_files = [")[1].split("]")[0])
+    root = Path(__file__).resolve().parent
+    with tempfile.TemporaryDirectory() as d:
+        for f in files:
+            (Path(d) / f).parent.mkdir(parents=True, exist_ok=True)
+            (Path(d) / f).write_bytes((root / f).read_bytes())
+        done = _subprocess.run([sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {d!r}); "
+                               "import cloud.publisher, cloud.lake; print(cloud.publisher.__file__)"],
+                              capture_output=True, text=True, cwd=d)
+    assert done.returncode == 0 and done.stdout.startswith(d), done.stderr[-2000:]
+
+
+def test_glue_tables_in_infra_match_the_lake_columns():
+    text = _infra_text()
+    if text is None:
+        return
+    block = text.split("lake_columns = {")[1].split("\n  }")[0]
+    tables = {t: _re.findall(r'\["(\w+)", "(\w+)"\]', body)
+              for t, body in _re.findall(r"(\w+) = \[(.*?)\n    \]", block, _re.S)}
+    assert tables == {t: list(c.items()) for t, c in lake.COLUMN_TYPES.items()}, tables
+
