@@ -65,9 +65,23 @@ run "plan_role_can_only_read" {
     condition = length(setsubtract(
       flatten([for s in jsondecode(data.aws_iam_policy_document.plan_read.json).Statement : s.Action]),
       ["s3:ListBucket", "s3:GetObject", "ecr:DescribeRepositories", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource",
-      "ecr:GetRepositoryPolicy", "dynamodb:DescribeTable"],
+      "ecr:GetRepositoryPolicy", "dynamodb:DescribeTable", "glue:GetDatabase", "glue:GetTable", "athena:GetWorkGroup"],
     )) == 0
-    error_message = "The plan role runs code from any pull request: it may only list and read the state and describe repositories and tables."
+    error_message = "The plan role runs code from any pull request: it may only list and read the state and describe repositories, tables, the lake's catalog and its workgroup."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.plan_read.json).Statement :
+      toset(flatten([s.Resource])) == toset([
+        "arn:aws:glue:ap-southeast-2:123456789012:catalog",
+        "arn:aws:glue:ap-southeast-2:123456789012:database/calls_log",
+        "arn:aws:glue:ap-southeast-2:123456789012:table/calls_log/*",
+        "arn:aws:athena:ap-southeast-2:123456789012:workgroup/calls-log",
+      ])
+      if length([for a in flatten([s.Action]) : a if startswith(a, "glue:") || startswith(a, "athena:")]) > 0
+    ])
+    error_message = "The plan role describes the calls_log catalog and the calls-log workgroup only (definitions, never data)."
   }
 
   assert {
@@ -329,5 +343,52 @@ run "the_boundary_reaches_only_this_project" {
       ])
     ])
     error_message = "Parameter and topic rights are named one by one: no ssm:Put*, no \"*\", no NotAction that would reach webapp_url or sync_secret."
+  }
+}
+
+run "deploy_lake_rights_stay_on_the_lake_definitions" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_lake.json).Statement :
+      toset(flatten([s.Resource])) == (s.Sid == "ManageTheLakeCatalog" ? toset([
+        "arn:aws:glue:ap-southeast-2:123456789012:catalog",
+        "arn:aws:glue:ap-southeast-2:123456789012:database/calls_log",
+        "arn:aws:glue:ap-southeast-2:123456789012:table/calls_log/*",
+      ]) : toset(["arn:aws:athena:ap-southeast-2:123456789012:workgroup/calls-log"]))
+    ])
+    error_message = "The deploy role's Glue rights stay on the calls_log database and its tables, its Athena rights on the calls-log workgroup."
+  }
+
+  assert {
+    condition = length([
+      for a in flatten([for s in jsondecode(data.aws_iam_policy_document.deploy_lake.json).Statement : s.Action]) :
+      a if strcontains(a, "*") || strcontains(a, "Query") || strcontains(a, "Crawler") || strcontains(a, "Job") || strcontains(a, "Partition") && a != "glue:GetPartitionIndexes"
+    ]) == 0
+    error_message = "The deploy role manages the lake's definitions only: no wildcard, no Athena query, no crawler, job or partition writes."
+  }
+
+  assert {
+    condition = alltrue([
+      for s in jsondecode(data.aws_iam_policy_document.deploy_lambda_platform.json).Statement :
+      s.Resource == "arn:aws:lambda:ap-southeast-2:336392948345:layer:AWSSDKPandas-Python313:*"
+      if contains(flatten([s.Action]), "lambda:GetLayerVersion")
+    ])
+    error_message = "The deploy role may read AWS's own pandas layer only, to attach it to the publisher."
+  }
+
+  # IAM refuses a role whose inline policies add up to more than 10,240
+  # characters (whitespace not counted): the deploy role would stop deploying.
+  assert {
+    condition = sum([
+      for d in [
+        data.aws_iam_policy_document.deploy_state, data.aws_iam_policy_document.deploy_ecr,
+        data.aws_iam_policy_document.deploy_data_bucket, data.aws_iam_policy_document.deploy_parameters,
+        data.aws_iam_policy_document.deploy_alerts, data.aws_iam_policy_document.deploy_tables,
+        data.aws_iam_policy_document.deploy_lambda_platform, data.aws_iam_policy_document.deploy_lake,
+      ] : length(replace(jsonencode(jsondecode(d.json)), " ", ""))
+    ]) <= 10240
+    error_message = "The deploy role's inline policies must stay within IAM's 10,240 characters in all."
   }
 }

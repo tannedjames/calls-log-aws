@@ -45,11 +45,11 @@ project was created in, and AWS refuses others (decision D-22).
 
 | Role | Trusts only | Can |
 |---|---|---|
-| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories, and set the repository policy that lets Lambda pull from them; manage the data bucket's settings, including CORS for the upload page (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets; create and describe the `calls-log-*` tables (not delete them, nor read or write items); create roles only under the path `/calls-log/` and only with the workload boundary, and pass them only to Lambda; manage the `calls-log-*` functions, their queue triggers, queues, log groups and alarms |
-| `calls-log-plan` | pull requests of that repo | read the prod state, describe those repositories and read their policies, and describe the `calls-log-*` tables (metadata, no items); nothing else |
+| `calls-log-deploy` | runs on `main` of `tannedjames/calls-log-aws` | read and write the prod state; manage and push to the `calls-log-*` ECR repositories, and set the repository policy that lets Lambda pull from them; manage the data bucket's settings, including CORS for the upload page (not its objects, and it can't delete it), the `/calls-log/` parameters (not delete them), the `calls-log-*` topics (not subscribe anyone) and budgets; create and describe the `calls-log-*` tables (not delete them, nor read or write items); create roles only under the path `/calls-log/` and only with the workload boundary, and pass them only to Lambda; manage the `calls-log-*` functions, their queue triggers, queues, log groups and alarms; define the data lake's Glue database `calls_log`, its tables and the Athena workgroup `calls-log` (no queries), and point the data bucket's notification at the publisher |
+| `calls-log-plan` | pull requests of that repo | read the prod state, describe those repositories and read their policies, and describe the `calls-log-*` tables (metadata, no items) and the data lake's catalog and workgroup (definitions, no data); nothing else |
 
 **Function roles are fenced twice.** The roles the functions run as
-(`calls-log-runner`, `calls-log-killswitch`, `calls-log-intake`, `calls-log-bench`) are created by
+(`calls-log-runner`, `calls-log-killswitch`, `calls-log-intake`, `calls-log-bench`, `calls-log-publisher`) are created by
 the deploy, from `infra/`. The deploy role may create a role only under
 `/calls-log/` and only with `calls-log-workload-boundary` attached, so whatever
 a merged commit puts in a function's policy, the role can never do more than
@@ -268,5 +268,19 @@ A higher limit costs nothing; Lambda bills per use.
   .\.venv\Scripts\python.exe tools\put_parameters.py --lake-enabled true      # or false to stop
   ```
   A warm runner picks up a new salt within 15 minutes, so wait that long after
-  setting it before turning the switch on. Until the publisher exists
-  (Phase 2), staged envelopes only wait in `staging/` and expire after 30 days.
+  setting it before turning the switch on.
+- **The data lake's publisher, Glue and Athena** (ADR 9, Phase 2). Its
+  bootstrap change, applied by hand before its PR merges, gives the deploy
+  role:
+  - the Glue database `calls_log` and its tables, and the Athena workgroup
+    `calls-log` (definitions only: no queries, crawlers or jobs);
+  - `s3:PutBucketNotification` on the data bucket;
+  - the publisher's event invoke config;
+  - `lambda:GetLayerVersion` on AWS's own pandas layer.
+
+  The plan role may describe that database, its tables and the workgroup. The
+  workload boundary is unchanged. The plan shows 1 to add (`deploy_lake`),
+  3 to change (`deploy_data_bucket`, `deploy_lambda_platform`, `plan_read`),
+  0 to destroy. After the merge's deploy, replay `staging/` once
+  (docs/TECHNICAL.md §11, "The data lake"), so the days staged before it
+  reach the lake.

@@ -40,6 +40,15 @@ locals {
   # The /calls-log/ settings a function may write (the upload page's Owner
   # tab, Story 4.5); cloud/owner_settings.py WRITABLE names the same four.
   owner_settings = ["sync_enabled", "intake_passphrase_hash", "owner_passphrase_hash", "name_prefixes"]
+  # The data lake (ADR 9, infra/lake.tf): one Glue database, its tables, one
+  # Athena workgroup, and the AWS-managed layer the publisher runs with.
+  lake_catalog = [
+    "arn:aws:glue:${var.region}:${local.account_id}:catalog",
+    "arn:aws:glue:${var.region}:${local.account_id}:database/calls_log",
+    "arn:aws:glue:${var.region}:${local.account_id}:table/calls_log/*",
+  ]
+  lake_workgroup   = "arn:aws:athena:${var.region}:${local.account_id}:workgroup/calls-log"
+  pandas_layer_arn = "arn:aws:lambda:${var.region}:336392948345:layer:AWSSDKPandas-Python313:*"
 }
 
 # ---------------------------------------------------------------------------
@@ -297,7 +306,8 @@ data "aws_iam_policy_document" "deploy_data_bucket" {
       "s3:PutBucketVersioning",
       "s3:PutBucketPolicy",
       "s3:DeleteBucketPolicy",
-      "s3:PutBucketCORS", # Epic 4: the upload page's origin only (infra/data.tf)
+      "s3:PutBucketCORS",         # Epic 4: the upload page's origin only (infra/data.tf)
+      "s3:PutBucketNotification", # ADR 9: new staging/ envelopes call the lake's publisher (infra/lake.tf)
       "s3:PutLifecycleConfiguration",
       "s3:PutBucketTagging",
       "s3:TagResource",
@@ -428,6 +438,14 @@ data "aws_iam_policy_document" "plan_read" {
     sid       = "DescribeTables"
     actions   = ["dynamodb:DescribeTable"]
     resources = [local.tables]
+  }
+
+  # The same for the data lake's catalog and workgroup (ADR 9): definitions
+  # only. Reading the lake's data needs S3 and Athena rights it doesn't have.
+  statement {
+    sid       = "DescribeTheLakeCatalog"
+    actions   = ["glue:GetDatabase", "glue:GetTable", "athena:GetWorkGroup"]
+    resources = concat(local.lake_catalog, [local.lake_workgroup])
   }
 }
 
@@ -635,8 +653,18 @@ data "aws_iam_policy_document" "deploy_lambda_platform" {
       "lambda:DeleteFunctionUrlConfig",
       "lambda:TagResource",
       "lambda:UntagResource",
+      "lambda:PutFunctionEventInvokeConfig", # ADR 9: the publisher's retries
+      "lambda:UpdateFunctionEventInvokeConfig",
+      "lambda:DeleteFunctionEventInvokeConfig",
     ]
     resources = [local.functions]
+  }
+
+  # ADR 9: the publisher runs with AWS's own AWS SDK for pandas layer.
+  statement {
+    sid       = "UseTheAwsPandasLayer"
+    actions   = ["lambda:GetLayerVersion"]
+    resources = [local.pandas_layer_arn]
   }
 
   statement {
@@ -726,4 +754,53 @@ resource "aws_iam_role_policy" "deploy_lambda_platform" {
   name   = "lambda-platform"
   role   = aws_iam_role.deploy.id
   policy = data.aws_iam_policy_document.deploy_lambda_platform.json
+}
+
+# ---------------------------------------------------------------------------
+# The data lake (ADR 9, infra/lake.tf): the Glue database calls_log and its
+# tables, and the Athena workgroup calls-log. Definitions only: no Athena
+# query, no Glue crawler or job, and the data itself (lake/ in the data
+# bucket) stays out of the deploy role's reach like every other object.
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "deploy_lake" {
+  statement {
+    sid = "ManageTheLakeCatalog"
+    actions = [
+      "glue:CreateDatabase",
+      "glue:GetDatabase",
+      "glue:UpdateDatabase",
+      "glue:DeleteDatabase",
+      "glue:CreateTable",
+      "glue:GetTable",
+      "glue:GetTables",
+      "glue:UpdateTable",
+      "glue:DeleteTable",
+      "glue:GetPartitionIndexes",
+      "glue:TagResource",
+      "glue:UntagResource",
+      "glue:GetTags",
+    ]
+    resources = local.lake_catalog
+  }
+
+  statement {
+    sid = "ManageTheLakeWorkgroup"
+    actions = [
+      "athena:CreateWorkGroup",
+      "athena:GetWorkGroup",
+      "athena:UpdateWorkGroup",
+      "athena:DeleteWorkGroup",
+      "athena:TagResource",
+      "athena:UntagResource",
+      "athena:ListTagsForResource",
+    ]
+    resources = [local.lake_workgroup]
+  }
+}
+
+resource "aws_iam_role_policy" "deploy_lake" {
+  name   = "lake"
+  role   = aws_iam_role.deploy.id
+  policy = data.aws_iam_policy_document.deploy_lake.json
 }

@@ -64,7 +64,7 @@ must aws_iam_role_policy.deploy_state calls-log-deploy:terraform-state
 must aws_iam_role_policy.deploy_ecr calls-log-deploy:ecr
 must aws_iam_role.plan calls-log-plan
 must aws_iam_role_policy.plan_read calls-log-plan:read-only-plan
-# Added by Stories 2.4, 3.4 and 3.7: imported if an earlier apply made them, else planned.
+# Added by Stories 2.4, 3.4, 3.7 and the data lake (ADR 9): imported if an earlier apply made them, else planned.
 maybe aws_s3_account_public_access_block.account "$A"
 maybe aws_iam_role_policy.deploy_data_bucket calls-log-deploy:data-bucket
 maybe aws_iam_role_policy.deploy_parameters calls-log-deploy:parameters
@@ -72,6 +72,7 @@ maybe aws_iam_role_policy.deploy_alerts calls-log-deploy:alerts
 maybe aws_iam_role_policy.deploy_tables calls-log-deploy:tables
 maybe aws_iam_policy.workload_boundary "arn:aws:iam::$A:policy/calls-log-workload-boundary"
 maybe aws_iam_role_policy.deploy_lambda_platform calls-log-deploy:lambda-platform
+maybe aws_iam_role_policy.deploy_lake calls-log-deploy:lake
 
 echo
 echo "Plan:"

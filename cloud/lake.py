@@ -46,6 +46,26 @@ SESSION_COLUMNS = ("person_key", "work_date", "upload_id", "session_no", "start_
 UPLOAD_COLUMNS = ("upload_id", "person_key", "work_date", "image_count", "attempts", "ready_at",
                   "started_at", "finished_at", "status", "runner_memory_mb")
 
+# The lake's columns and their Athena types, in file order: the publisher's
+# Parquet schema and the Glue tables (infra/lake.tf) both follow it, and tests
+# compare it with the contract. work_month is the partition, in the path only.
+_TYPES = {
+    "person_key": "string", "work_date": "date", "upload_id": "string", "image_key": "string",
+    "call_seq": "int", "start_ts": "timestamp", "end_ts": "timestamp", "duration_s": "int",
+    "direction": "string", "call_status": "string", "countable": "boolean", "row_conf": "double",
+    "start_conf": "double", "duration_conf": "double", "flagged": "boolean", "flag_field": "string",
+    "flag_reason": "string", "parser_version": "string", "ocr_model": "string",
+    "session_no": "int", "span_min": "int", "call_count": "int", "source": "string",
+    "image_count": "int", "attempts": "int", "ready_at": "timestamp", "started_at": "timestamp",
+    "finished_at": "timestamp", "status": "string", "runner_memory_mb": "int",
+    "ingested_at": "timestamp",
+}
+COLUMN_TYPES = {
+    "calls": {c: _TYPES[c] for c in CALL_COLUMNS + ("ingested_at",)},
+    "sessions": {c: _TYPES[c] for c in SESSION_COLUMNS + ("ingested_at",)},
+    "uploads": {c: _TYPES[c] for c in UPLOAD_COLUMNS},
+}
+
 # Warning code -> the field it is about. parser.py and session_builder.py
 # write these; anything else becomes "other".
 FLAG_FIELDS = {

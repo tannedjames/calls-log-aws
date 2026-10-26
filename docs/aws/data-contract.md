@@ -12,8 +12,9 @@ record. No name, phone number, OCR text, file name or secret enters it.
 | Prefix | What | Kept |
 |---|---|---|
 | `staging/<Person-Day>/<uploadId>.json` | One Done upload's envelope, written by the runner while `/calls-log/lake_enabled` is `true` | 30 days |
-| `lake/<table>/work_month=YYYY-MM/<person_key>_<yyyy-mm-dd>.parquet` | Phase 2: the publisher's Parquet, one file per person, day and table, overwritten by a Re-run | Permanent, once the Owner agrees |
-| `quarantine/` | Phase 2: envelopes that failed a check | 30 days |
+| `lake/<table>/work_month=YYYY-MM/<person_key>_<yyyy-mm-dd>.parquet` | The publisher's Parquet, one file per person, day and table, overwritten by a Re-run | Permanent |
+| `quarantine/<Person-Day>/<uploadId>.json` | An envelope that failed a check: `{"problems": [...], "envelope": {...}}` | 30 days |
+| `athena-results/` | Athena's query results (workgroup `calls-log`) | 7 days |
 
 Only the staging key holds the Person-Day, the same way `results/` does. The
 envelope itself has none.
@@ -29,9 +30,9 @@ envelope itself has none.
 | `calls`, `sessions`, `uploads` | Lists of rows, columns exactly as below, in this order |
 
 The runner stages only Done uploads, after Folder Status says Done. The
-publisher (Phase 2) also drops an envelope whose upload is no longer Done or
-the day's choice (Held, Superseded, or chosen later), so only the day's
-current choice reaches the lake.
+publisher also drops an envelope whose upload is no longer Done or the day's
+choice (Held, Superseded, or chosen later), so only the day's current choice
+reaches the lake.
 
 Local times (`start_ts`, `end_ts`) are phone wall-clock times on the work
 date, with no time zone, written `yyyy-mm-ddTHH:MM:00`. An end before its
@@ -138,10 +139,52 @@ to `quarantine/`, a metric counts it, and `calls-log-alerts` emails.
   value; Phase 4.5 calibrates it on real days.
 - One `uploads` row: Done, with images and an attempt.
 
+## The publisher
+
+`cloud/publisher.py`, the `calls-log-publisher` function (`infra/lake.tf`). S3
+calls it for each new `staging/*.json`. For each envelope:
+
+1. It reads the upload in Folder Status. Unless the upload is Done and still
+   the day's choice, it drops the envelope.
+2. It runs `lake.check()`, and checks that `upload_id` and `work_date` match
+   the staged key. If anything fails, it writes the envelope and its problems
+   to `quarantine/`.
+3. Otherwise it writes the three tables as Parquet (snappy) to their fixed
+   keys, adding `ingested_at`. A Re-run, or a replay of the same envelope,
+   overwrites the same three files.
+
+Each envelope gives one JSON log line in CloudWatch's Embedded Metric Format.
+It counts `Published`, `Dropped` and `Quarantined` in the namespace
+`calls-log/lake` (dimension `Function = calls-log-publisher`), with the uploadId, the reason and the problems by position:
+never a name or a row. `calls-log-lake-quarantined` emails on any quarantine.
+`calls-log-publisher-errors` emails when an envelope fails outright; S3 retries
+it twice first. Neither alarm calls the kill switch.
+
+Parquet types follow `lake.COLUMN_TYPES`: `string`, `date` (date32), `int`
+(int32), `double`, `boolean`, and `timestamp` (milliseconds, no time zone).
+CI writes a made-up day and reads it back against the Glue columns
+(`tools/check_lake_parquet.py`).
+
+## Querying (Athena)
+
+Database `calls_log`, tables `calls`, `sessions` and `uploads`, workgroup
+`calls-log`. The workgroup enforces its settings: a query stops after 100 MB
+scanned, and its results go to `athena-results/` for 7 days. `work_month`
+(`yyyy-MM`) is a projected partition, so filter on it to read one month:
+
+```sql
+SELECT person_key, work_date, sum(span_min) / 60.0 AS hours
+FROM calls_log.sessions
+WHERE work_month = '2026-10'
+GROUP BY 1, 2
+ORDER BY 2, 1;
+```
+
 ## Changing the contract
 
 A new, renamed or retyped column bumps `schema_version`, and is made in this
-page, `cloud/lake.py` and the Glue tables in the same pull request. The
+page, `cloud/lake.py` (`COLUMN_TYPES`) and the Glue tables (`infra/lake.tf`)
+in the same pull request; tests compare all three. The
 publisher refuses any version it doesn't know. A new warning in the parser
 needs its code added above, or it arrives as `other`; a test lists the
 parser's warnings and fails until it is added.
