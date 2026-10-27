@@ -118,8 +118,8 @@ run "glue_tables_project_their_months_and_athena_is_capped" {
   command = plan
 
   assert {
-    condition     = toset(keys(aws_glue_catalog_table.lake)) == toset(["calls", "sessions", "uploads"])
-    error_message = "The lake has the contract's three tables."
+    condition     = toset(keys(aws_glue_catalog_table.lake)) == toset(["calls", "labels", "sessions", "uploads"])
+    error_message = "The lake has the contract's four tables."
   }
 
   assert {

@@ -8,7 +8,7 @@ first draft.
 ## 1. Store decision (ADR 9)
 
 Call and session rows go into an S3 data lake (Parquet + Glue Data Catalog +
-Athena). Status: proposed, pending the Owner's okay.
+Athena). Status: accepted (the Owner agreed on 2026-10-26).
 
 - DynamoDB `calls-log-folders` stays the status store.
 - Excel and Google Sheets stay the Owner's official record; the lake is additive only.
@@ -98,7 +98,7 @@ Seven phases; only Phase 3 touches the live flow, and only best-effort.
 ### Phase 0: Decide
 
 - [x] ADR 0009 and the data contract
-- [ ] Owner's okay on permanent storage of work data
+- [x] Owner's okay on permanent storage of work data (2026-10-26)
 - [ ] Add Glue, Athena and publisher IAM rights to the bootstrap boundary (CloudShell, by hand)
 
 Note: the bootstrap rights move into the Phase 2 pull request, so they match
@@ -132,27 +132,38 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 ### Phase 3: Turn on
 
 - [x] `lake_enabled = true` (set 2026-10-26, with the salt)
-- [ ] Verify Re-runs overwrite and Superseded uploads never appear
+- [x] A Re-run of a real day (2026-10-21) reached Athena: 95 calls, 8 flagged
+- [x] `tools/check_lake_choice.py`: lists every day whose lake file isn't its chosen Done upload (stale, missing, quarantined, orphan); read-only, from CloudShell
+- [ ] Over a week: check that Re-runs overwrite and Superseded uploads never appear (run the check above after a week of Re-runs)
 
 ### Phase 4: Backfill
 
-- [ ] Read-only script parses versioned `results/*.xlsx` (rows 7–22, columns B–D) into `sessions` with `source = 'xlsx_backfill'`
-- [ ] Never runs `main.py`, never touches the Sheets
+- [x] Read-only script parses the current `results/*.xlsx` (rows 7–22, columns B–C) into `sessions` with `source = 'xlsx_backfill'` (`tools/backfill_lake.py`); never overwrites a day the publisher wrote
+- [x] Never runs `main.py`, never touches the Sheets
+- [ ] Run once from CloudShell (docs/TECHNICAL.md §11)
 
 ### Phase 4.5: OCR accuracy
 
-- [ ] Ground truth: Synthetic Set, Reference Set, weekly spot-check of about 20 real calls in a private `labels` table, optional Superseded vs. chosen pairs
-- [ ] `ocr_quality` view: exact-match rate per field, mean error in seconds, low-confidence rate by day and person, calibration of the 0.85 threshold
+- [x] The private `labels` table (Glue, `lake/labels/`) and `tools/label_calls.py`: `sample` zips a worksheet of 20 recent calls (half flagged or low-confidence) with their screenshots, numbered rather than named; `import` checks the filled worksheet and writes the labels
+- [ ] Ground truth: weekly spot-check of about 20 real calls (needs someone to label them); the Synthetic Set is already exact in CI (`check_lake_parity.py`), the Reference Set stays on the PC
+- [x] `ocr_quality` view, label-free half: flagged and low-confidence counts per field, by day, person, model and parser version
+- [x] `ocr_accuracy` view: exact-match rate per field and mean duration error, by model, parser version and confidence band; `sql/examples/threshold_calibration.sql` shows the exact rate per 0.05 of confidence
+- [ ] Calibrate the 0.85 threshold and the 30% low-confidence limit (needs a few weeks of labels)
 - [ ] Report: `docs/aws/ocr-accuracy.md`
 
 ### Phase 5: Gold layer and portfolio
 
-- [ ] Views: `day_summary`, `weekly_attendance`, `pipeline_metrics` (turnaround p50/p95, images per day, cost per image)
-- [ ] `sql/` folder of example queries, ERD, lake diagram in `docs/aws/architecture.md`
-- [ ] README section with real aggregate production numbers (cost, turnaround, failure rate, OCR accuracy)
+- [x] Views: `day_summary`, `weekly_attendance`, `pipeline_metrics` (turnaround p50/p95, images per day, estimated GB-s per image) in `sql/views/`, created by `tools/lake_views.py`, checked in CI on DuckDB
+- [x] `sql/` folder of example queries, ERD (data contract), lake diagram in `docs/aws/architecture.md`
+- [x] README section on the data lake
+- [ ] Real aggregate production numbers (cost, turnaround, failure rate, OCR accuracy) after a month
 - [ ] Stretch: dbt-athena with dbt tests
 
 ### Phase 6: Demo environment and public dashboard
+
+Design proposed in [ADR 10](adr/0010-demo-environment-and-public-dashboard.md);
+it waits on the Owner's go-ahead and three choices (same account or not, the
+page's address, a public repo). Nothing below is built.
 
 - [ ] 6a. Same Terraform with `env = "demo"`: separate prefix, table, Glue database, workgroup, SSM; own $1 budget and kill switch; Sheets sync permanently off
 - [ ] 6a. Daily scheduled job runs `gen_synth.py` for 3–5 fictional employees and feeds the real pipeline end to end
@@ -183,7 +194,7 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 
 **Open items**
 
-- [ ] Owner's okay on permanent storage
+- [x] Owner's okay on permanent storage (2026-10-26)
 - [ ] Whether to backfill PC-era history (needs the Owner's go-ahead)
 - [ ] Who does the weekly spot-check labeling
 - [ ] Demo URL: AWS default or a custom domain

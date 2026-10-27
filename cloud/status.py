@@ -69,6 +69,12 @@ _CHOSEN = (Status.PENDING.value, Status.PROCESSING.value, Status.DONE.value,
            Status.FAILED.value, Status.PARKED.value)
 
 
+def chosen(uploads: list) -> Optional[Dict[str, Any]]:
+    """The day's current choice among its uploads: the chosen one made Ready last, as chosen_later ranks them."""
+    picks = [u for u in uploads if u.get("status") in _CHOSEN]
+    return max(picks, key=lambda u: (u.get("readyAt") or "", u.get("uploadId") or ""), default=None)
+
+
 class TransitionRefused(Exception):
     """The upload wasn't in a state this change starts from (or doesn't exist); nothing changed."""
 

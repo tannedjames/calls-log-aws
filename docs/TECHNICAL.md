@@ -53,6 +53,9 @@ above never import it.
 | `tools/put_parameters.py`, `tools/bench_lambda.py`, `tools/aws_cli.py` | From the PC: sets the secret parameters and the page's passphrase, runs the benchmark, and calls the AWS CLI for both (no boto3 on the PC). |
 | `tools/check_lake_parity.py` | CI, in the runner image: the records a Run would stage for the data lake match the Synthetic Set's ground truth. |
 | `tools/check_lake_parquet.py` | CI, with pyarrow only: the publisher's Parquet reads back with exactly the Glue tables' columns and types. |
+| `tools/backfill_lake.py`, `tools/lake_views.py` | From CloudShell: the stored Day Sheets' history into the data lake (once), and the lake's Athena views from `sql/views/` (§11). |
+| `tools/check_lake_choice.py`, `tools/label_calls.py` | From CloudShell: whether the lake holds each day's chosen upload, and the weekly hand labels for OCR accuracy (§11). Both only read, apart from the labels. |
+| `tools/check_lake_views.py` | CI, with pyarrow and DuckDB: every `sql/` view and example runs, and the views compute what they should. |
 | `infra/`, `infra/bootstrap/` | Terraform: everything in AWS. `docs/AWS_SETUP.md` has the manual steps. |
 
 ---
@@ -1040,6 +1043,67 @@ the Day Sheet or the Sheet, so nothing here is urgent for the Operator.
   the Day Sheets (Phase 4's backfill).
 - **Stopping it.** `put_parameters.py --lake-enabled false`: Runs stop staging.
   What is already in `lake/` stays.
+- **Backfilling history (once).** Days that finished before the lake was on
+  exist only as Day Sheets in `results/`. This reads each one and writes its
+  sessions (and its upload's times, for days AWS ran) to the lake, where no
+  file exists yet. It never changes a Day Sheet, a Sheet or Folder Status, and
+  prints person keys, never names. In CloudShell, from the unzipped `main`:
+  ```bash
+  pip3 install --user openpyxl pyarrow==24.0.0
+  python3 tools/backfill_lake.py --dry-run     # what it would write
+  python3 tools/backfill_lake.py
+  ```
+  A second run writes nothing new. A day that has a Day Sheet but no Done
+  upload in Folder Status is skipped and listed.
+- **Creating or updating the views.** The views (`day_summary`,
+  `weekly_attendance`, `pipeline_metrics`, `ocr_quality`, `ocr_accuracy`) are SQL files in
+  `sql/views/`; this creates or replaces them in Athena and reads one row from
+  each. Run it once, and again whenever `sql/views/` changes:
+  ```bash
+  python3 tools/lake_views.py
+  ```
+  Then, for example: `SELECT * FROM calls_log.day_summary WHERE work_month = '2026-10' ORDER BY work_date`.
+  More examples are in `sql/examples/`.
+- **Does the lake hold each day's choice?** After the backfill, and once a week
+  while Re-runs happen (Phase 3), check that the lake holds every day's
+  chosen upload and never a Superseded one. It only reads (one Folder Status
+  scan, one small Athena query):
+  ```bash
+  python3 tools/check_lake_choice.py
+  ```
+  Each day is `ok`, or `waiting` while its chosen upload isn't Done yet. It
+  lists the others by person key: `stale` (the lake holds another upload than
+  the Done choice; replay its envelope, or Re-run the day), `missing` (Done but
+  not in the lake; replay, or run the backfill), `quarantined` (see above) and
+  `orphan` (a lake day no Folder Status day matches) and `shared` (two
+  spellings of one name on one date: the lake keeps only one, so Re-run the
+  day under one spelling). Exit code 1 means one of those.
+- **Labelling calls for OCR accuracy (weekly, about 15 minutes).** The
+  `ocr_accuracy` view compares what the OCR read with what a person read off
+  the screenshot. Each week, in CloudShell:
+  ```bash
+  python3 tools/label_calls.py sample        # writes ~/calls-log-labels/labels-<time>.zip
+  ```
+  Download the zip (**Actions → Download file**, with the path it printed) and
+  unzip it: it holds the worksheet `labels-<time>.csv` and the sampled
+  screenshots, numbered `01.png`, `02.png`, …. Open the CSV in Excel or Google
+  Sheets. For each row, open the screenshot its `image` column names, find the
+  call by `ocr_start` and `ocr_duration`, and fill in `true_start` (HH:MM, as
+  on the screen), `true_duration` (`1m 23s` is safest; `83` or `1:23` also work; `0` for a
+  missed call) or put `x` in `not_a_call`. Leave `ref` as it is. Save as CSV,
+  upload it to CloudShell (**Actions → Upload file**; it lands in your home
+  folder, and its name doesn't matter), and:
+  ```bash
+  python3 tools/label_calls.py import ~/labels-<time>.csv --dry-run
+  python3 tools/label_calls.py import ~/labels-<time>.csv
+  ```
+  A wrong entry stops the import with its line number; nothing is written
+  until every row reads. Importing the same file again replaces its labels.
+  The import also deletes the sample's screenshots from CloudShell. Half the
+  sample is flagged or low-confidence calls, so read accuracy per
+  `conf_band`: `SELECT * FROM calls_log.ocr_accuracy`. The zip holds
+  employees' screenshots: delete it and its folder from your computer once
+  imported, and never put either in the repo.
 
 ### Who writes to the Sheets (the two switches)
 

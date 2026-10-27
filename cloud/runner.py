@@ -365,6 +365,10 @@ def _clients() -> Dict[str, Any]:
         _aws.update(ssm=ssm, sns=boto3.client("sns"), settings=current,
                     status=FolderStatus(boto3.client("dynamodb"), current.table),
                     storage=S3Storage(boto3.client("s3"), current.bucket))
+    elif _aws.get("ssm") is not None:
+        # A warm container can live for hours: re-take the settings through load()'s 15-minute
+        # cache, so a changed parameter (the Web App, name prefixes, the salt) reaches it too.
+        _aws["settings"] = settings_mod.load(_aws["ssm"])
     return _aws
 
 

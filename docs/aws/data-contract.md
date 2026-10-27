@@ -12,7 +12,8 @@ record. No name, phone number, OCR text, file name or secret enters it.
 | Prefix | What | Kept |
 |---|---|---|
 | `staging/<Person-Day>/<uploadId>.json` | One Done upload's envelope, written by the runner while `/calls-log/lake_enabled` is `true` | 30 days |
-| `lake/<table>/work_month=YYYY-MM/<person_key>_<yyyy-mm-dd>.parquet` | The publisher's Parquet, one file per person, day and table, overwritten by a Re-run | Permanent |
+| `lake/<table>/work_month=YYYY-MM/<person_key>_<yyyy-mm-dd>.parquet` | The publisher's Parquet, one file per person, day and table, overwritten by a Re-run | Permanent (a version a Re-run replaced: 30 days) |
+| `lake/labels/work_month=YYYY-MM/<batch>.parquet` | Hand labels, one file per labelling batch and month, written by `tools/label_calls.py import` (re-importing a batch replaces it) | Permanent |
 | `quarantine/<Person-Day>/<uploadId>.json` | An envelope that failed a check: `{"problems": [...], "envelope": {...}}` | 30 days |
 | `athena-results/` | Athena's query results (workgroup `calls-log`) | 7 days |
 
@@ -80,8 +81,8 @@ One row per Day Sheet row (7 to 22), as `build_sessions` made it.
 | `start_ts` | timestamp | no | Column B, local |
 | `end_ts` | timestamp | no | Column C, local |
 | `span_min` | int | no | Column D in minutes; B2 is their sum |
-| `call_count` | int | no | Countable calls merged into it |
-| `source` | string | no | `runner`; `xlsx_backfill` for rows read from stored Day Sheets (Phase 4) |
+| `call_count` | int | yes | Countable calls merged into it; null for `xlsx_backfill` rows (a Day Sheet doesn't record it) |
+| `source` | string | no | `runner`; `xlsx_backfill` for rows read from stored Day Sheets (`tools/backfill_lake.py`) |
 | `ingested_at` | timestamp | no | Added by the publisher, UTC |
 
 ### `uploads`
@@ -100,6 +101,34 @@ One row per staged upload: how the Run went.
 | `finished_at` | timestamp | yes | When it was marked Done, UTC |
 | `status` | string | no | `Done` |
 | `runner_memory_mb` | int | yes | The Lambda's memory; null outside Lambda |
+
+### `labels`
+
+Hand labels for OCR accuracy (Phase 4.5). They aren't in the envelope: the
+Owner samples calls with `tools/label_calls.py sample`, reads each one off its
+screenshot, and imports the worksheet. Each label keeps a copy of what the OCR
+read, so it stays meaningful after a Re-run replaces the call.
+
+| Column | Type | Null | Meaning |
+|---|---|---|---|
+| `person_key` | string | no | As in `calls` |
+| `work_date` | date | no | As in `calls` |
+| `upload_id` | string | no | The upload the labelled call came from |
+| `image_key` | string | no | As in `calls` |
+| `call_seq` | int | no | As in `calls`; with `upload_id`, the call |
+| `ocr_start_ts` | timestamp | no | The call's `start_ts` when it was sampled |
+| `ocr_duration_s` | int | yes | Its `duration_s` |
+| `row_conf` | double | no | Its `row_conf` |
+| `start_conf` | double | yes | Its `start_conf` |
+| `duration_conf` | double | yes | Its `duration_conf` |
+| `flagged` | boolean | no | Its `flagged` |
+| `parser_version` | string | no | Its `parser_version` |
+| `ocr_model` | string | no | Its `ocr_model` |
+| `real_call` | boolean | no | False when the OCR's row isn't a call at all |
+| `true_start_ts` | timestamp | yes | The start as read off the screen, local; null when not a call |
+| `true_duration_s` | int | yes | The duration as read off the screen, 0 for a missed call; null when not a call |
+| `batch` | string | no | The sample, `labels-yyyymmddTHHMMSSZ` |
+| `labelled_at` | timestamp | no | When the worksheet was imported, UTC |
 
 ## Flag codes
 
@@ -167,7 +196,7 @@ CI writes a made-up day and reads it back against the Glue columns
 
 ## Querying (Athena)
 
-Database `calls_log`, tables `calls`, `sessions` and `uploads`, workgroup
+Database `calls_log`, tables `calls`, `sessions`, `uploads` and `labels`, workgroup
 `calls-log`. The workgroup enforces its settings: a query stops after 100 MB
 scanned, and its results go to `athena-results/` for 7 days. `work_month`
 (`yyyy-MM`) is a projected partition, so filter on it to read one month:
@@ -180,9 +209,89 @@ GROUP BY 1, 2
 ORDER BY 2, 1;
 ```
 
+## History from stored Day Sheets (backfill)
+
+`tools/backfill_lake.py` runs once from CloudShell. For each current
+`results/<Person-Day>.xlsx` it finds the day's chosen Done upload in Folder
+Status (made Ready last; a PC import counts only when nothing else is Done),
+reads the sheet's session rows with the PC's own reader, and writes:
+
+- `sessions` rows with `source = 'xlsx_backfill'` and `call_count` null;
+- the `uploads` row when the upload was a Run (a PC import has no times), with
+  `runner_memory_mb` null;
+- no `calls` rows: a Day Sheet doesn't hold them.
+
+It writes to the publisher's fixed keys, and only where no file exists yet. A
+day the publisher already wrote keeps its richer rows, and a later Re-run's
+publish replaces a backfilled file. Rows pass the same session checks
+(numbered, start before end, `span_min` agreeing, sorted, no overlap); a day
+that fails is skipped and reported by person_key, never by name.
+
+## Views
+
+Plain SQL in `sql/views/`, created in the `calls_log` database by
+`tools/lake_views.py` (in this order, since `weekly_attendance` reads
+`day_summary`). CI runs them, and every `sql/examples/` query, on DuckDB over
+real Parquet (`tools/check_lake_views.py`).
+
+| View | One row per | Columns |
+|---|---|---|
+| `day_summary` | person and day | `work_month`, `person_key`, `work_date`, `source`, `sessions`, `span_min`, `hours`, `first_start`, `last_end`, `calls`, `countable_calls`, `flagged_calls` (the last three null for backfilled days) |
+| `weekly_attendance` | person and week (from Monday) | `person_key`, `week_start`, `days_worked`, `span_min`, `hours`, `avg_hours_per_day` |
+| `pipeline_metrics` | day a Run finished | `finished_date`, `uploads`, `images`, `retried`, `turnaround_p50_s`, `turnaround_p95_s`, `run_p50_s`, `est_gb_s`, `est_gb_s_per_image` (GB-s are estimates: Run seconds × memory; a resumed Run counts its last start only) |
+| `ocr_quality` | day, person, model and parser version | `work_month`, `work_date`, `person_key`, `ocr_model`, `parser_version`, `calls`, `flagged`, `low_row_conf`, `low_start_conf`, `low_duration_conf`, `mean_row_conf`, `min_start_conf`, `min_duration_conf` (the label-free half of OCR accuracy) |
+| `ocr_accuracy` | model, parser version and confidence band | `ocr_model`, `parser_version`, `conf_band` (`high` at or over 0.85, `low`, `unknown`), `labelled`, `not_a_call`, `calls`, `start_exact`, `duration_exact`, `both_exact`, `start_exact_rate`, `duration_exact_rate`, `duration_mean_error_s` (the labelled half: a start must match to the minute, a duration to the second; a call labelled twice counts once, by its latest label; calls the OCR missed altogether aren't measured) |
+
+```mermaid
+erDiagram
+    uploads ||--o{ calls : "upload_id"
+    uploads ||--o{ sessions : "upload_id"
+    sessions }o--|| day_summary : "person_key, work_date"
+    calls }o--|| day_summary : "person_key, work_date"
+    day_summary }o--|| weekly_attendance : "person_key, week"
+    uploads }o--|| pipeline_metrics : "finished date"
+    calls }o--|| ocr_quality : "person_key, work_date"
+    calls ||--o{ labels : "upload_id, call_seq"
+    labels }o--|| ocr_accuracy : "model, band"
+    uploads {
+        string upload_id
+        string person_key
+        date work_date
+        int image_count
+        timestamp ready_at
+        timestamp finished_at
+    }
+    calls {
+        string person_key
+        date work_date
+        int call_seq
+        timestamp start_ts
+        int duration_s
+        double row_conf
+        boolean flagged
+    }
+    labels {
+        string upload_id
+        int call_seq
+        timestamp ocr_start_ts
+        timestamp true_start_ts
+        int true_duration_s
+        boolean real_call
+    }
+    sessions {
+        string person_key
+        date work_date
+        int session_no
+        timestamp start_ts
+        int span_min
+        string source
+    }
+```
+
 ## Changing the contract
 
-A new, renamed or retyped column bumps `schema_version`, and is made in this
+A new, renamed or retyped envelope column bumps `schema_version` (`labels`
+isn't in the envelope, so its columns don't), and any column change is made in this
 page, `cloud/lake.py` (`COLUMN_TYPES`) and the Glue tables (`infra/lake.tf`)
 in the same pull request; tests compare all three. The
 publisher refuses any version it doesn't know. A new warning in the parser

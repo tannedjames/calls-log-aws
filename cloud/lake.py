@@ -45,6 +45,13 @@ SESSION_COLUMNS = ("person_key", "work_date", "upload_id", "session_no", "start_
                    "span_min", "call_count", "source")
 UPLOAD_COLUMNS = ("upload_id", "person_key", "work_date", "image_count", "attempts", "ready_at",
                   "started_at", "finished_at", "status", "runner_memory_mb")
+# Hand labels for OCR accuracy (Phase 4.5, tools/label_calls.py): not in the
+# envelope; the Owner writes them from CloudShell. What the OCR read is copied
+# in, so a Re-run that replaces the call keeps its label's meaning.
+LABEL_COLUMNS = ("person_key", "work_date", "upload_id", "image_key", "call_seq", "ocr_start_ts",
+                 "ocr_duration_s", "row_conf", "start_conf", "duration_conf", "flagged", "parser_version",
+                 "ocr_model", "real_call", "true_start_ts", "true_duration_s", "batch", "labelled_at")
+ENVELOPE_TABLES = ("calls", "sessions", "uploads")
 
 # The lake's columns and their Athena types, in file order: the publisher's
 # Parquet schema and the Glue tables (infra/lake.tf) both follow it, and tests
@@ -59,11 +66,14 @@ _TYPES = {
     "image_count": "int", "attempts": "int", "ready_at": "timestamp", "started_at": "timestamp",
     "finished_at": "timestamp", "status": "string", "runner_memory_mb": "int",
     "ingested_at": "timestamp",
+    "ocr_start_ts": "timestamp", "ocr_duration_s": "int", "real_call": "boolean",
+    "true_start_ts": "timestamp", "true_duration_s": "int", "batch": "string", "labelled_at": "timestamp",
 }
 COLUMN_TYPES = {
     "calls": {c: _TYPES[c] for c in CALL_COLUMNS + ("ingested_at",)},
     "sessions": {c: _TYPES[c] for c in SESSION_COLUMNS + ("ingested_at",)},
     "uploads": {c: _TYPES[c] for c in UPLOAD_COLUMNS},
+    "labels": {c: _TYPES[c] for c in LABEL_COLUMNS},
 }
 
 # Warning code -> the field it is about. parser.py and session_builder.py
@@ -253,6 +263,56 @@ def payload(day: naming.PersonDay, upload_id: str, *, image_names: Sequence[str]
 
 
 # ---------------------------------------------------------------------------
+# History from stored Day Sheets (Phase 4: tools/backfill_lake.py)
+# ---------------------------------------------------------------------------
+
+def backfill_rows(day: naming.PersonDay, upload: Dict[str, Any], pairs: Sequence[Tuple[str, str]], *,
+                  salt: str, prefixes: Iterable[str] = ()) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    A stored Day Sheet's sessions as lake rows (source xlsx_backfill), and the
+    upload's row when it was a Run (not a PC import). `pairs` are the sheet's
+    (start, end) rows as resync_output.read_sessions gives them; `upload` is
+    its Folder Status item. A Day Sheet doesn't record call counts, so
+    call_count is null.
+    """
+    key = person_key(day.name, salt, prefixes)
+    ids = {"person_key": key, "work_date": day.date, "upload_id": upload["uploadId"]}
+    sessions = []
+    for i, (start, end) in enumerate(pairs, 1):
+        a, b = (int(t[:2]) * 60 + int(t[3:5]) for t in (start, end))
+        sessions.append({**ids, "session_no": i, "start_ts": _ts(day.date, start),
+                         "end_ts": _ts(day.date, end, after=start), "span_min": b - a,
+                         "call_count": None, "source": "xlsx_backfill"})
+    uploads = []
+    if upload.get("imported") != "true":
+        uploads.append({"upload_id": upload["uploadId"], "person_key": key, "work_date": day.date,
+                        "image_count": upload.get("imageCount"), "attempts": upload.get("attempts"),
+                        "ready_at": upload.get("readyAt"), "started_at": upload.get("lastRunAt"),
+                        "finished_at": upload.get("updatedAt"), "status": upload.get("status"),
+                        "runner_memory_mb": None})
+    return {"sessions": sessions, "uploads": uploads}
+
+
+def check_sessions(sessions: Sequence[Dict[str, Any]]) -> List[str]:
+    """Sessions numbered 1..n, each start <= end with span_min agreeing, sorted, no overlap."""
+    problems = []
+    for i, s in enumerate(sessions):
+        where = f"sessions[{i}]"
+        if s["session_no"] != i + 1:
+            problems.append(f"{where}: session_no is not {i + 1}")
+        if s["call_count"] is not None and s["call_count"] < 1:
+            problems.append(f"{where}: no calls")
+        if s["end_ts"] < s["start_ts"]:
+            problems.append(f"{where}: end_ts before start_ts")
+        # A session over midnight fails here on purpose: its Day Sheet span is negative.
+        elif s["span_min"] != _minutes(s["start_ts"], s["end_ts"]):
+            problems.append(f"{where}: span_min disagrees with end_ts - start_ts")
+        if i and sessions[i - 1]["end_ts"] > s["start_ts"]:
+            problems.append(f"{where}: overlaps the session before it")
+    return problems
+
+
+# ---------------------------------------------------------------------------
 # Quality checks: Athena takes any row, so the publisher only writes an
 # envelope this finds nothing wrong with. Problems name rows by position,
 # never by content.
@@ -319,25 +379,14 @@ def _check(p: Dict[str, Any]) -> List[str]:
         elif abs(_minutes(c["start_ts"], c["end_ts"]) - c["duration_s"] / 60) > 1:
             problems.append(f"{where}: end_ts - start_ts disagrees with duration_s")
 
-    for i, s in enumerate(sessions):
-        where = f"sessions[{i}]"
-        if s["session_no"] != i + 1:
-            problems.append(f"{where}: session_no is not {i + 1}")
-        if s["call_count"] < 1:
-            problems.append(f"{where}: no calls")
-        if s["end_ts"] < s["start_ts"]:
-            problems.append(f"{where}: end_ts before start_ts")
-        # A session over midnight fails here on purpose: its Day Sheet span is negative.
-        elif s["span_min"] != _minutes(s["start_ts"], s["end_ts"]):
-            problems.append(f"{where}: span_min disagrees with end_ts - start_ts")
-        if i and sessions[i - 1]["end_ts"] > s["start_ts"]:
-            problems.append(f"{where}: overlaps the session before it")
+    problems += check_sessions(sessions)
+    problems += [f"sessions[{i}]: no calls" for i, s in enumerate(sessions) if s["call_count"] is None]
     if not sessions:
         problems.append("no sessions: a Done upload always has one")
 
     # Every countable call is in exactly one session (drop_standalone_zero_sessions off).
     countable = sum(1 for c in calls if c["countable"] and c["end_ts"] is not None)
-    if sum(s["call_count"] for s in sessions) != countable:
+    if sum(s["call_count"] or 0 for s in sessions) != countable:
         problems.append("the sessions' call_count total differs from the countable calls")
     sheet = p["day_sheet"]
     if sheet.get("sessions") != len(sessions) or sheet.get("span_min") != sum(s["span_min"] for s in sessions):

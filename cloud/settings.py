@@ -136,8 +136,14 @@ def sync_enabled(ssm: Any = None) -> bool:
 
 
 def lake_enabled(ssm: Any = None) -> bool:
-    """The data lake's switch (ADR 9), read now. Only "true" turns it on; an error raises."""
-    return _switch(LAKE_SWITCH, ssm)
+    """The data lake's switch (ADR 9), read now. Only "true" turns it on; a missing parameter is off
+    (an image deployed before the parameter exists stays quiet); any other error raises."""
+    try:
+        return _switch(LAKE_SWITCH, ssm)
+    except Exception as e:
+        if getattr(e, "response", {}).get("Error", {}).get("Code") == "ParameterNotFound":
+            return False
+        raise
 
 
 def configure_core(settings: Settings, *, sync_on: bool, config: Any = None) -> None:

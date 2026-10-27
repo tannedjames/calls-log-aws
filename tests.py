@@ -4377,7 +4377,8 @@ def test_contract_doc_lists_exactly_the_lake_columns_and_codes():
     assert "`schema_version = 1`" in text
     for table, columns, publisher in (("calls", lake.CALL_COLUMNS, ["ingested_at"]),
                                       ("sessions", lake.SESSION_COLUMNS, ["ingested_at"]),
-                                      ("uploads", lake.UPLOAD_COLUMNS, [])):
+                                      ("uploads", lake.UPLOAD_COLUMNS, []),
+                                      ("labels", lake.LABEL_COLUMNS, [])):
         section = text.split(f"### `{table}`")[1].split("\n### ")[0].split("\n## ")[0]
         listed = _re.findall(r"^\| `([a-z_]+)` \| (\w+) \|", section, _re.M)
         assert [c for c, _ in listed] == list(columns) + publisher, (table, listed)
@@ -4533,7 +4534,7 @@ def test_publisher_quarantines_what_fails_the_checks_without_naming_anyone():
 
 def test_publisher_tables_type_every_contract_column():
     rows = publisher.tables(_lake_payload(), _dt.datetime(2026, 6, 1, 2, 3, 5))
-    assert {t: list(r[0]) for t, r in rows.items()} == {t: list(c) for t, c in lake.COLUMN_TYPES.items()}
+    assert {t: list(r[0]) for t, r in rows.items()} == {t: list(lake.COLUMN_TYPES[t]) for t in lake.ENVELOPE_TABLES}
     call, missed, session, upload = rows["calls"][0], rows["calls"][3], rows["sessions"][0], rows["uploads"][0]
     assert call["work_date"] == _dt.date(2026, 6, 1) and call["start_ts"] == _dt.datetime(2026, 6, 1, 8, 0)
     assert call["countable"] is True and isinstance(call["row_conf"], float) and call["duration_s"] == 1200
@@ -4580,4 +4581,498 @@ def test_glue_tables_in_infra_match_the_lake_columns():
     tables = {t: _re.findall(r'\["(\w+)", "(\w+)"\]', body)
               for t, body in _re.findall(r"(\w+) = \[(.*?)\n    \]", block, _re.S)}
     assert tables == {t: list(c.items()) for t, c in lake.COLUMN_TYPES.items()}, tables
+
+
+
+# ---------------------------------------------------------------------------
+# The data lake's history and views (ADR 9 Phases 4 and 5): the backfill
+# from stored Day Sheets, the Athena views tool and the SQL files. AWS is a
+# fake CLI; Parquet is a JSON stand-in (tools/check_lake_views.py runs the
+# real SQL on DuckDB in CI). All values are fictional.
+# ---------------------------------------------------------------------------
+
+from tools import backfill_lake, lake_views
+
+_BF_SALT = "fictional-backfill-salt"
+_BF_TEMPLATE = Path(__file__).resolve().parent / "sprs.xlsx"
+
+
+def _day_sheet_bytes(pairs):
+    sessions = [Session(i, a, b, (int(b[:2]) * 60 + int(b[3:])) - (int(a[:2]) * 60 + int(a[3:])), 1)
+                for i, (a, b) in enumerate(pairs, 1)]
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(excel_writer, "log"):
+        path = Path(d) / "day.xlsx"
+        excel_writer.write_sessions(_BF_TEMPLATE, path, sessions)
+        return path.read_bytes()
+
+
+class _FakeBackfillCli:
+    """subprocess.run under the AWS CLI: SSM, S3 objects and Folder Status in memory."""
+
+    def __init__(self, status_dynamo, objects, salt=_BF_SALT):
+        self.dynamo, self.objects, self.salt = status_dynamo, dict(objects), salt
+        self.puts, self.log = {}, []
+        self.written_meanwhile = set()   # keys the publisher writes between head-object and put-object
+
+    def __call__(self, cmd, capture_output, text, encoding, errors):
+        payload = None
+        if "--cli-input-json" in cmd:
+            payload = json.loads(Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://")).read_bytes())
+        op = f"{cmd[1]} {cmd[2]}"
+        self.log.append(op)
+        if op == "sts get-caller-identity":
+            return _ok('{"Account": "123456789012"}')
+        if op == "ssm get-parameters":
+            return _ok(json.dumps({"Parameters": [
+                {"Name": "/calls-log/person_salt", "Value": self.salt},
+                {"Name": "/calls-log/name_prefixes", "Value": json.dumps(list(_LAKE_PREFIXES))}]}))
+        if cmd[1] == "dynamodb":
+            return _ok(json.dumps(getattr(self.dynamo, cmd[2].replace("-", "_"))(**payload), ensure_ascii=False))
+        assert payload is None or payload.get("Bucket") == "calls-log-data-123456789012", payload
+        if op == "s3api list-objects-v2":
+            return _ok(json.dumps({"Contents": [{"Key": k} for k in sorted(self.objects)
+                                                if k.startswith(payload["Prefix"])]}, ensure_ascii=False))
+        if op == "s3api get-object":
+            Path(cmd[5]).write_bytes(self.objects[payload["Key"]])
+            return _ok("{}")
+        if op == "s3api head-object":
+            if payload["Key"] in self.objects or payload["Key"] in self.puts:
+                return _ok("{}")
+            return SimpleNamespace(returncode=254, stdout="", stderr=(
+                "An error occurred (404) when calling the HeadObject operation: Not Found"))
+        if op == "s3api put-object":
+            key = payload["Key"]
+            if payload.get("IfNoneMatch") == "*" and (key in self.objects or key in self.puts
+                                                      or key in self.written_meanwhile):
+                return SimpleNamespace(returncode=254, stdout="", stderr=(
+                    "An error occurred (PreconditionFailed) when calling the PutObject operation: "
+                    "At least one of the pre-conditions you specified did not hold"))
+            self.puts[key] = json.loads(Path(cmd[cmd.index("--body") + 1]).read_bytes())
+            return _ok("{}")
+        raise AssertionError(f"unexpected AWS call {cmd}")
+
+
+def _bf_world():
+    dyn = _FakeDynamo()
+    store = FolderStatus(dyn, "calls-log-folders", lambda: 1_780_000_000.0)
+    a, b, c, d = ("Nguyen Van A & 2026-06-01", "Tran Thi B & 2026-06-02",
+                  "Nguyen Van A & 2026-06-03", "Tran Thi B & 2026-06-04")
+    store.record_import(a, "20260520T000000Z-00000001")          # the PC's copy, older
+    store.create(a, _RUN_UP, 3)                                  # then an upload: Held, the day has one
+    store.mark_ready(a, _RUN_UP)
+    store.requeue(a, _RUN_UP)                                    # its Re-run makes it the day's choice
+    store.begin_run(a, _RUN_UP, "h")
+    store.finish(a, _RUN_UP)
+    store.release_lease(a, "h")
+    store.record_import(b, "20260520T000000Z-00000002")          # a PC day only
+    store.create(c, "20260603T080000Z-0c0c0c0c", 2)              # never Done
+    store.mark_ready(c, "20260603T080000Z-0c0c0c0c")
+    store.record_import(d, "20260520T000000Z-00000004")          # already in the lake
+    key_d = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
+    objects = {f"results/{a}.xlsx": _day_sheet_bytes([("08:00", "09:00"), ("10:00", "11:30")]),
+               f"results/{b}.xlsx": _day_sheet_bytes([("09:00", "12:00")]),
+               f"results/{c}.xlsx": _day_sheet_bytes([("08:00", "08:30")]),
+               f"results/{d}.xlsx": _day_sheet_bytes([("08:00", "08:30")]),
+               "results/notes.txt": b"not a Day Sheet",
+               f"lake/sessions/work_month=2026-06/{key_d}_2026-06-04.parquet": b"published"}
+    return dyn, objects
+
+
+def _bf_run(argv, cli):
+    write = lambda table, rows: json.dumps(rows, default=str).encode("utf-8")
+    with redirect_stdout(io.StringIO()) as out:
+        code = backfill_lake.main(argv, run=cli, write=write)
+    return code, out.getvalue()
+
+
+def test_lake_check_sessions_allows_backfill_rows_and_catches_faults():
+    rows = lake.backfill_rows(naming.PersonDay("Nguyen Van A", "2026-06-01"), {"uploadId": _RUN_UP, "imported": "true"},
+                              [("08:00", "09:00"), ("10:00", "11:30")], salt=_BF_SALT)
+    assert rows["uploads"] == [] and lake.check_sessions(rows["sessions"]) == []
+    assert {(s["source"], s["call_count"]) for s in rows["sessions"]} == {("xlsx_backfill", None)}
+    assert [s["span_min"] for s in rows["sessions"]] == [60, 90]
+    overlap = copy.deepcopy(rows["sessions"])
+    overlap[1]["start_ts"] = "2026-06-01T08:30:00"
+    assert any("overlaps" in p for p in lake.check_sessions(overlap))
+    assert any("span_min" in p for p in lake.check_sessions([{**rows["sessions"][0], "span_min": 59}]))
+    p = _lake_payload()
+    p["sessions"][0]["call_count"] = None   # a runner envelope must still count its calls
+    assert any("no calls" in x for x in lake.check(p))
+
+
+def test_backfill_writes_history_once_without_overwriting_or_naming_anyone():
+    dyn, objects = _bf_world()
+    cli = _FakeBackfillCli(dyn, objects)
+    code, said = _bf_run([], cli)
+    key_a = lake.person_key("Nguyen Van A", _BF_SALT, _LAKE_PREFIXES)
+    key_b = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
+    assert code == 0, said
+    assert sorted(cli.puts) == sorted([
+        f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet",
+        f"lake/uploads/work_month=2026-06/{key_a}_2026-06-01.parquet",   # a Run: its upload row too
+        f"lake/sessions/work_month=2026-06/{key_b}_2026-06-02.parquet"])  # a PC import: sessions only
+    a_sessions = cli.puts[f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet"]
+    assert [(s["upload_id"], s["source"], s["call_count"], s["span_min"]) for s in a_sessions] == [
+        (_RUN_UP, "xlsx_backfill", None, 60), (_RUN_UP, "xlsx_backfill", None, 90)]   # the Run, not the import
+    assert list(a_sessions[0]) == list(lake.COLUMN_TYPES["sessions"])
+    assert json.loads(said.strip().splitlines()[-1]) == {
+        "written": 2, "in_lake": 1, "no_upload": 1, "failed_check": 0, "not_a_day_sheet": 1}
+    for private in ("Nguyen", "Tran", _BF_SALT):
+        assert private not in said and not any(private in k for k in cli.puts), private
+    assert not any(k.startswith("results/") for k in cli.puts)   # the Day Sheets are only read
+    again = _FakeBackfillCli(dyn, {**objects, **{k: b"x" for k in cli.puts}})
+    assert _bf_run([], again)[0] == 0 and again.puts == {}       # a second run writes nothing
+    dry = _FakeBackfillCli(dyn, objects)
+    code, said = _bf_run(["--dry-run"], dry)
+    assert code == 0 and dry.puts == {} and "would write" in said
+
+
+def test_backfill_finishes_a_half_written_day_and_never_overwrites_the_publisher():
+    dyn, objects = _bf_world()
+    key_a = lake.person_key("Nguyen Van A", _BF_SALT, _LAKE_PREFIXES)
+    key_b = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
+    sessions_a = f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet"
+    uploads_a = f"lake/uploads/work_month=2026-06/{key_a}_2026-06-01.parquet"
+    sessions_b = f"lake/sessions/work_month=2026-06/{key_b}_2026-06-02.parquet"
+    cli = _FakeBackfillCli(dyn, {**objects, sessions_a: b"written before the uploads put failed"})
+    cli.written_meanwhile.add(sessions_b)   # the publisher writes day 2 while the backfill runs
+    code, said = _bf_run([], cli)
+    assert code == 0, said
+    assert sorted(cli.puts) == [uploads_a], said                    # only the missing file, nothing over day 2
+    assert cli.log.count("s3api get-object") == 1, cli.log           # day 2's sheet only: day 1 needs no sessions
+    assert json.loads(said.strip().splitlines()[-1])["written"] == 1 and "wrote " in said
+    assert json.loads(said.strip().splitlines()[-1])["in_lake"] == 2
+
+
+def test_backfill_needs_the_salt_and_reports_aws_failures():
+    dyn, objects = _bf_world()
+    try:
+        _bf_run([], _FakeBackfillCli(dyn, objects, salt="unset"))
+    except SystemExit as e:
+        assert "person_salt is unset" in str(e)
+    else:
+        raise AssertionError("no salt must stop the backfill")
+    broken = _FakeBackfillCli(dyn, objects)
+    real = broken.__call__
+
+    def refuse_lists(cmd, **kw):
+        if cmd[1:3] == ["s3api", "list-objects-v2"]:
+            return SimpleNamespace(returncode=254, stdout="", stderr="An error occurred (AccessDenied) when calling")
+        return real(cmd, **kw)
+
+    with redirect_stderr(io.StringIO()):
+        assert backfill_lake.main([], run=refuse_lists, write=lambda t, r: b"") == 1
+
+
+def test_lake_views_creates_each_view_in_order_and_reads_it():
+    if not lake_views.VIEWS_DIR.is_dir():   # sql/ isn't in the runner image
+        return
+    sent, states = [], {}
+
+    def run(cmd, capture_output, text, encoding, errors):
+        payload = json.loads(Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://")).read_bytes())
+        if cmd[1:3] == ["athena", "start-query-execution"]:
+            assert (payload["WorkGroup"], payload["QueryExecutionContext"]["Database"]) == ("calls-log", "calls_log")
+            sent.append(payload["QueryString"])
+            qid = f"q{len(sent)}"
+            states[qid] = ("FAILED", "line 1: Column 'x' cannot be resolved") if "ocr_quality LIMIT" in sent[-1] \
+                else ("SUCCEEDED", "")
+            return _ok(json.dumps({"QueryExecutionId": qid}))
+        if cmd[1:3] == ["athena", "get-query-execution"]:
+            state, why = states[payload["QueryExecutionId"]]
+            return _ok(json.dumps({"QueryExecution": {"Status": {"State": state, "StateChangeReason": why}}}))
+        raise AssertionError(cmd)
+
+    with redirect_stdout(io.StringIO()) as out:
+        code = lake_views.main([], run=run, sleep=lambda s: None)
+    creates = [q for q in sent if q.startswith("CREATE")]
+    assert [q.split()[4] for q in creates] == [f"calls_log.{v}" for v in lake_views.VIEWS]
+    assert all(not q.lstrip().startswith("--") and not q.endswith(";") for q in sent)
+    assert code == 1 and "calls_log.ocr_quality: FAILED: line 1" in out.getvalue()
+    assert "calls_log.day_summary: created, reads OK" in out.getvalue()
+    with redirect_stdout(io.StringIO()) as listed:
+        assert lake_views.main(["--list"], run=lambda *a, **k: (_ for _ in ()).throw(AssertionError())) == 0
+    assert "calls_log.weekly_attendance" in listed.getvalue()
+
+
+def test_lake_sql_creates_only_views_and_reads_only_the_lake():
+    root = Path(__file__).resolve().parent / "sql"
+    if not root.is_dir():   # sql/ isn't in the runner image
+        return
+    views = sorted(p.stem for p in (root / "views").glob("*.sql"))
+    assert views == sorted(lake_views.VIEWS)
+    known = set(lake.COLUMN_TYPES) | set(lake_views.VIEWS)
+    forbidden = _re.compile(r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|MERGE|MSCK|UNLOAD|GRANT)\b", _re.I)
+    for path in sorted(root.glob("*/*.sql")):
+        sql = lake_views.statement(path)
+        assert not forbidden.search(sql), path
+        assert set(_re.findall(r"calls_log\.(\w+)", sql)) <= known, path
+        if path.parent.name == "views":
+            assert sql.startswith(f"CREATE OR REPLACE VIEW calls_log.{path.stem} AS\n"), path
+            assert sql.count("CREATE") == 1, path
+        else:
+            assert sql.upper().startswith("SELECT"), path
+
+
+# ---------------------------------------------------------------------------
+# Checking the lake's choice (Phase 3) and hand labels for OCR accuracy
+# (Phase 4.5): tools/check_lake_choice.py and tools/label_calls.py. AWS is
+# the fake CLI above; Parquet is a JSON stand-in. All values are fictional.
+# ---------------------------------------------------------------------------
+
+import csv
+import zipfile
+
+from tools import check_lake_choice, label_calls
+
+
+def _json_rows(path):
+    return json.loads(Path(path).read_bytes())
+
+
+def test_status_chosen_is_the_upload_made_ready_last():
+    done_old = {"uploadId": "20260601T010000Z-00000001", "status": "Done", "readyAt": "2026-06-01T01:00:00Z"}
+    imported = {"uploadId": "20260520T000000Z-00000002", "status": "Done"}
+    held = {"uploadId": "20260601T090000Z-00000003", "status": "Held", "readyAt": "2026-06-01T09:00:00Z"}
+    rerun = {"uploadId": "20260601T020000Z-00000004", "status": "Pending", "readyAt": "2026-06-01T05:00:00Z"}
+    assert fstatus.chosen([imported, done_old, held]) is done_old       # Held isn't chosen; an import ranks last
+    assert fstatus.chosen([imported, done_old, held, rerun]) is rerun  # a Re-run takes over before it is Done
+    assert fstatus.chosen([held]) is None and fstatus.chosen([]) is None
+
+
+class _ScanStatus(_FakeDynamo):
+    def scan(self, TableName, ConsistentRead, FilterExpression, ExpressionAttributeValues):
+        assert FilterExpression == "begins_with(sk, :up)" and ConsistentRead
+        up = ExpressionAttributeValues[":up"]["S"]
+        return {"Items": [{k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}
+                          for (_pk, sk), item in sorted(self.items.items()) if sk.startswith(up)]}
+
+
+class _AthenaCli(_FakeBackfillCli):
+    """The backfill's fake CLI, plus Athena answering the lake's (person_key, work_date, upload_id) rows."""
+
+    def __init__(self, status_dynamo, objects, lake_rows, state="SUCCEEDED"):
+        super().__init__(status_dynamo, objects)
+        self.lake_rows, self.state, self.sql = lake_rows, state, []
+
+    def __call__(self, cmd, capture_output, text, encoding, errors):
+        if cmd[1] != "athena":
+            return super().__call__(cmd, capture_output, text, encoding, errors)
+        self.log.append(f"athena {cmd[2]}")
+        payload = json.loads(Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://")).read_bytes())
+        if cmd[2] == "start-query-execution":
+            assert payload["WorkGroup"] == "calls-log"
+            self.sql.append(payload["QueryString"])
+            return _ok('{"QueryExecutionId": "q1"}')
+        if cmd[2] == "get-query-execution":
+            return _ok(json.dumps({"QueryExecution": {"Status": {"State": self.state, "StateChangeReason": "no"}}}))
+        if cmd[2] == "get-query-results":
+            header = {"Data": [{"VarCharValue": c} for c in ("person_key", "work_date", "upload_id")]}
+            return _ok(json.dumps({"ResultSet": {"Rows": [header] + [
+                {"Data": [{"VarCharValue": v} for v in row]} for row in self.lake_rows]}}))
+        raise AssertionError(cmd)
+
+
+def test_check_lake_choice_reports_each_day_by_key_never_by_name():
+    dyn, _objects = _bf_world()
+    status = _ScanStatus()
+    status.items = dyn.items
+    store = FolderStatus(status, "calls-log-folders", lambda: 1_780_000_000.0)
+    store.record_import("Tran Thi B & 2026-06-05", "20260520T000000Z-00000005")   # Done, never reached the lake
+    store.record_import("Nguyen Van A. & 2026-06-03", "20260520T000000Z-00000006")  # day 3 spelt a second way
+    key_a = lake.person_key("Nguyen Van A", _BF_SALT, _LAKE_PREFIXES)
+    key_b = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
+    lake_rows = [
+        [key_a, "2026-06-01", "20260520T000000Z-00000001"],   # the PC's copy, though the Run's Re-run is Done
+        [key_b, "2026-06-02", "20260520T000000Z-00000002"],   # the day's only (imported) upload
+        ["0123456789abcdef", "2026-06-09", _RUN_UP]]           # no such Person-Day
+    objects = {"quarantine/Tran Thi B & 2026-06-04/20260520T000000Z-00000004.json": b"{}"}
+    cli = _AthenaCli(status, objects, lake_rows)
+    with redirect_stdout(io.StringIO()) as out:
+        code = check_lake_choice.main([], run=cli, sleep=lambda s: None)
+    said = out.getvalue()
+    assert code == 1, said
+    assert json.loads(said.strip().splitlines()[-2]) == {
+        "ok": 1, "waiting": 0, "stale": 1, "missing": 1, "quarantined": 1, "orphan": 1, "shared": 1}
+    assert f"stale {key_a}_2026-06-01: the lake holds 20260520T000000Z-00000001 (Done); " \
+           f"the day's choice is {_RUN_UP} (Done)" in said
+    assert f"quarantined {key_b}_2026-06-04" in said and f"missing {key_b}_2026-06-05" in said
+    assert "orphan 0123456789abcdef_2026-06-09" in said and f"shared {key_a}_2026-06-03: 2 Person-Days" in said
+    for private in ("Nguyen", "Tran", _BF_SALT):
+        assert private not in said, private
+    assert cli.sql == [check_lake_choice.LAKE_DAYS] and cli.puts == {}
+    assert not any(op.endswith(("put-object", "put-item", "update-item", "get-object")) for op in cli.log)
+    assert sum(op.startswith("dynamodb") for op in cli.log) == 1   # one scan, whatever the number of days
+    fixed = _AthenaCli(status, {}, [[key_a, "2026-06-01", _RUN_UP], [key_b, "2026-06-02", "20260520T000000Z-00000002"]])
+    for day in ("Tran Thi B & 2026-06-04", "Tran Thi B & 2026-06-05", "Nguyen Van A. & 2026-06-03"):
+        for k in [k for k in status.items if k[0] == f"pd#{day}"]:
+            del status.items[k]
+    with redirect_stdout(io.StringIO()) as out:
+        assert check_lake_choice.main([], run=fixed, sleep=lambda s: None) == 0, out.getvalue()
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+        assert check_lake_choice.main([], run=_AthenaCli(status, {}, [], state="FAILED"), sleep=lambda s: None) == 1
+    assert "FAILED" in err.getvalue()
+
+
+def test_label_values_read_what_a_person_types():
+    for text, want in (("8:05", "08:05"), ("08:05", "08:05"), ("8:05 PM", "20:05"), ("12:10am", "00:10"),
+                       ("23:59", "23:59"), ("8:05:00", "08:05")):
+        assert label_calls.clock(text) == want, text
+    for text in ("25:00", "8.05", "13:00 PM", "", "8:60"):
+        try:
+            label_calls.clock(text)
+        except label_calls.LabelError:
+            continue
+        raise AssertionError(text)
+    for text, want in (("0", 0), ("83", 83), ("1:23", 83), ("1:02:03", 3723), ("1m 23s", 83), ("2h", 7200),
+                       ("45s", 45), ("20m 00s", 1200)):
+        assert label_calls.seconds(text) == want, text
+    for text in ("1.5", "abc", "1:2", "", "  "):
+        try:
+            label_calls.seconds(text)
+        except label_calls.LabelError:
+            continue
+        raise AssertionError(text)
+    assert label_calls.shown(83) == "1m 23s" and label_calls.shown(None) == "none"
+    assert label_calls.seconds(label_calls.shown(1200)) == 1200
+
+
+_SHOTS = {"A.png": b"image A", "b.png": b"image b", "c.png": b"image c"}   # the PC's order, case folded
+_BATCH = "labels-20260603T010203Z"
+_NOW = _dt.datetime(2026, 6, 3, 1, 2, 3, tzinfo=_dt.timezone.utc)
+
+
+def _label_world():
+    calls = _lake_payload()["calls"]
+    key = calls[0]["person_key"]
+    objects = {f"lake/calls/work_month=2026-06/{key}_2026-06-01.parquet": json.dumps(calls).encode("utf-8"),
+               f"inbox/{_RUN_UP}/notes.txt": b"", f"inbox/{_RUN_UP}/0/0.png": b"in a subfolder: not an image of the upload",
+               **{f"inbox/{_RUN_UP}/{name}": body for name, body in _SHOTS.items()}}
+    return calls, _FakeBackfillCli(_FakeDynamo(), objects)
+
+
+def _sample(cli, folder, argv=("--count", "3", "--seed", "1"), now=_NOW):
+    with redirect_stdout(io.StringIO()) as out:
+        code = label_calls.main(["sample", *argv], run=cli, read=_json_rows, now=now, out_dir=folder)
+    return code, out.getvalue()
+
+
+def test_label_calls_sample_zips_a_worksheet_with_its_screenshots():
+    calls, cli = _label_world()
+    with tempfile.TemporaryDirectory() as d:
+        code, said = _sample(cli, Path(d))
+        with zipfile.ZipFile(Path(d) / f"{_BATCH}.zip") as z:
+            names = sorted(z.namelist())
+            text = z.read(f"{_BATCH}/{_BATCH}.csv").decode("utf-8-sig")
+            shots = {n.rsplit("/", 1)[1]: z.read(n) for n in names if not n.endswith(".csv")}
+        side = json.loads((Path(d) / f"{_BATCH}.json").read_text(encoding="utf-8"))
+    assert code == 0 and f"download: {Path(d) / _BATCH}.zip" in said, said
+    rows = list(csv.DictReader(io.StringIO(text)))
+    assert len(rows) == 3 and tuple(rows[0]) == label_calls.WORKSHEET
+    by_ref = {label_calls.ref(c): c for c in calls}
+    for row in rows:
+        call = by_ref[row["ref"]]
+        assert shots[row["image"]] == list(_SHOTS.values())[int(call["image_key"]) - 1], row
+        assert row["ocr_start"] == call["start_ts"][11:16] and row["true_start"] == ""
+        assert side["calls"][row["ref"]]["ocr_duration_s"] == call["duration_s"]
+    assert all(_re.fullmatch(rf"{_BATCH}/(\d{{2}}\.png|{_BATCH}\.csv)", n) for n in names), names   # no file names
+    assert len(shots) == len({r["image"] for r in rows})                                            # each image once
+    assert side["batch"] == _BATCH and set(side["calls"]) == {r["ref"] for r in rows}
+    assert any(by_ref[r["ref"]]["flagged"] for r in rows)   # the doubtful half
+    for private in ("Nguyen", "Tran", _PHONE):
+        assert private not in text and private not in json.dumps(side), private
+    assert not any(op.endswith("put-object") for op in cli.log)
+    fetched = cli.log.count("s3api get-object")
+    with tempfile.TemporaryDirectory() as d:
+        later = _NOW + _dt.timedelta(days=30)
+        assert _sample(cli, Path(d), argv=(), now=later)[0] == 0
+        assert cli.log.count("s3api get-object") == fetched   # a day out of range is never downloaded
+        with zipfile.ZipFile(Path(d) / later.strftime("labels-%Y%m%dT%H%M%SZ.zip")) as z:
+            assert z.namelist() == [later.strftime("labels-%Y%m%dT%H%M%SZ/labels-%Y%m%dT%H%M%SZ.csv")]   # too old
+
+
+def test_label_calls_import_writes_checked_labels_and_nothing_on_a_mistake():
+    calls, cli = _label_world()
+    write = lambda table, rows: json.dumps(rows, default=str).encode("utf-8")
+    with tempfile.TemporaryDirectory() as d:
+        folder = Path(d) / "calls-log-labels"
+        _sample(cli, folder, argv=("--count", "4", "--seed", "2"))
+        rows = list(csv.DictReader(io.StringIO((folder / _BATCH / f"{_BATCH}.csv").read_text(encoding="utf-8-sig"))))
+        sheet = Path(d) / f"{_BATCH} (1).csv"   # downloaded, filled in and uploaded back: a browser renamed it
+
+        def fill(values, delimiter=","):
+            with open(sheet, "w", encoding="utf-8-sig", newline="") as f:   # as a spreadsheet saves it
+                w = csv.DictWriter(f, fieldnames=label_calls.WORKSHEET, delimiter=delimiter)
+                w.writeheader()
+                w.writerows({**r, **v} for r, v in zip(rows, values))
+
+        def run(argv):
+            with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+                code = label_calls.main(argv, run=cli, write=write, now=_NOW, out_dir=folder)
+            return code, out.getvalue() + err.getvalue()
+
+        fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
+              {"true_start": "25:00"}, {}])
+        code, said = run(["import", str(sheet)])
+        assert code == 2 and "line 4: '25:00' is not a time of day" in said and cli.puts == {}, said
+        fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
+              {"true_start": "9:31 AM", "true_duration": "0"}, {}], delimiter=";")   # Excel, comma-decimal locale
+        code, said = run(["import", str(sheet), "--dry-run"])
+        assert code == 0 and cli.puts == {} and "would write" in said, said
+        fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
+              {"true_start": "9:31 AM", "true_duration": ""}, {}])
+        code, said = run(["import", str(sheet), "--dry-run"])
+        assert code == 2 and "line 4: true_duration is blank" in said, said   # 0 or "as read"? say which
+        fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
+              {"true_start": "9:31 AM", "true_duration": "0"}, {}])
+        with open(sheet, "a", encoding="utf-8", newline="") as f:
+            f.write(",,,,,,\r\n,,,,,,\r\n")                      # empty lines a spreadsheet kept below the data
+        code, said = run(["import", str(sheet), "--dry-run"])
+        assert code == 0 and cli.puts == {} and "would write" in said, said
+        assert (folder / f"{_BATCH}.zip").is_file()
+        code, said = run(["import", str(sheet)])
+        assert code == 0, said
+        assert not (folder / f"{_BATCH}.zip").exists() and not (folder / _BATCH).exists()   # screenshots gone
+        assert (folder / f"{_BATCH}.json").is_file()
+        assert run(["import", str(Path(d) / "nowhere.csv")])[0] == 2
+    assert json.loads(said.strip().splitlines()[-1]) == {"labelled": 3, "not_a_call": 1, "unlabelled": 1}
+    [(key, labels)] = cli.puts.items()
+    assert key == f"lake/labels/work_month=2026-06/{_BATCH}.parquet"
+    assert [list(r) for r in labels] == [list(lake.LABEL_COLUMNS)] * 3
+    first, second, third = labels
+    assert (first["real_call"], first["true_start_ts"], first["true_duration_s"]) == (True, "2026-06-01 08:00:00", 1200)
+    assert (second["real_call"], second["true_start_ts"], second["true_duration_s"]) == (False, None, None)
+    assert third["true_start_ts"] == "2026-06-01 09:31:00" and third["true_duration_s"] == 0
+    assert all(r["batch"] == _BATCH and r["labelled_at"] == "2026-06-03 01:02:03" for r in labels)
+    for private in ("Nguyen", "Tran", _PHONE):
+        assert private not in json.dumps(labels), private
+
+
+def test_a_warm_runner_takes_changed_settings_within_the_cache_time():
+    first = settings.Settings(bucket="b", table="t", name_prefixes=("nguyen van a",), person_salt="old")
+    later = dataclasses.replace(first, name_prefixes=("nguyen van a", "tran thi b"), person_salt="new")
+    ssm = object()
+    with mock.patch.dict(runner._aws, {"settings": first, "ssm": ssm, "sns": None, "status": None,
+                                       "storage": None}, clear=True), \
+            mock.patch.object(settings, "load", side_effect=lambda client: later if client is ssm else None):
+        assert runner._clients()["settings"] is later   # not the container's first read, kept for its life
+
+
+def test_a_missing_lake_switch_is_off_and_other_errors_still_raise():
+    class _Ssm:
+        def __init__(self, code):
+            self.code = code
+
+        def get_parameter(self, Name, WithDecryption):
+            error = Exception(self.code)
+            error.response = {"Error": {"Code": self.code}}
+            raise error
+
+    assert settings.lake_enabled(_Ssm("ParameterNotFound")) is False
+    try:
+        settings.lake_enabled(_Ssm("AccessDeniedException"))
+    except Exception as e:
+        assert e.response["Error"]["Code"] == "AccessDeniedException"
+    else:
+        raise AssertionError("an unreadable switch must not pass as off silently")
 

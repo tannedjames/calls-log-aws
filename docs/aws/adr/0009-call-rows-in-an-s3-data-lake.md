@@ -1,6 +1,6 @@
 # ADR 9: Call and session rows go into an S3 data lake
 
-**Status:** proposed. It waits on the Owner's recorded okay to keep work data permanently. Phases 1 and 2 are built: Runs stage their records (the switch has been on since 2026-10-26), and the publisher writes the lake. **Covers:** reporting on calls, sessions and the pipeline; measuring OCR accuracy; the case study's database.
+**Status:** accepted on 2026-10-26, with the Owner's okay to keep work data permanently. Phases 1, 2, 4 and 5 are built: Runs stage their records (the switch has been on since 2026-10-26), the publisher writes the lake, stored Day Sheets can be backfilled, and views answer the common questions. **Covers:** reporting on calls, sessions and the pipeline; measuring OCR accuracy; the case study's database.
 
 ## Context
 The Day Sheet (`results/<Person-Day>.xlsx`) is the only copy of a day's calls
@@ -65,7 +65,7 @@ bucket, described by Glue Data Catalog tables, queried with Athena.
   ignores fields it doesn't know, so later additions don't have this problem.
 
 ## Phases
-0. Decide: this ADR, the contract, and the Owner's okay. Built, except the okay.
+0. Decide: this ADR, the contract, and the Owner's okay. Done (2026-10-26).
 1. Emit records with the switch off. Built: `cloud/lake.py`; the runner's
    hand-over; `--local DIR --emit OUT`; `tools/check_lake_parity.py` in CI.
 2. Infrastructure: the publisher, Glue, Athena, the quarantine alarm, budget
@@ -75,10 +75,20 @@ bucket, described by Glue Data Catalog tables, queried with Athena.
    image is unchanged), `infra/lake.tf`, and `tools/check_lake_parquet.py` in CI,
    which reads the publisher's Parquet back against the Glue columns.
 3. Turn on during the Comparison Period; check that Re-runs overwrite and
-   Superseded uploads never appear.
-4. Backfill the versioned `results/*.xlsx` into `sessions` with
-   `source = 'xlsx_backfill'`; then OCR accuracy (4.5).
-5. Gold views, sample SQL and the case-study numbers.
+   Superseded uploads never appear. Turned on 2026-10-26; a Re-run of a real
+   day reached Athena the same morning. `tools/check_lake_choice.py` lists any
+   day whose lake file isn't its chosen Done upload.
+4. Backfill the current `results/*.xlsx` into `sessions` with
+   `source = 'xlsx_backfill'`. Built: `tools/backfill_lake.py`, run once from
+   CloudShell; it never overwrites a day the publisher wrote. Then OCR
+   accuracy (4.5): its label-free half is the `ocr_quality` view; the
+   exact-match half is the `ocr_accuracy` view over a private `labels` table,
+   filled weekly with `tools/label_calls.py`.
+5. Gold views, sample SQL and the case-study numbers. Built: `sql/views/`
+   (`day_summary`, `weekly_attendance`, `pipeline_metrics`, `ocr_quality`),
+   created by `tools/lake_views.py`; `sql/examples/`; CI runs both on DuckDB
+   over real Parquet (`tools/check_lake_views.py`). The numbers come after a
+   month of `pipeline_metrics`.
 6. A demo environment on synthetic data with a public dashboard.
 
 The full roadmap is in [the data lake plan](../data-lake-plan.md).

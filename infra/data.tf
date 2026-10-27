@@ -144,6 +144,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "data" {
     }
   }
 
+  # The lake (lake.tf) keeps every day's current files forever. A Re-run or a
+  # replay overwrites them, and versioning would keep each old file for good;
+  # an old version goes after 30 days, time to undo a bad Re-run.
+  rule {
+    id     = "lake-old-versions-30-days"
+    status = "Enabled"
+
+    filter {
+      prefix = "lake/"
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
   rule {
     id     = "tidy-whole-bucket"
     status = "Enabled"
