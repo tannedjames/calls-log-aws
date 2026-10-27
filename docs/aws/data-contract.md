@@ -12,7 +12,7 @@ record. No name, phone number, OCR text, file name or secret enters it.
 | Prefix | What | Kept |
 |---|---|---|
 | `staging/<Person-Day>/<uploadId>.json` | One Done upload's envelope, written by the runner while `/calls-log/lake_enabled` is `true` | 30 days |
-| `lake/<table>/work_month=YYYY-MM/<person_key>_<yyyy-mm-dd>.parquet` | The publisher's Parquet, one file per person, day and table, overwritten by a Re-run | Permanent |
+| `lake/<table>/work_month=YYYY-MM/<person_key>_<yyyy-mm-dd>.parquet` | The publisher's Parquet, one file per person, day and table, overwritten by a Re-run | Permanent (a version a Re-run replaced: 30 days) |
 | `lake/labels/work_month=YYYY-MM/<batch>.parquet` | Hand labels, one file per labelling batch and month, written by `tools/label_calls.py import` (re-importing a batch replaces it) | Permanent |
 | `quarantine/<Person-Day>/<uploadId>.json` | An envelope that failed a check: `{"problems": [...], "envelope": {...}}` | 30 days |
 | `athena-results/` | Athena's query results (workgroup `calls-log`) | 7 days |

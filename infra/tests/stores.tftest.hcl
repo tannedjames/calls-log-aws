@@ -135,10 +135,19 @@ run "only_uploads_checkpoints_and_lake_hand_overs_expire" {
 
   assert {
     condition = (
-      contains(["", "-"], try(coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[6].filter[0].prefix, "-"), "-")) &&
-      coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[6].expiration[0].days, 0) == 0 &&
-      aws_s3_bucket_lifecycle_configuration.data.rule[6].expiration[0].expired_object_delete_marker &&
-      length(aws_s3_bucket_lifecycle_configuration.data.rule[6].noncurrent_version_expiration) == 0
+      aws_s3_bucket_lifecycle_configuration.data.rule[6].filter[0].prefix == "lake/" &&
+      length(aws_s3_bucket_lifecycle_configuration.data.rule[6].expiration) == 0 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[6].noncurrent_version_expiration[0].noncurrent_days == 30
+    )
+    error_message = "lake/ keeps its current files forever; only versions a Re-run replaced go, after 30 days."
+  }
+
+  assert {
+    condition = (
+      contains(["", "-"], try(coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[7].filter[0].prefix, "-"), "-")) &&
+      coalesce(aws_s3_bucket_lifecycle_configuration.data.rule[7].expiration[0].days, 0) == 0 &&
+      aws_s3_bucket_lifecycle_configuration.data.rule[7].expiration[0].expired_object_delete_marker &&
+      length(aws_s3_bucket_lifecycle_configuration.data.rule[7].noncurrent_version_expiration) == 0
     )
     error_message = "The whole-bucket rule may only tidy delete markers and uploads: Day Sheets in results/ are kept forever."
   }

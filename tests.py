@@ -5046,3 +5046,33 @@ def test_label_calls_import_writes_checked_labels_and_nothing_on_a_mistake():
     assert all(r["batch"] == _BATCH and r["labelled_at"] == "2026-06-03 01:02:03" for r in labels)
     for private in ("Nguyen", "Tran", _PHONE):
         assert private not in json.dumps(labels), private
+
+
+def test_a_warm_runner_takes_changed_settings_within_the_cache_time():
+    first = settings.Settings(bucket="b", table="t", name_prefixes=("nguyen van a",), person_salt="old")
+    later = dataclasses.replace(first, name_prefixes=("nguyen van a", "tran thi b"), person_salt="new")
+    ssm = object()
+    with mock.patch.dict(runner._aws, {"settings": first, "ssm": ssm, "sns": None, "status": None,
+                                       "storage": None}, clear=True), \
+            mock.patch.object(settings, "load", side_effect=lambda client: later if client is ssm else None):
+        assert runner._clients()["settings"] is later   # not the container's first read, kept for its life
+
+
+def test_a_missing_lake_switch_is_off_and_other_errors_still_raise():
+    class _Ssm:
+        def __init__(self, code):
+            self.code = code
+
+        def get_parameter(self, Name, WithDecryption):
+            error = Exception(self.code)
+            error.response = {"Error": {"Code": self.code}}
+            raise error
+
+    assert settings.lake_enabled(_Ssm("ParameterNotFound")) is False
+    try:
+        settings.lake_enabled(_Ssm("AccessDeniedException"))
+    except Exception as e:
+        assert e.response["Error"]["Code"] == "AccessDeniedException"
+    else:
+        raise AssertionError("an unreadable switch must not pass as off silently")
+
