@@ -1075,7 +1075,9 @@ the Day Sheet or the Sheet, so nothing here is urgent for the Operator.
   lists the others by person key: `stale` (the lake holds another upload than
   the Done choice; replay its envelope, or Re-run the day), `missing` (Done but
   not in the lake; replay, or run the backfill), `quarantined` (see above) and
-  `orphan` (a lake file no Day Sheet matches). Exit code 1 means one of those.
+  `orphan` (a lake day no Folder Status day matches) and `shared` (two
+  spellings of one name on one date: the lake keeps only one, so Re-run the
+  day under one spelling). Exit code 1 means one of those.
 - **Labelling calls for OCR accuracy (weekly, about 15 minutes).** The
   `ocr_accuracy` view compares what the OCR read with what a person read off
   the screenshot. Each week, in CloudShell:
@@ -1087,7 +1089,7 @@ the Day Sheet or the Sheet, so nothing here is urgent for the Operator.
   screenshots, numbered `01.png`, `02.png`, …. Open the CSV in Excel or Google
   Sheets. For each row, open the screenshot its `image` column names, find the
   call by `ocr_start` and `ocr_duration`, and fill in `true_start` (HH:MM, as
-  on the screen), `true_duration` (`1m 23s` is safest; `83` or `1:23` also work; blank for a
+  on the screen), `true_duration` (`1m 23s` is safest; `83` or `1:23` also work; `0` for a
   missed call) or put `x` in `not_a_call`. Leave `ref` as it is. Save as CSV,
   upload it to CloudShell (**Actions → Upload file**; it lands in your home
   folder, and its name doesn't matter), and:

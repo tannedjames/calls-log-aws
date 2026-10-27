@@ -13,7 +13,7 @@ spreadsheet can't mangle the IDs. Open each row's image, find the call (the
 OCR's start and duration are on the row), and fill in:
 
     true_start     the start on the screen, HH:MM (24-hour, or with AM/PM)
-    true_duration  the duration on the screen: 1m 23s, 83 or 1:23; blank = 0
+    true_duration  the duration on the screen: 1m 23s, 83 or 1:23; 0 for a missed call
     not_a_call     x when the OCR's row isn't a call at all
 
 Rows with neither true_start nor not_a_call are left out. `import` checks
@@ -100,10 +100,11 @@ def clock(text: str) -> str:
 
 
 def seconds(text: str) -> int:
-    """'83', '1:23', '1:02:03', '1m 23s', '2h' -> seconds; blank -> 0 (a missed call)."""
+    """'83', '1:23', '1:02:03', '1m 23s', '2h' -> seconds. Blank is refused: it could mean 0 or
+    'as the OCR read it', so a missed call is typed as 0."""
     text = text.strip()
     if not text:
-        return 0
+        raise LabelError("true_duration is blank: type the duration on the screen, 0 for a missed call")
     if text.isdigit():
         return int(text)
     m = _COLONS.fullmatch(text)
@@ -143,14 +144,15 @@ def ref(call: Dict[str, Any]) -> str:
 def pick(calls: List[Dict[str, Any]], count: int, rng: random.Random) -> List[Dict[str, Any]]:
     """Up to count calls; half flagged or under the threshold when there are that many."""
     threshold = CONFIG.ocr_confidence_threshold
-    doubtful = [c for c in calls if c["flagged"] or (c["row_conf"] is not None and c["row_conf"] < threshold)]
-    rest = [c for c in calls if c not in doubtful]
-    chosen = rng.sample(doubtful, min(len(doubtful), count // 2))
-    chosen += rng.sample(rest, min(len(rest), count - len(chosen)))
-    if len(chosen) < count:   # too few clean calls: fill from the doubtful ones left
-        left = [c for c in doubtful if c not in chosen]
-        chosen += rng.sample(left, min(len(left), count - len(chosen)))
-    return sorted(chosen, key=lambda c: (_iso(c["work_date"]), c["upload_id"], c["call_seq"]))
+    doubtful, rest = [], []
+    for i, c in enumerate(calls):
+        (doubtful if c["flagged"] or (c["row_conf"] is not None and c["row_conf"] < threshold) else rest).append(i)
+    picked = rng.sample(doubtful, min(len(doubtful), count // 2))
+    picked += rng.sample(rest, min(len(rest), count - len(picked)))
+    if len(picked) < count:   # too few clean calls: fill from the doubtful ones left
+        left = sorted(set(doubtful) - set(picked))
+        picked += rng.sample(left, min(len(left), count - len(picked)))
+    return sorted((calls[i] for i in picked), key=lambda c: (_iso(c["work_date"]), c["upload_id"], c["call_seq"]))
 
 
 def months(since: _dt.date, today: _dt.date) -> List[str]:
@@ -183,7 +185,9 @@ def sample(bucket: str, *, days: int, count: int, seed: Optional[int], out_dir: 
     for call in pick(calls, count, random.Random(seed if seed is not None else batch)):
         upload = call["upload_id"]
         if upload not in images:
-            names = [k.rsplit("/", 1)[1] for k in keys(bucket, naming.inbox_key(upload, ""), run=run)]
+            prefix = naming.inbox_key(upload, "")
+            names = [k[len(prefix):] for k in keys(bucket, prefix, run=run)
+                     if "/" not in k[len(prefix):]]   # as S3Storage.list_images: no subfolders
             images[upload] = pc_order([n for n in names if Path(n).suffix.lower() in IMAGE_SUFFIXES])
         position = int(call["image_key"]) - 1
         if not 0 <= position < len(images[upload]):   # the inbox expired (30 days) or changed
@@ -223,6 +227,8 @@ def label_rows(filled: Iterable[Dict[str, str]], snapshots: Dict[str, Dict[str, 
     rows, problems, skipped = [], [], 0
     for line, row in enumerate(filled, 2):   # line 1 is the header
         row = {k: (v or "").strip() for k, v in row.items() if k}
+        if not any(row.values()):   # an empty line a spreadsheet saved below the data
+            continue
         snap = snapshots.get(row.get("ref", ""))
         if snap is None:
             problems.append(f"line {line}: ref {row.get('ref')!r} isn't in this batch")
@@ -271,7 +277,7 @@ def import_labels(sheet: Path, bucket: str, *, dry_run: bool, now: _dt.datetime,
     if missing:
         raise LabelError(f"the worksheet has lost its columns {missing}")
     filled = list(reader)
-    side = batch_of([(r.get("ref") or "").strip() for r in filled], out_dir)
+    side = batch_of([ref for ref in ((r.get("ref") or "").strip() for r in filled) if ref], out_dir)
     batch = side["batch"]
     stamp = now.astimezone(_dt.timezone.utc).replace(tzinfo=None, microsecond=0)
     rows, counts = label_rows(filled, side["calls"], batch, stamp.isoformat())

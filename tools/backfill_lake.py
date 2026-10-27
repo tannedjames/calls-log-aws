@@ -12,8 +12,10 @@ the same fixed keys the publisher uses.
 
 Run it in CloudShell (docs/TECHNICAL.md section 11), after
 `pip3 install --user openpyxl pyarrow==24.0.0`. It never writes over a file
-that exists: a day the publisher already wrote keeps the runner's richer
-rows, and a later Re-run's publish replaces a backfilled file. It never runs
+that exists, even one the publisher writes while it runs (put-object
+--if-none-match): a day the publisher already wrote keeps the runner's
+richer rows, and a later Re-run's publish replaces a backfilled file. A run
+that fails part-way is safe to repeat; it writes only the missing files. It never runs
 OCR or main.py and never touches the Sheets, Folder Status or results/.
 
 Output names days by person_key, never by name; the salt is read from SSM and
@@ -37,13 +39,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from cloud import lake, naming  # noqa: E402
-from cloud.status import FolderStatus, Status  # noqa: E402
+from cloud.status import FolderStatus, Status, chosen  # noqa: E402
 from tools.aws_cli import AwsError, Client, account_id, call, run_cli  # noqa: E402
 
 PREFIX = "results/"
 TABLE = "calls-log-folders"
 _PERSON_DAY = re.compile(r"(?P<name>[^/]+?) & (?P<date>\d{4}-\d{2}-\d{2})")
 _MISSING = {"404", "NoSuchKey", "NotFound"}
+_WRITTEN_MEANWHILE = {"PreconditionFailed", "ConditionalRequestConflict"}   # put-object --if-none-match
 
 Writer = Callable[[str, List[Dict[str, Any]]], bytes]
 
@@ -69,8 +72,7 @@ def day_of(key: str) -> Optional[naming.PersonDay]:
 
 def chosen_upload(uploads: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The Done upload whose Day Sheet is current: made Ready last; a PC import (no readyAt) last of all."""
-    done = [u for u in uploads if u.get("status") == Status.DONE.value]
-    return max(done, key=lambda u: (u.get("readyAt") or "", u.get("uploadId") or ""), default=None)
+    return chosen([u for u in uploads if u.get("status") == Status.DONE.value])
 
 
 def settings(*, run=subprocess.run) -> Dict[str, Any]:
@@ -134,38 +136,57 @@ def backfill(bucket: str, *, dry_run: bool, run=subprocess.run, write: Optional[
         if day is None:
             counts["not_a_day_sheet"] += 1
             continue
-        label = f"{lake.person_key(day.name, secret['salt'], secret['prefixes'])}_{day.date}"
+        person = lake.person_key(day.name, secret["salt"], secret["prefixes"])
+        label = f"{person}_{day.date}"
         upload = chosen_upload(status.uploads(day.key))
         if upload is None:
             counts["no_upload"] += 1
             print(f"skipped {label}: no Done upload in Folder Status")
             continue
-        with tempfile.TemporaryDirectory() as tmp:
-            sheet = Path(tmp) / "day-sheet.xlsx"
-            pairs = read_pairs(fetch(bucket, obj["Key"], sheet, run=run))
+        # Each table on its own, before reading the Day Sheet: a day half written by an
+        # earlier run that failed gets its missing file, and a day in the lake costs no download.
+        envelope = {"person_key": person, "work_date": day.date}
+        tables = ("sessions",) + (("uploads",) if upload.get("imported") != "true" else ())
+        missing = [t for t in tables if not exists(bucket, publisher.lake_key(t, envelope), run=run)]
+        if not missing:
+            counts["in_lake"] += 1
+            continue
+        pairs: list = []
+        if "sessions" in missing:
+            with tempfile.TemporaryDirectory() as tmp:
+                pairs = read_pairs(fetch(bucket, obj["Key"], Path(tmp) / "day-sheet.xlsx", run=run))
         rows = lake.backfill_rows(day, upload, pairs, salt=secret["salt"], prefixes=secret["prefixes"])
-        problems = lake.check_sessions(rows["sessions"]) or ([] if pairs else ["the Day Sheet has no sessions"])
+        problems = [] if "sessions" not in missing else (
+            lake.check_sessions(rows["sessions"]) or ([] if pairs else ["the Day Sheet has no sessions"]))
         if problems:
             counts["failed_check"] += 1
             print(f"skipped {label}: " + "; ".join(problems[:3]))
             continue
-        envelope = {"person_key": rows["sessions"][0]["person_key"], "work_date": day.date}
-        targets = [(t, publisher.lake_key(t, envelope)) for t in ("sessions", "uploads") if rows[t]]
-        if exists(bucket, targets[0][1], run=run):
-            counts["in_lake"] += 1
-            continue
-        for table, key in targets:   # sessions is known to be missing; the uploads row may not be
-            if dry_run or (table != "sessions" and exists(bucket, key, run=run)):
+        wrote = []
+        for table in missing:
+            if dry_run:
+                wrote.append(table)
                 continue
             body = (write or parquet_bytes)(table, publisher.typed_rows(table, rows[table], ingested))
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "part.parquet"
                 path.write_bytes(body)
-                run_cli(["s3api", "put-object", "--body", str(path), "--output", "json"],
-                        {"Bucket": bucket, "Key": key, "ContentType": "application/vnd.apache.parquet"}, run=run)
+                try:   # only if still absent: the publisher may have written it since the check
+                    run_cli(["s3api", "put-object", "--body", str(path), "--output", "json"],
+                            {"Bucket": bucket, "Key": publisher.lake_key(table, envelope), "IfNoneMatch": "*",
+                             "ContentType": "application/vnd.apache.parquet"}, run=run)
+                except AwsError as e:
+                    if e.response["Error"]["Code"] not in _WRITTEN_MEANWHILE:
+                        raise
+                    continue
+            wrote.append(table)
+        if not wrote:
+            counts["in_lake"] += 1
+            continue
         counts["written"] += 1
-        print(f"{'would write' if dry_run else 'wrote'} {label}: {len(rows['sessions'])} session(s)"
-              + (", the upload's row" if rows["uploads"] else ""))
+        print(f"{'would write' if dry_run else 'wrote'} {label}: "
+              + ", ".join(f"{len(rows['sessions'])} session(s)" if t == "sessions" else "the upload's row"
+                          for t in wrote))
     return counts
 
 

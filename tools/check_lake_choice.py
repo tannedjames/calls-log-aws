@@ -13,6 +13,8 @@ lake's sessions rows came from:
     missing      the chosen upload is Done and the lake has no rows for the day
     quarantined  missing, and quarantine/ holds the chosen upload's envelope
     orphan       a day in the lake that no Person-Day in Folder Status matches
+    shared       two Person-Days with one person_key and date (two spellings of
+                 one name): the lake has one file for both, so keeps only one
 
     python3 tools/check_lake_choice.py
 
@@ -45,7 +47,7 @@ from tools.aws_cli import AwsError, account_id, call  # noqa: E402
 from tools.backfill_lake import TABLE, person_day, settings  # noqa: E402
 from tools.lake_views import query_rows  # noqa: E402
 
-PROBLEMS = ("stale", "missing", "quarantined", "orphan")
+PROBLEMS = ("stale", "missing", "quarantined", "orphan", "shared")
 LAKE_DAYS = ("SELECT DISTINCT person_key, CAST(work_date AS varchar) AS work_date, upload_id "
              "FROM calls_log.sessions")
 
@@ -74,12 +76,20 @@ def check(bucket: str, *, run=subprocess.run, sleep=time.sleep) -> Counter:
         held.setdefault(f"{person_key}_{work_date}", set()).add(upload)
     quarantined = set(keys(bucket, "quarantine/", run=run))
     counts: Counter = Counter({outcome: 0 for outcome in ("ok", "waiting", *PROBLEMS)})
-    for day_key, uploads in sorted(uploads_by_day(run=run).items()):
+    by_label: Dict[str, List[tuple]] = {}
+    for day_key, uploads in uploads_by_day(run=run).items():
         day = person_day(day_key)
-        if day is None:
-            continue
-        label = f"{lake.person_key(day.name, secret['salt'], secret['prefixes'])}_{day.date}"
+        if day is not None:
+            label = f"{lake.person_key(day.name, secret['salt'], secret['prefixes'])}_{day.date}"
+            by_label.setdefault(label, []).append((day_key, uploads))
+    for label, group in sorted(by_label.items()):
         in_lake = sorted(held.pop(label, set()))
+        if len(group) > 1:
+            counts["shared"] += 1
+            print(f"shared {label}: {len(group)} Person-Days have this person key and date "
+                  "(two spellings of one name?); the lake keeps one of them")
+            continue
+        day_key, uploads = group[0]
         pick = chosen(uploads)
         if pick is None or pick.get("status") != Status.DONE.value:
             counts["waiting"] += 1

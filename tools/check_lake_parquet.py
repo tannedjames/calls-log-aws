@@ -78,11 +78,11 @@ def made_up_labels(envelope: dict, ingested_at: _dt.datetime) -> list:
     truth = {0: (calls[0]["start_ts"][11:16], str(calls[0]["duration_s"])),
              1: (calls[1]["start_ts"][11:16], "6"),                        # the OCR read 0 seconds
              2: ("08:24", str(calls[2]["duration_s"])),                    # the OCR read 08:23
-             3: (calls[3]["start_ts"][11:16], "")}                         # a missed call: no duration
+             3: (calls[3]["start_ts"][11:16], "0")}                        # a missed call: no duration
     filled = [{"ref": label_calls.ref(c), "true_start": truth[i][0] if i in truth else "",
                "true_duration": truth[i][1] if i in truth else "", "not_a_call": "" if i in truth else "x"}
               for i, c in enumerate(calls)]
-    older = [{"ref": label_calls.ref(calls[0]), "true_start": "07:00", "true_duration": "", "not_a_call": ""}]
+    older = [{"ref": label_calls.ref(calls[0]), "true_start": "07:00", "true_duration": "0", "not_a_call": ""}]
     rows = label_calls.label_rows(older, snaps, "labels-20260601T030000Z", "2026-06-01T03:00:00")[0]
     rows += label_calls.label_rows(filled, snaps, "labels-20260602T030000Z", "2026-06-02T03:00:00")[0]
     return publisher.typed_rows("labels", rows, ingested_at)

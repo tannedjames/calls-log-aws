@@ -4612,6 +4612,7 @@ class _FakeBackfillCli:
     def __init__(self, status_dynamo, objects, salt=_BF_SALT):
         self.dynamo, self.objects, self.salt = status_dynamo, dict(objects), salt
         self.puts, self.log = {}, []
+        self.written_meanwhile = set()   # keys the publisher writes between head-object and put-object
 
     def __call__(self, cmd, capture_output, text, encoding, errors):
         payload = None
@@ -4640,7 +4641,13 @@ class _FakeBackfillCli:
             return SimpleNamespace(returncode=254, stdout="", stderr=(
                 "An error occurred (404) when calling the HeadObject operation: Not Found"))
         if op == "s3api put-object":
-            self.puts[payload["Key"]] = json.loads(Path(cmd[cmd.index("--body") + 1]).read_bytes())
+            key = payload["Key"]
+            if payload.get("IfNoneMatch") == "*" and (key in self.objects or key in self.puts
+                                                      or key in self.written_meanwhile):
+                return SimpleNamespace(returncode=254, stdout="", stderr=(
+                    "An error occurred (PreconditionFailed) when calling the PutObject operation: "
+                    "At least one of the pre-conditions you specified did not hold"))
+            self.puts[key] = json.loads(Path(cmd[cmd.index("--body") + 1]).read_bytes())
             return _ok("{}")
         raise AssertionError(f"unexpected AWS call {cmd}")
 
@@ -4718,6 +4725,23 @@ def test_backfill_writes_history_once_without_overwriting_or_naming_anyone():
     dry = _FakeBackfillCli(dyn, objects)
     code, said = _bf_run(["--dry-run"], dry)
     assert code == 0 and dry.puts == {} and "would write" in said
+
+
+def test_backfill_finishes_a_half_written_day_and_never_overwrites_the_publisher():
+    dyn, objects = _bf_world()
+    key_a = lake.person_key("Nguyen Van A", _BF_SALT, _LAKE_PREFIXES)
+    key_b = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
+    sessions_a = f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet"
+    uploads_a = f"lake/uploads/work_month=2026-06/{key_a}_2026-06-01.parquet"
+    sessions_b = f"lake/sessions/work_month=2026-06/{key_b}_2026-06-02.parquet"
+    cli = _FakeBackfillCli(dyn, {**objects, sessions_a: b"written before the uploads put failed"})
+    cli.written_meanwhile.add(sessions_b)   # the publisher writes day 2 while the backfill runs
+    code, said = _bf_run([], cli)
+    assert code == 0, said
+    assert sorted(cli.puts) == [uploads_a], said                    # only the missing file, nothing over day 2
+    assert cli.log.count("s3api get-object") == 1, cli.log           # day 2's sheet only: day 1 needs no sessions
+    assert json.loads(said.strip().splitlines()[-1])["written"] == 1 and "wrote " in said
+    assert json.loads(said.strip().splitlines()[-1])["in_lake"] == 2
 
 
 def test_backfill_needs_the_salt_and_reports_aws_failures():
@@ -4855,6 +4879,7 @@ def test_check_lake_choice_reports_each_day_by_key_never_by_name():
     status.items = dyn.items
     store = FolderStatus(status, "calls-log-folders", lambda: 1_780_000_000.0)
     store.record_import("Tran Thi B & 2026-06-05", "20260520T000000Z-00000005")   # Done, never reached the lake
+    store.record_import("Nguyen Van A. & 2026-06-03", "20260520T000000Z-00000006")  # day 3 spelt a second way
     key_a = lake.person_key("Nguyen Van A", _BF_SALT, _LAKE_PREFIXES)
     key_b = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
     lake_rows = [
@@ -4868,18 +4893,18 @@ def test_check_lake_choice_reports_each_day_by_key_never_by_name():
     said = out.getvalue()
     assert code == 1, said
     assert json.loads(said.strip().splitlines()[-2]) == {
-        "ok": 1, "waiting": 1, "stale": 1, "missing": 1, "quarantined": 1, "orphan": 1}
+        "ok": 1, "waiting": 0, "stale": 1, "missing": 1, "quarantined": 1, "orphan": 1, "shared": 1}
     assert f"stale {key_a}_2026-06-01: the lake holds 20260520T000000Z-00000001 (Done); " \
            f"the day's choice is {_RUN_UP} (Done)" in said
     assert f"quarantined {key_b}_2026-06-04" in said and f"missing {key_b}_2026-06-05" in said
-    assert "orphan 0123456789abcdef_2026-06-09" in said
+    assert "orphan 0123456789abcdef_2026-06-09" in said and f"shared {key_a}_2026-06-03: 2 Person-Days" in said
     for private in ("Nguyen", "Tran", _BF_SALT):
         assert private not in said, private
     assert cli.sql == [check_lake_choice.LAKE_DAYS] and cli.puts == {}
     assert not any(op.endswith(("put-object", "put-item", "update-item", "get-object")) for op in cli.log)
     assert sum(op.startswith("dynamodb") for op in cli.log) == 1   # one scan, whatever the number of days
     fixed = _AthenaCli(status, {}, [[key_a, "2026-06-01", _RUN_UP], [key_b, "2026-06-02", "20260520T000000Z-00000002"]])
-    for day in ("Tran Thi B & 2026-06-04", "Tran Thi B & 2026-06-05"):
+    for day in ("Tran Thi B & 2026-06-04", "Tran Thi B & 2026-06-05", "Nguyen Van A. & 2026-06-03"):
         for k in [k for k in status.items if k[0] == f"pd#{day}"]:
             del status.items[k]
     with redirect_stdout(io.StringIO()) as out:
@@ -4899,10 +4924,10 @@ def test_label_values_read_what_a_person_types():
         except label_calls.LabelError:
             continue
         raise AssertionError(text)
-    for text, want in (("", 0), ("83", 83), ("1:23", 83), ("1:02:03", 3723), ("1m 23s", 83), ("2h", 7200),
+    for text, want in (("0", 0), ("83", 83), ("1:23", 83), ("1:02:03", 3723), ("1m 23s", 83), ("2h", 7200),
                        ("45s", 45), ("20m 00s", 1200)):
         assert label_calls.seconds(text) == want, text
-    for text in ("1.5", "abc", "1:2"):
+    for text in ("1.5", "abc", "1:2", "", "  "):
         try:
             label_calls.seconds(text)
         except label_calls.LabelError:
@@ -4921,7 +4946,7 @@ def _label_world():
     calls = _lake_payload()["calls"]
     key = calls[0]["person_key"]
     objects = {f"lake/calls/work_month=2026-06/{key}_2026-06-01.parquet": json.dumps(calls).encode("utf-8"),
-               f"inbox/{_RUN_UP}/notes.txt": b"",
+               f"inbox/{_RUN_UP}/notes.txt": b"", f"inbox/{_RUN_UP}/0/0.png": b"in a subfolder: not an image of the upload",
                **{f"inbox/{_RUN_UP}/{name}": body for name, body in _SHOTS.items()}}
     return calls, _FakeBackfillCli(_FakeDynamo(), objects)
 
@@ -4991,11 +5016,17 @@ def test_label_calls_import_writes_checked_labels_and_nothing_on_a_mistake():
         code, said = run(["import", str(sheet)])
         assert code == 2 and "line 4: '25:00' is not a time of day" in said and cli.puts == {}, said
         fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
-              {"true_start": "9:31 AM", "true_duration": ""}, {}], delimiter=";")   # Excel, comma-decimal locale
+              {"true_start": "9:31 AM", "true_duration": "0"}, {}], delimiter=";")   # Excel, comma-decimal locale
         code, said = run(["import", str(sheet), "--dry-run"])
         assert code == 0 and cli.puts == {} and "would write" in said, said
         fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
               {"true_start": "9:31 AM", "true_duration": ""}, {}])
+        code, said = run(["import", str(sheet), "--dry-run"])
+        assert code == 2 and "line 4: true_duration is blank" in said, said   # 0 or "as read"? say which
+        fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
+              {"true_start": "9:31 AM", "true_duration": "0"}, {}])
+        with open(sheet, "a", encoding="utf-8", newline="") as f:
+            f.write(",,,,,,\r\n,,,,,,\r\n")                      # empty lines a spreadsheet kept below the data
         code, said = run(["import", str(sheet), "--dry-run"])
         assert code == 0 and cli.puts == {} and "would write" in said, said
         assert (folder / f"{_BATCH}.zip").is_file()

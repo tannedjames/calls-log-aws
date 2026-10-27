@@ -106,6 +106,9 @@ def main() -> int:
                        "start_exact_rate, duration_exact_rate, duration_mean_error_s FROM calls_log.ocr_accuracy")
         if [tuple(r) for r in got_acc] != want_acc:
             problems.append(f"ocr_accuracy: {got_acc} != {want_acc}")
+        got_cal = rows(statement(EXAMPLES_DIR / "threshold_calibration.sql"))
+        if [tuple(r[1:]) for r in got_cal] != [(4, 2)]:   # the same 4 calls and 2 exact, older label dropped
+            problems.append(f"ocr_accuracy: threshold_calibration.sql gives {got_cal}")
         for view in VIEWS:
             print(f"calls_log.{view}: " + ("OK" if not any(p.startswith(view) for p in problems) else "DIFFERENT"))
     for line in problems:
