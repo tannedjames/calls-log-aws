@@ -161,6 +161,10 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 
 ### Phase 6: Demo environment and public dashboard
 
+Design proposed in [ADR 10](adr/0010-demo-environment-and-public-dashboard.md);
+it waits on the Owner's go-ahead and three choices (same account or not, the
+page's address, a public repo). Nothing below is built.
+
 - [ ] 6a. Same Terraform with `env = "demo"`: separate prefix, table, Glue database, workgroup, SSM; own $1 budget and kill switch; Sheets sync permanently off
 - [ ] 6a. Daily scheduled job runs `gen_synth.py` for 3–5 fictional employees and feeds the real pipeline end to end
 - [ ] 6b. Lambda runs gold queries on the demo lake daily and writes summary JSON; static public page (strict CSP) shows fake attendance, pipeline health, synthetic OCR accuracy
