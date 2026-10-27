@@ -42,15 +42,15 @@ from tools.aws_cli import AwsError, Client, account_id, call, run_cli  # noqa: E
 
 PREFIX = "results/"
 TABLE = "calls-log-folders"
-_RESULT = re.compile(r"results/(?P<name>[^/]+?) & (?P<date>\d{4}-\d{2}-\d{2})\.xlsx")
+_PERSON_DAY = re.compile(r"(?P<name>[^/]+?) & (?P<date>\d{4}-\d{2}-\d{2})")
 _MISSING = {"404", "NoSuchKey", "NotFound"}
 
 Writer = Callable[[str, List[Dict[str, Any]]], bytes]
 
 
-def day_of(key: str) -> Optional[naming.PersonDay]:
-    """The Person-Day of a Day Sheet's key, without the PC's parser (it imports the OCR stack)."""
-    m = _RESULT.fullmatch(key)
+def person_day(text: str) -> Optional[naming.PersonDay]:
+    """'<Name> & <yyyy-mm-dd>' as a PersonDay, without the PC's parser (it imports the OCR stack)."""
+    m = _PERSON_DAY.fullmatch(text)
     if not m:
         return None
     try:
@@ -58,6 +58,13 @@ def day_of(key: str) -> Optional[naming.PersonDay]:
     except ValueError:
         return None
     return naming.PersonDay(m["name"], m["date"])
+
+
+def day_of(key: str) -> Optional[naming.PersonDay]:
+    """The Person-Day of a Day Sheet's key."""
+    if not (key.startswith(PREFIX) and key.endswith(".xlsx")):
+        return None
+    return person_day(key[len(PREFIX):-len(".xlsx")])
 
 
 def chosen_upload(uploads: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

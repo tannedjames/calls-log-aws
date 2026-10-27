@@ -4816,24 +4816,55 @@ def test_status_chosen_is_the_upload_made_ready_last():
     assert fstatus.chosen([held]) is None and fstatus.chosen([]) is None
 
 
+class _ScanStatus(_FakeDynamo):
+    def scan(self, TableName, ConsistentRead, FilterExpression, ExpressionAttributeValues):
+        assert FilterExpression == "begins_with(sk, :up)" and ConsistentRead
+        up = ExpressionAttributeValues[":up"]["S"]
+        return {"Items": [{k: ({"N": str(v)} if isinstance(v, int) else {"S": v}) for k, v in item.items()}
+                          for (_pk, sk), item in sorted(self.items.items()) if sk.startswith(up)]}
+
+
+class _AthenaCli(_FakeBackfillCli):
+    """The backfill's fake CLI, plus Athena answering the lake's (person_key, work_date, upload_id) rows."""
+
+    def __init__(self, status_dynamo, objects, lake_rows, state="SUCCEEDED"):
+        super().__init__(status_dynamo, objects)
+        self.lake_rows, self.state, self.sql = lake_rows, state, []
+
+    def __call__(self, cmd, capture_output, text, encoding, errors):
+        if cmd[1] != "athena":
+            return super().__call__(cmd, capture_output, text, encoding, errors)
+        self.log.append(f"athena {cmd[2]}")
+        payload = json.loads(Path(cmd[cmd.index("--cli-input-json") + 1].removeprefix("file://")).read_bytes())
+        if cmd[2] == "start-query-execution":
+            assert payload["WorkGroup"] == "calls-log"
+            self.sql.append(payload["QueryString"])
+            return _ok('{"QueryExecutionId": "q1"}')
+        if cmd[2] == "get-query-execution":
+            return _ok(json.dumps({"QueryExecution": {"Status": {"State": self.state, "StateChangeReason": "no"}}}))
+        if cmd[2] == "get-query-results":
+            header = {"Data": [{"VarCharValue": c} for c in ("person_key", "work_date", "upload_id")]}
+            return _ok(json.dumps({"ResultSet": {"Rows": [header] + [
+                {"Data": [{"VarCharValue": v} for v in row]} for row in self.lake_rows]}}))
+        raise AssertionError(cmd)
+
+
 def test_check_lake_choice_reports_each_day_by_key_never_by_name():
     dyn, _objects = _bf_world()
-    store = FolderStatus(dyn, "calls-log-folders", lambda: 1_780_000_000.0)
+    status = _ScanStatus()
+    status.items = dyn.items
+    store = FolderStatus(status, "calls-log-folders", lambda: 1_780_000_000.0)
     store.record_import("Tran Thi B & 2026-06-05", "20260520T000000Z-00000005")   # Done, never reached the lake
     key_a = lake.person_key("Nguyen Van A", _BF_SALT, _LAKE_PREFIXES)
     key_b = lake.person_key("Tran Thi B", _BF_SALT, _LAKE_PREFIXES)
-    rows = lambda upload: json.dumps([{"upload_id": upload, "source": "xlsx_backfill"}]).encode("utf-8")
-    objects = {f"results/{d} & 2026-06-0{n}.xlsx": b"sheet" for d, n in (
-        ("Nguyen Van A", 1), ("Tran Thi B", 2), ("Nguyen Van A", 3), ("Tran Thi B", 4), ("Tran Thi B", 5))}
-    objects.update({
-        # day 1: the lake still holds the PC's copy, though the Run's Re-run is Done
-        f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet": rows("20260520T000000Z-00000001"),
-        f"lake/sessions/work_month=2026-06/{key_b}_2026-06-02.parquet": rows("20260520T000000Z-00000002"),
-        "quarantine/Tran Thi B & 2026-06-04/20260520T000000Z-00000004.json": b"{}",
-        "lake/sessions/work_month=2026-06/0123456789abcdef_2026-06-09.parquet": rows(_RUN_UP)})
-    cli = _FakeBackfillCli(dyn, objects)
+    lake_rows = [
+        [key_a, "2026-06-01", "20260520T000000Z-00000001"],   # the PC's copy, though the Run's Re-run is Done
+        [key_b, "2026-06-02", "20260520T000000Z-00000002"],   # the day's only (imported) upload
+        ["0123456789abcdef", "2026-06-09", _RUN_UP]]           # no such Person-Day
+    objects = {"quarantine/Tran Thi B & 2026-06-04/20260520T000000Z-00000004.json": b"{}"}
+    cli = _AthenaCli(status, objects, lake_rows)
     with redirect_stdout(io.StringIO()) as out:
-        code = check_lake_choice.main([], run=cli, read=_json_rows)
+        code = check_lake_choice.main([], run=cli, sleep=lambda s: None)
     said = out.getvalue()
     assert code == 1, said
     assert json.loads(said.strip().splitlines()[-2]) == {
@@ -4841,16 +4872,21 @@ def test_check_lake_choice_reports_each_day_by_key_never_by_name():
     assert f"stale {key_a}_2026-06-01: the lake holds 20260520T000000Z-00000001 (Done); " \
            f"the day's choice is {_RUN_UP} (Done)" in said
     assert f"quarantined {key_b}_2026-06-04" in said and f"missing {key_b}_2026-06-05" in said
-    assert "orphan lake/sessions/work_month=2026-06/0123456789abcdef_2026-06-09.parquet" in said
+    assert "orphan 0123456789abcdef_2026-06-09" in said
     for private in ("Nguyen", "Tran", _BF_SALT):
         assert private not in said, private
-    assert cli.puts == {} and not any(op.endswith(("put-object", "put-item", "update-item")) for op in cli.log)
-    fixed = _FakeBackfillCli(dyn, {**objects,
-                               f"lake/sessions/work_month=2026-06/{key_a}_2026-06-01.parquet": rows(_RUN_UP)})
-    del fixed.objects["lake/sessions/work_month=2026-06/0123456789abcdef_2026-06-09.parquet"]
-    del fixed.objects["results/Tran Thi B & 2026-06-04.xlsx"], fixed.objects["results/Tran Thi B & 2026-06-05.xlsx"]
+    assert cli.sql == [check_lake_choice.LAKE_DAYS] and cli.puts == {}
+    assert not any(op.endswith(("put-object", "put-item", "update-item", "get-object")) for op in cli.log)
+    assert sum(op.startswith("dynamodb") for op in cli.log) == 1   # one scan, whatever the number of days
+    fixed = _AthenaCli(status, {}, [[key_a, "2026-06-01", _RUN_UP], [key_b, "2026-06-02", "20260520T000000Z-00000002"]])
+    for day in ("Tran Thi B & 2026-06-04", "Tran Thi B & 2026-06-05"):
+        for k in [k for k in status.items if k[0] == f"pd#{day}"]:
+            del status.items[k]
     with redirect_stdout(io.StringIO()) as out:
-        assert check_lake_choice.main([], run=fixed, read=_json_rows) == 0, out.getvalue()
+        assert check_lake_choice.main([], run=fixed, sleep=lambda s: None) == 0, out.getvalue()
+    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+        assert check_lake_choice.main([], run=_AthenaCli(status, {}, [], state="FAILED"), sleep=lambda s: None) == 1
+    assert "FAILED" in err.getvalue()
 
 
 def test_label_values_read_what_a_person_types():
@@ -4921,9 +4957,11 @@ def test_label_calls_sample_zips_a_worksheet_with_its_screenshots():
     for private in ("Nguyen", "Tran", _PHONE):
         assert private not in text and private not in json.dumps(side), private
     assert not any(op.endswith("put-object") for op in cli.log)
+    fetched = cli.log.count("s3api get-object")
     with tempfile.TemporaryDirectory() as d:
         later = _NOW + _dt.timedelta(days=30)
         assert _sample(cli, Path(d), argv=(), now=later)[0] == 0
+        assert cli.log.count("s3api get-object") == fetched   # a day out of range is never downloaded
         with zipfile.ZipFile(Path(d) / later.strftime("labels-%Y%m%dT%H%M%SZ.zip")) as z:
             assert z.namelist() == [later.strftime("labels-%Y%m%dT%H%M%SZ/labels-%Y%m%dT%H%M%SZ.csv")]   # too old
 
@@ -4937,9 +4975,9 @@ def test_label_calls_import_writes_checked_labels_and_nothing_on_a_mistake():
         rows = list(csv.DictReader(io.StringIO((folder / _BATCH / f"{_BATCH}.csv").read_text(encoding="utf-8-sig"))))
         sheet = Path(d) / f"{_BATCH} (1).csv"   # downloaded, filled in and uploaded back: a browser renamed it
 
-        def fill(values):
+        def fill(values, delimiter=","):
             with open(sheet, "w", encoding="utf-8-sig", newline="") as f:   # as a spreadsheet saves it
-                w = csv.DictWriter(f, fieldnames=label_calls.WORKSHEET)
+                w = csv.DictWriter(f, fieldnames=label_calls.WORKSHEET, delimiter=delimiter)
                 w.writeheader()
                 w.writerows({**r, **v} for r, v in zip(rows, values))
 
@@ -4952,6 +4990,10 @@ def test_label_calls_import_writes_checked_labels_and_nothing_on_a_mistake():
               {"true_start": "25:00"}, {}])
         code, said = run(["import", str(sheet)])
         assert code == 2 and "line 4: '25:00' is not a time of day" in said and cli.puts == {}, said
+        fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
+              {"true_start": "9:31 AM", "true_duration": ""}, {}], delimiter=";")   # Excel, comma-decimal locale
+        code, said = run(["import", str(sheet), "--dry-run"])
+        assert code == 0 and cli.puts == {} and "would write" in said, said
         fill([{"true_start": "8:00", "true_duration": "20m 00s"}, {"not_a_call": "x"},
               {"true_start": "9:31 AM", "true_duration": ""}, {}])
         code, said = run(["import", str(sheet), "--dry-run"])

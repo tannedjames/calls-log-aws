@@ -44,13 +44,14 @@ def statement(path: Path) -> str:
     return "\n".join(lines).strip().rstrip(";")
 
 
-def run_query(sql: str, *, run=subprocess.run, sleep: Callable[[float], None] = time.sleep,
-              timeout_s: float = 120) -> Tuple[str, str]:
-    """(final state, Athena's reason) for one query in the calls-log workgroup."""
-    started = call("athena", "start-query-execution", {
+def _start(sql: str, *, run=subprocess.run) -> str:
+    return call("athena", "start-query-execution", {
         "QueryString": sql, "WorkGroup": WORKGROUP,
-        "QueryExecutionContext": {"Catalog": "AwsDataCatalog", "Database": DATABASE}}, run=run)
-    qid = started["QueryExecutionId"]
+        "QueryExecutionContext": {"Catalog": "AwsDataCatalog", "Database": DATABASE}}, run=run)["QueryExecutionId"]
+
+
+def _wait(qid: str, *, run=subprocess.run, sleep: Callable[[float], None] = time.sleep,
+          timeout_s: float = 120) -> Tuple[str, str]:
     waited = 0.0
     while True:
         status = call("athena", "get-query-execution", {"QueryExecutionId": qid},
@@ -59,6 +60,23 @@ def run_query(sql: str, *, run=subprocess.run, sleep: Callable[[float], None] = 
             return status["State"], status.get("StateChangeReason", "")
         sleep(1.0)
         waited += 1.0
+
+
+def run_query(sql: str, *, run=subprocess.run, sleep: Callable[[float], None] = time.sleep,
+              timeout_s: float = 120) -> Tuple[str, str]:
+    """(final state, Athena's reason) for one query in the calls-log workgroup."""
+    return _wait(_start(sql, run=run), run=run, sleep=sleep, timeout_s=timeout_s)
+
+
+def query_rows(sql: str, *, run=subprocess.run, sleep: Callable[[float], None] = time.sleep,
+               timeout_s: float = 120) -> List[List[Optional[str]]]:
+    """One query's rows, as text (None for null), without the header row. Raises AwsError if it fails."""
+    qid = _start(sql, run=run)
+    state, why = _wait(qid, run=run, sleep=sleep, timeout_s=timeout_s)
+    if state != "SUCCEEDED":
+        raise AwsError("athena query", state, why)
+    rows = call("athena", "get-query-results", {"QueryExecutionId": qid}, run=run)["ResultSet"]["Rows"]
+    return [[cell.get("VarCharValue") for cell in row["Data"]] for row in rows[1:]]
 
 
 def main(argv: Optional[List[str]] = None, *, run=subprocess.run, sleep=time.sleep) -> int:

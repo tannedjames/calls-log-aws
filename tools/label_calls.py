@@ -13,7 +13,7 @@ spreadsheet can't mangle the IDs. Open each row's image, find the call (the
 OCR's start and duration are on the row), and fill in:
 
     true_start     the start on the screen, HH:MM (24-hour, or with AM/PM)
-    true_duration  the duration on the screen: 83, 1:23, 1m 23s; blank = 0
+    true_duration  the duration on the screen: 1m 23s, 83 or 1:23; blank = 0
     not_a_call     x when the OCR's row isn't a call at all
 
 Rows with neither true_start nor not_a_call are left out. `import` checks
@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as _dt
+import io
 import json
 import random
 import re
@@ -169,6 +170,8 @@ def sample(bucket: str, *, days: int, count: int, seed: Optional[int], out_dir: 
     with tempfile.TemporaryDirectory() as tmp:
         for month in months(since, today):
             for key in keys(bucket, f"lake/calls/work_month={month}/", run=run):
+                if not since.isoformat() <= key[-len("yyyy-mm-dd.parquet"):-len(".parquet")] <= today.isoformat():
+                    continue   # <person_key>_<date>.parquet: only the days in range are read
                 calls += read(fetch(bucket, key, Path(tmp) / "part.parquet", run=run))
     calls = [c for c in calls if since.isoformat() <= _iso(c["work_date"]) <= today.isoformat()]
     batch = now.strftime("labels-%Y%m%dT%H%M%SZ")
@@ -260,12 +263,14 @@ def batch_of(refs: List[str], out_dir: Path) -> Dict[str, Any]:
 
 def import_labels(sheet: Path, bucket: str, *, dry_run: bool, now: _dt.datetime, out_dir: Path,
                   run=subprocess.run, write=None) -> Dict[str, int]:
-    with open(sheet, encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        missing = [c for c in ("ref", "true_start", "true_duration", "not_a_call") if c not in (reader.fieldnames or [])]
-        if missing:
-            raise LabelError(f"the worksheet has lost its columns {missing}")
-        filled = list(reader)
+    text = sheet.read_text(encoding="utf-8-sig", errors="replace")   # what matters is ASCII, whatever Excel saved
+    header = text.split("\n", 1)[0]
+    # Excel in a comma-decimal locale (Vietnamese among them) saves CSV with ';' between columns.
+    reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=";" if header.count(";") > header.count(",") else ",")
+    missing = [c for c in ("ref", "true_start", "true_duration", "not_a_call") if c not in (reader.fieldnames or [])]
+    if missing:
+        raise LabelError(f"the worksheet has lost its columns {missing}")
+    filled = list(reader)
     side = batch_of([(r.get("ref") or "").strip() for r in filled], out_dir)
     batch = side["batch"]
     stamp = now.astimezone(_dt.timezone.utc).replace(tzinfo=None, microsecond=0)

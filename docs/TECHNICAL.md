@@ -1066,7 +1066,8 @@ the Day Sheet or the Sheet, so nothing here is urgent for the Operator.
   More examples are in `sql/examples/`.
 - **Does the lake hold each day's choice?** After the backfill, and once a week
   while Re-runs happen (Phase 3), check that the lake holds every day's
-  chosen upload and never a Superseded one. It only reads:
+  chosen upload and never a Superseded one. It only reads (one Folder Status
+  scan, one small Athena query):
   ```bash
   python3 tools/check_lake_choice.py
   ```
@@ -1086,7 +1087,7 @@ the Day Sheet or the Sheet, so nothing here is urgent for the Operator.
   screenshots, numbered `01.png`, `02.png`, …. Open the CSV in Excel or Google
   Sheets. For each row, open the screenshot its `image` column names, find the
   call by `ocr_start` and `ocr_duration`, and fill in `true_start` (HH:MM, as
-  on the screen), `true_duration` (`83`, `1:23` or `1m 23s`; blank for a
+  on the screen), `true_duration` (`1m 23s` is safest; `83` or `1:23` also work; blank for a
   missed call) or put `x` in `not_a_call`. Leave `ref` as it is. Save as CSV,
   upload it to CloudShell (**Actions → Upload file**; it lands in your home
   folder, and its name doesn't matter), and:
