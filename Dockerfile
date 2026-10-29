@@ -11,9 +11,9 @@
 # its packages are upgraded to this one. Each release is a fixed repository
 # snapshot, so the same commit always installs the same packages (FR-25).
 # Dependabot bumps both images weekly. Why: docs/TECHNICAL.md, "Runner image".
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261013.0-minimal@sha256:fe18d1ee02440b6480eb4a045be052e9aeaf9bf5029368f09d3425ddab2bfa0a AS al2023-release
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261028.0-minimal@sha256:008ebfc399fbb853f8846cda640f88d11791e91956db0255a3e90c8b00f385a1 AS al2023-release
 
-FROM public.ecr.aws/lambda/python:3.13@sha256:d5d5c74e3639a01fac254c9334a60604aa50327aa122b3ec26151e055a06a6a0
+FROM public.ecr.aws/lambda/python:3.13@sha256:fdd994e81bed65fa12467e750f7be5748f9be85be1c13c70c1ce77d5503f14c4
 
 # OS packages. First the base's own, upgraded to that release. dnf here is
 # microdnf: it has no --security, and it skips a release it can't reach with
