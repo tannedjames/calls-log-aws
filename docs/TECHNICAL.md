@@ -1049,10 +1049,19 @@ the Day Sheet or the Sheet, so nothing here is urgent for the Operator.
   file exists yet. It never changes a Day Sheet, a Sheet or Folder Status, and
   prints person keys, never names. In CloudShell, from the unzipped `main`:
   ```bash
-  pip3 install --user openpyxl pyarrow==24.0.0
+  pip3 install openpyxl pyarrow==24.0.0       # add --user only if pip asks for it
   python3 tools/backfill_lake.py --dry-run     # what it would write
   python3 tools/backfill_lake.py
   ```
+  CloudShell's `python3` now runs in a virtual environment, where `--user` is
+  refused ("User site-packages are not visible"); a CloudShell restart can
+  empty it, so check with `python3 -c "import openpyxl, pyarrow"` and install
+  again if needed. If every `aws` command fails with `Error when retrieving
+  credentials from container-role ... 500`, CloudShell has lost the console's
+  sign-in: switch any DNS or VPN changer back to its default, reload the
+  console (sign in again if asked) and check `aws sts get-caller-identity`
+  before going on. The tools send every call to ap-southeast-2 whatever region
+  CloudShell is open in, but each region's CloudShell has its own home folder.
   A second run writes nothing new. A day that has a Day Sheet but no Done
   upload in Folder Status is skipped and listed.
 - **Creating or updating the views.** The views (`day_summary`,

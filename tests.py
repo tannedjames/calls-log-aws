@@ -4632,8 +4632,17 @@ class _FakeBackfillCli:
         if op == "s3api list-objects-v2":
             return _ok(json.dumps({"Contents": [{"Key": k} for k in sorted(self.objects)
                                                 if k.startswith(payload["Prefix"])]}, ensure_ascii=False))
+        if op in ("s3api get-object", "s3api put-object"):
+            # Flags only: CloudShell's CLI refuses get-object's bucket and key from --cli-input-json
+            assert payload is None, cmd
+            payload = {"Key": cmd[cmd.index("--key") + 1]}
+            assert cmd[cmd.index("--bucket") + 1] == "calls-log-data-123456789012", cmd
+            if op == "s3api put-object":
+                assert cmd[cmd.index("--content-type") + 1] == "application/vnd.apache.parquet", cmd
+            if "--if-none-match" in cmd:
+                payload["IfNoneMatch"] = cmd[cmd.index("--if-none-match") + 1]
         if op == "s3api get-object":
-            Path(cmd[5]).write_bytes(self.objects[payload["Key"]])
+            Path(cmd[cmd.index("--region") - 1]).write_bytes(self.objects[payload["Key"]])   # the outfile
             return _ok("{}")
         if op == "s3api head-object":
             if payload["Key"] in self.objects or payload["Key"] in self.puts:
