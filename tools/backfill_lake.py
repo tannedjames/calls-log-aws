@@ -11,7 +11,7 @@ the same fixed keys the publisher uses.
     python3 tools/backfill_lake.py               # write it
 
 Run it in CloudShell (docs/TECHNICAL.md section 11), after
-`pip3 install --user openpyxl pyarrow==24.0.0`. It never writes over a file
+`pip3 install openpyxl pyarrow==24.0.0`. It never writes over a file
 that exists, even one the publisher writes while it runs (put-object
 --if-none-match): a day the publisher already wrote keeps the runner's
 richer rows, and a later Re-run's publish replaces a backfilled file. A run
@@ -112,7 +112,9 @@ def parquet_rows(path: Path) -> List[Dict[str, Any]]:
 
 def fetch(bucket: str, key: str, path: Path, *, run=subprocess.run) -> Path:
     """Download one object to path."""
-    run_cli(["s3api", "get-object", "--output", "json", str(path)], {"Bucket": bucket, "Key": key}, run=run)
+    # Bucket and key as flags, not --cli-input-json: newer CLI v2 releases (CloudShell's, 2026-11)
+    # refuse get-object's required arguments from the JSON once its positional outfile is given.
+    run_cli(["s3api", "get-object", "--bucket", bucket, "--key", key, "--output", "json", str(path)], run=run)
     return path
 
 
@@ -172,9 +174,9 @@ def backfill(bucket: str, *, dry_run: bool, run=subprocess.run, write: Optional[
                 path = Path(tmp) / "part.parquet"
                 path.write_bytes(body)
                 try:   # only if still absent: the publisher may have written it since the check
-                    run_cli(["s3api", "put-object", "--body", str(path), "--output", "json"],
-                            {"Bucket": bucket, "Key": publisher.lake_key(table, envelope), "IfNoneMatch": "*",
-                             "ContentType": "application/vnd.apache.parquet"}, run=run)
+                    run_cli(["s3api", "put-object", "--bucket", bucket, "--key", publisher.lake_key(table, envelope),
+                             "--body", str(path), "--if-none-match", "*",
+                             "--content-type", "application/vnd.apache.parquet", "--output", "json"], run=run)
                 except AwsError as e:
                     if e.response["Error"]["Code"] not in _WRITTEN_MEANWHILE:
                         raise

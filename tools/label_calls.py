@@ -22,7 +22,7 @@ same batch replaces its file, and the sample's screenshots are then deleted
 from CloudShell. The `ocr_accuracy` view reads the labels.
 
 Run it in CloudShell (docs/TECHNICAL.md section 11), with
-`pip3 install --user pyarrow==24.0.0`. The zip holds employees' screenshots:
+`pip3 install pyarrow==24.0.0`. The zip holds employees' screenshots:
 keep it out of the repo and delete it once imported. Nothing here holds a
 name; the lake gets person_key, IDs, times and confidences.
 Exit code 0 = done, 1 = AWS failed, 2 = bad usage or a wrong label.
@@ -293,8 +293,8 @@ def import_labels(sheet: Path, bucket: str, *, dry_run: bool, now: _dt.datetime,
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "part.parquet"
             path.write_bytes(body)
-            run_cli(["s3api", "put-object", "--body", str(path), "--output", "json"],
-                    {"Bucket": bucket, "Key": key, "ContentType": "application/vnd.apache.parquet"}, run=run)
+            run_cli(["s3api", "put-object", "--bucket", bucket, "--key", key, "--body", str(path),
+                     "--content-type", "application/vnd.apache.parquet", "--output", "json"], run=run)
     if not dry_run:   # the labels are in: the screenshots needn't stay in CloudShell
         shutil.rmtree(out_dir / batch, ignore_errors=True)
         (out_dir / f"{batch}.zip").unlink(missing_ok=True)
