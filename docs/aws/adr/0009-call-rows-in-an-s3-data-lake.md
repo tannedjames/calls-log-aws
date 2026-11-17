@@ -91,6 +91,7 @@ bucket, described by Glue Data Catalog tables, queried with Athena.
    created by `tools/lake_views.py`; `sql/examples/`; CI runs both on DuckDB
    over real Parquet (`tools/check_lake_views.py`). The numbers come after a
    month of `pipeline_metrics`.
-6. A demo environment on synthetic data with a public dashboard.
+6. A demo environment on synthetic data with a public dashboard. Declined by
+   the Owner on 2026-11-17 ([ADR 10](0010-demo-environment-and-public-dashboard.md)).
 
 The full roadmap is in [the data lake plan](../data-lake-plan.md).

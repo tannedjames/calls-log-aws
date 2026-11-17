@@ -127,7 +127,7 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 - [x] `tools/check_lake_parquet.py` in CI: the publisher's Parquet reads back with the Glue tables' exact columns and types
 - [x] Bootstrap applied by hand in CloudShell (1 to add, 3 to change)
 - [x] Deploy through the PR; no drift (#30, 2026-10-26)
-- [ ] Replay `staging/` once, so the days staged before the publisher reach the lake
+- [x] Replay `staging/` once, so the days staged before the publisher reach the lake (closed on the evidence: on 2026-11-17 the choice check found no `missing` day, so every staged day reached the lake, whether through the republish of 2026-11-06 or Re-runs)
 
 ### Phase 3: Turn on
 
@@ -145,7 +145,7 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 ### Phase 4.5: OCR accuracy
 
 - [x] The private `labels` table (Glue, `lake/labels/`) and `tools/label_calls.py`: `sample` zips a worksheet of 20 recent calls (half flagged or low-confidence) with their screenshots, numbered rather than named; `import` checks the filled worksheet and writes the labels
-- [ ] Ground truth: weekly spot-check of about 20 real calls (needs someone to label them); the Synthetic Set is already exact in CI (`check_lake_parity.py`), the Reference Set stays on the PC
+- [ ] Ground truth: weekly spot-check of about 20 real calls (the Owner labels them, from 2026-11-17); the Synthetic Set is already exact in CI (`check_lake_parity.py`), the Reference Set stays on the PC
 - [x] `ocr_quality` view, label-free half: flagged and low-confidence counts per field, by day, person, model and parser version
 - [x] `ocr_accuracy` view: exact-match rate per field and mean duration error, by model, parser version and confidence band; `sql/examples/threshold_calibration.sql` shows the exact rate per 0.05 of confidence
 - [ ] Calibrate the 0.85 threshold and the 30% low-confidence limit (needs a few weeks of labels)
@@ -161,9 +161,9 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 
 ### Phase 6: Demo environment and public dashboard
 
-Design proposed in [ADR 10](adr/0010-demo-environment-and-public-dashboard.md);
-it waits on the Owner's go-ahead and three choices (same account or not, the
-page's address, a public repo). Nothing below is built.
+**Declined by the Owner on 2026-11-17.** The design stays in
+[ADR 10](adr/0010-demo-environment-and-public-dashboard.md) in case it is ever
+taken up; nothing below is built or planned.
 
 - [ ] 6a. Same Terraform with `env = "demo"`: separate prefix, table, Glue database, workgroup, SSM; own $1 budget and kill switch; Sheets sync permanently off
 - [ ] 6a. Daily scheduled job runs `gen_synth.py` for 3–5 fictional employees and feeds the real pipeline end to end
@@ -179,7 +179,7 @@ page's address, a public repo). Nothing below is built.
 2. Phases 0–2 in parallel
 3. Phase 3 alongside the Comparison Period
 4. Phases 4, 4.5 and 5
-5. Phase 6 once the gold views are stable
+5. Phase 6: declined (2026-11-17)
 6. Remove the bench functions
 
 **Done when**
@@ -189,12 +189,12 @@ page's address, a public repo). Nothing below is built.
 - Zero personal identifiers reach the lake
 - Athena and S3 cost stays under $0.20 a month
 - Per-field OCR accuracy is stated with a sample size; the 0.85 threshold is confirmed or adjusted by PR
-- The demo runs daily, unattended, for 7 straight days; the public dashboard shows only synthetic data
+- ~~The demo runs daily, unattended, for 7 straight days; the public dashboard shows only synthetic data~~ (dropped with Phase 6)
 - The README shows the diagram, trade-offs, sample queries, and measured turnaround and cost (aggregates only)
 
 **Open items**
 
 - [x] Owner's okay on permanent storage (2026-10-26)
 - [ ] Whether to backfill PC-era history (needs the Owner's go-ahead)
-- [ ] Who does the weekly spot-check labeling
-- [ ] Demo URL: AWS default or a custom domain
+- [x] Who does the weekly spot-check labeling: the Owner (2026-11-17)
+- [x] Demo URL: not needed, Phase 6 declined (2026-11-17)

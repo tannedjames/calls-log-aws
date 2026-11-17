@@ -1,6 +1,6 @@
 # ADR 10: A demo environment on synthetic data, with a public dashboard
 
-**Status:** proposed. Waits on the Owner's decisions listed at the end; nothing is built. **Covers:** Phase 6 of [the data lake plan](../data-lake-plan.md): showing the pipeline and the lake working, publicly, without any employee data.
+**Status:** declined by the Owner on 2026-11-17 (decision 1 below: not built). Kept as the design if Phase 6 is ever taken up; nothing is built. **Covers:** Phase 6 of [the data lake plan](../data-lake-plan.md): showing the pipeline and the lake working, publicly, without any employee data.
 
 ## Context
 The production pipeline can't be shown to anyone: its inputs are employees'
