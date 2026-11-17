@@ -1,6 +1,6 @@
 # ADR 9: Call and session rows go into an S3 data lake
 
-**Status:** accepted on 2026-10-26, with the Owner's okay to keep work data permanently. Phases 1, 2, 4 and 5 are built: Runs stage their records (the switch has been on since 2026-10-26), the publisher writes the lake, stored Day Sheets can be backfilled, and views answer the common questions. **Covers:** reporting on calls, sessions and the pipeline; measuring OCR accuracy; the case study's database.
+**Status:** accepted on 2026-10-26, with the Owner's okay to keep work data permanently. Phases 1 to 5 are built and running: Runs stage their records (the switch has been on since 2026-10-26), the publisher writes the lake, the stored Day Sheets were backfilled on 2026-11-17, the choice check found every day holding its chosen upload, and views answer the common questions. **Covers:** reporting on calls, sessions and the pipeline; measuring OCR accuracy; the case study's database.
 
 ## Context
 The Day Sheet (`results/<Person-Day>.xlsx`) is the only copy of a day's calls
@@ -77,10 +77,12 @@ bucket, described by Glue Data Catalog tables, queried with Athena.
 3. Turn on during the Comparison Period; check that Re-runs overwrite and
    Superseded uploads never appear. Turned on 2026-10-26; a Re-run of a real
    day reached Athena the same morning. `tools/check_lake_choice.py` lists any
-   day whose lake file isn't its chosen Done upload.
+   day whose lake file isn't its chosen Done upload; on 2026-11-17 it found
+   none (213 days ok, 1 waiting on an upload that isn't Done).
 4. Backfill the current `results/*.xlsx` into `sessions` with
    `source = 'xlsx_backfill'`. Built: `tools/backfill_lake.py`, run once from
-   CloudShell; it never overwrites a day the publisher wrote. Then OCR
+   CloudShell on 2026-11-17 (98 days written); it never overwrites a day the
+   publisher wrote. Then OCR
    accuracy (4.5): its label-free half is the `ocr_quality` view; the
    exact-match half is the `ocr_accuracy` view over a private `labels` table,
    filled weekly with `tools/label_calls.py`.

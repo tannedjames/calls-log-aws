@@ -99,7 +99,7 @@ Seven phases; only Phase 3 touches the live flow, and only best-effort.
 
 - [x] ADR 0009 and the data contract
 - [x] Owner's okay on permanent storage of work data (2026-10-26)
-- [ ] Add Glue, Athena and publisher IAM rights to the bootstrap boundary (CloudShell, by hand)
+- [x] Add Glue, Athena and publisher IAM rights to the bootstrap (CloudShell, by hand; done with Phase 2, #30)
 
 Note: the bootstrap rights move into the Phase 2 pull request, so they match
 the resources exactly. Phase 1 needs none: the workload boundary already lets
@@ -125,8 +125,8 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 - [x] Terraform for the prefixes, publisher, Glue database and tables, Athena workgroup, quarantine alarm, budget coverage (`infra/lake.tf`; the $2 budget has no filter, so it already covers Glue, Athena and the publisher)
 - [x] `.tftest.hcl` tests pinning the publisher's least-privilege IAM (`infra/tests/lake.tftest.hcl`), plus `tests.py` checks via `_infra_text()` that the Glue columns equal `lake.COLUMN_TYPES`
 - [x] `tools/check_lake_parquet.py` in CI: the publisher's Parquet reads back with the Glue tables' exact columns and types
-- [ ] Bootstrap applied by hand in CloudShell (1 to add, 3 to change)
-- [ ] Deploy through the PR; no drift
+- [x] Bootstrap applied by hand in CloudShell (1 to add, 3 to change)
+- [x] Deploy through the PR; no drift (#30, 2026-10-26)
 - [ ] Replay `staging/` once, so the days staged before the publisher reach the lake
 
 ### Phase 3: Turn on
@@ -134,13 +134,13 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 - [x] `lake_enabled = true` (set 2026-10-26, with the salt)
 - [x] A Re-run of a real day (2026-10-21) reached Athena: 95 calls, 8 flagged
 - [x] `tools/check_lake_choice.py`: lists every day whose lake file isn't its chosen Done upload (stale, missing, quarantined, orphan); read-only, from CloudShell
-- [ ] Over a week: check that Re-runs overwrite and Superseded uploads never appear (run the check above after a week of Re-runs)
+- [x] Over a week: check that Re-runs overwrite and Superseded uploads never appear (2026-11-17, after three weeks of Runs and Re-runs: 213 days `ok`, 1 `waiting`, no stale, missing, quarantined, orphan or shared day)
 
 ### Phase 4: Backfill
 
 - [x] Read-only script parses the current `results/*.xlsx` (rows 7–22, columns B–C) into `sessions` with `source = 'xlsx_backfill'` (`tools/backfill_lake.py`); never overwrites a day the publisher wrote
 - [x] Never runs `main.py`, never touches the Sheets
-- [ ] Run once from CloudShell (docs/TECHNICAL.md §11)
+- [x] Run once from CloudShell (docs/TECHNICAL.md §11), 2026-11-17: 98 days written, 115 already published by the runner, 1 skipped with no Done upload; none failed the session checks
 
 ### Phase 4.5: OCR accuracy
 
@@ -153,7 +153,7 @@ the runner's right to write `staging/*`, and a 30-day expiry on `staging/`.
 
 ### Phase 5: Gold layer and portfolio
 
-- [x] Views: `day_summary`, `weekly_attendance`, `pipeline_metrics` (turnaround p50/p95, images per day, estimated GB-s per image) in `sql/views/`, created by `tools/lake_views.py`, checked in CI on DuckDB
+- [x] Views: `day_summary`, `weekly_attendance`, `pipeline_metrics` (turnaround p50/p95, images per day, estimated GB-s per image) in `sql/views/`, created by `tools/lake_views.py` (in Athena since 2026-11-17), checked in CI on DuckDB
 - [x] `sql/` folder of example queries, ERD (data contract), lake diagram in `docs/aws/architecture.md`
 - [x] README section on the data lake
 - [ ] Real aggregate production numbers (cost, turnaround, failure rate, OCR accuracy) after a month
